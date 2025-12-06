@@ -14,6 +14,7 @@ const prefix = "myr_";
 import { render_2d } from "./render_2d.js";
 import { render_webgl } from "./render_webgl.js";
 import { render_webgl_alt } from "./render_webgl_alt.js";
+import { render_webgpu } from "./render_webgpu.js";
 
 var webSocket;
 var RadarMessage;
@@ -102,6 +103,12 @@ window.onload = function () {
     } else if (draw == "alt") {
       renderer = new render_webgl_alt(
         document.getElementById("myr_canvas_webgl"),
+        document.getElementById("myr_canvas_background"),
+        drawBackground
+      );
+    } else if (draw == "webgpu") {
+      renderer = new render_webgpu(
+        document.getElementById("myr_canvas_webgpu"),
         document.getElementById("myr_canvas_background"),
         drawBackground
       );

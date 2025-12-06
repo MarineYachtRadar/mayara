@@ -142,16 +142,16 @@ div.myr_ppi {
   height: 100vh;
 }
 
-#myr_canvas {
+#myr_canvas_background {
     z-index: 1;
     position: absolute;
     left: 0;
     top: 0;
 }
 
-#myr_canvas_background {
+#myr_canvas, #myr_canvas_webgl, #myr_canvas_webgpu {
     z-index: 2;
     position: absolute;
     left: 0;
-    top: 0px;
+    top: 0;
 }

@@ -48,6 +48,13 @@ const RadarEntry = (id, name) =>
         { href: "viewer.html?id=" + id + "&draw=2d" },
         name + " PPI (2D Canvas)"
       )
+    ),
+    td(
+      { class: "myr" },
+      a(
+        { href: "viewer.html?id=" + id + "&draw=webgpu" },
+        name + " PPI (WebGPU)"
+      )
     )
   );
 
