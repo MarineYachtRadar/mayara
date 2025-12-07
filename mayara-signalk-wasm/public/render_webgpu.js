@@ -5,6 +5,7 @@ import { BlobDetector } from "./blob_detector.js";
 import { ContourTracer, PolygonSimplifier, ConvexHullExtractor, SectorExtractor } from "./contour_tracer.js";
 import { Triangulator } from "./triangulator.js";
 import { PolygonRenderer } from "./polygon_renderer.js";
+import { SpokeRenderer } from "./spoke_renderer.js";
 
 class render_webgpu {
   // The constructor gets two canvases, the real drawing one and one for background data
@@ -30,8 +31,11 @@ class render_webgpu {
       gamma: 1.6,                 // Color gamma correction
       edgeSoftness: 0.06,         // Edge anti-aliasing width
       sampleCount: 10,            // Number of angular samples (increased for more fill)
-      // Polygon mode settings
-      usePolygons: true,          // Enable polygon-based rendering
+      // Render mode: 'shader' (fragment shader), 'polygons' (blob detection), 'spokes' (raw spoke lines)
+      renderMode: 'spokes',       // Default to spoke-based rendering (like Furuno)
+      spokeThreshold: 5,          // Minimum value to render in spoke mode
+      // Polygon mode settings (legacy)
+      usePolygons: false,         // Enable polygon-based rendering (legacy)
       blobThreshold: 15,          // Threshold for blob detection
       minBlobSize: 30,            // Minimum blob size in pixels
       simplifyTolerance: 0.001,   // Douglas-Peucker tolerance (lower = more detail)
@@ -45,6 +49,9 @@ class render_webgpu {
     this.polygonRenderer = null;
     this.lastPolygonUpdate = 0;
     this.polygonUpdateInterval = 50; // ms between polygon updates
+
+    // Spoke renderer (like signalk-radar / Furuno)
+    this.spokeRenderer = null;
 
     // Create settings panel
     this.#createSettingsPanel();
@@ -99,12 +106,25 @@ class render_webgpu {
         </label>
 
         <div style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #444;">
-          <div style="font-weight: bold; margin-bottom: 10px; color: #0ff;">Polygon Mode</div>
+          <div style="font-weight: bold; margin-bottom: 10px; color: #0ff;">Render Mode</div>
 
           <label style="display: block; margin: 5px 0; color: #ccc; font-size: 12px;">
-            <input type="checkbox" id="webgpu_use_polygons" ${this.settings.usePolygons ? 'checked' : ''}>
-            Enable Polygon Rendering
+            Mode:
+            <select id="webgpu_render_mode" style="width: 100%; margin-top: 3px; background: #333; color: #fff; border: 1px solid #555; padding: 3px;">
+              <option value="spokes" ${this.settings.renderMode === 'spokes' ? 'selected' : ''}>Spoke Lines (Furuno-style)</option>
+              <option value="shader" ${this.settings.renderMode === 'shader' ? 'selected' : ''}>Fragment Shader</option>
+              <option value="polygons" ${this.settings.renderMode === 'polygons' ? 'selected' : ''}>Polygons (legacy)</option>
+            </select>
           </label>
+
+          <label style="display: block; margin: 5px 0; color: #ccc; font-size: 12px;">
+            Spoke Threshold: <span id="spoke_thresh_val">${this.settings.spokeThreshold}</span>
+            <input type="range" id="webgpu_spoke_threshold" min="1" max="50" value="${this.settings.spokeThreshold}" style="width: 100%;">
+          </label>
+        </div>
+
+        <div style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #444;">
+          <div style="font-weight: bold; margin-bottom: 10px; color: #888;">Polygon Mode (legacy)</div>
 
           <label style="display: block; margin: 5px 0; color: #ccc; font-size: 12px;">
             Blob Threshold: <span id="blob_thresh_val">${this.settings.blobThreshold}</span>
@@ -168,11 +188,19 @@ class render_webgpu {
       this.#updateSettingsBuffer();
     });
 
-    // Polygon mode event listeners
-    document.getElementById("webgpu_use_polygons").addEventListener("change", (e) => {
-      this.settings.usePolygons = e.target.checked;
+    // Render mode event listeners
+    document.getElementById("webgpu_render_mode").addEventListener("change", (e) => {
+      this.settings.renderMode = e.target.value;
+      this.settings.usePolygons = (e.target.value === 'polygons');
+      console.log(`Render mode changed to: ${this.settings.renderMode}`);
     });
 
+    document.getElementById("webgpu_spoke_threshold").addEventListener("input", (e) => {
+      this.settings.spokeThreshold = parseInt(e.target.value);
+      document.getElementById("spoke_thresh_val").textContent = this.settings.spokeThreshold;
+    });
+
+    // Polygon mode event listeners (legacy)
     document.getElementById("webgpu_blob_threshold").addEventListener("input", (e) => {
       this.settings.blobThreshold = parseInt(e.target.value);
       document.getElementById("blob_thresh_val").textContent = this.settings.blobThreshold;
@@ -314,6 +342,16 @@ class render_webgpu {
     this.hullExtractor = new ConvexHullExtractor(max_spoke_len, spokesPerRevolution);
     this.sectorExtractor = new SectorExtractor(max_spoke_len, spokesPerRevolution);
 
+    // Initialize spoke renderer (Furuno-style line rendering)
+    this.spokeRenderer = new SpokeRenderer(
+      this.device,
+      this.context,
+      this.canvasFormat,
+      spokesPerRevolution,
+      max_spoke_len
+    );
+    console.log("SpokeRenderer initialized");
+
     // Create polar data texture
     this.polarTexture = this.device.createTexture({
       size: [max_spoke_len, spokesPerRevolution],
@@ -361,6 +399,11 @@ class render_webgpu {
       { bytesPerRow: 256 * 4 },
       { width: 256, height: 1 }
     );
+
+    // Also update spoke renderer legend
+    if (this.spokeRenderer) {
+      this.spokeRenderer.setLegend(l);
+    }
 
     if (this.polarTexture) {
       this.#createPipelineAndBindGroup();
@@ -463,11 +506,29 @@ class render_webgpu {
 
   // Render accumulated spokes to screen
   render() {
-    if (!this.ready || !this.data || !this.pipeline) {
+    if (!this.ready || !this.data) {
       return;
     }
 
-    // Upload spoke data to GPU (always needed for shader-based rendering)
+    // Spoke-based rendering (Furuno-style)
+    if (this.settings.renderMode === 'spokes' && this.spokeRenderer) {
+      // Update spoke renderer with current data
+      this.spokeRenderer.updateFromSpokeData(this.data, this.settings.spokeThreshold);
+
+      // Set transformation matrix
+      this.spokeRenderer.setTransform(this.#getSpokeTransformMatrix());
+
+      // Render
+      this.spokeRenderer.renderStandalone();
+      return;
+    }
+
+    // Need pipeline for shader and polygon modes
+    if (!this.pipeline) {
+      return;
+    }
+
+    // Upload spoke data to GPU (needed for shader-based and polygon rendering)
     this.device.queue.writeTexture(
       { texture: this.polarTexture },
       this.data,
@@ -476,7 +537,7 @@ class render_webgpu {
     );
 
     // Polygon-based rendering
-    if (this.settings.usePolygons && this.blobDetector && this.polygonRenderer) {
+    if (this.settings.renderMode === 'polygons' && this.blobDetector && this.polygonRenderer) {
       const now = performance.now();
 
       // Throttle polygon updates for performance
@@ -490,7 +551,7 @@ class render_webgpu {
       return;
     }
 
-    // Traditional shader-based rendering
+    // Traditional shader-based rendering (default)
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
       colorAttachments: [
@@ -510,6 +571,40 @@ class render_webgpu {
     pass.end();
 
     this.device.queue.submit([encoder.finish()]);
+  }
+
+  // Get transformation matrix for spoke rendering
+  #getSpokeTransformMatrix() {
+    // Similar to polygon transform, but spoke vertices are already in [-1, 1] range
+
+    const aspectRatio = this.width && this.height ? this.width / this.height : 1.0;
+
+    let scaleX = 1.0;
+    let scaleY = 1.0;
+
+    if (aspectRatio > 1.0) {
+      scaleX = 1.0 / aspectRatio;
+    } else {
+      scaleY = aspectRatio;
+    }
+
+    // Apply range scaling if needed
+    const range = this.range || this.actual_range || 1500;
+    const rangeScale = this.actual_range > 0 ? this.actual_range / range : 1.0;
+    scaleX *= rangeScale;
+    scaleY *= rangeScale;
+
+    // No rotation needed - spoke renderer already outputs in correct orientation
+    // (0 = north/up, clockwise)
+
+    const matrix = new Float32Array([
+      scaleX, 0.0, 0.0, 0.0,
+      0.0, scaleY, 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      0.0, 0.0, 0.0, 1.0,
+    ]);
+
+    return matrix;
   }
 
   // Process spoke data into polygons
