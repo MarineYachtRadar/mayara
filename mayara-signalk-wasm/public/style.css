@@ -136,20 +136,20 @@ div.myr_ppi {
   float: left;
   display:flex;
   flex-direction:column;
-  background-color: rgb(32, 32, 32);
+  background-color: rgb(0, 0, 0);
   position: relative;
   width: calc(100% - 200px);
   height: 100vh;
 }
 
-#myr_canvas_background {
+#myr_canvas, #myr_canvas_webgl, #myr_canvas_webgpu {
     z-index: 1;
     position: absolute;
     left: 0;
     top: 0;
 }
 
-#myr_canvas, #myr_canvas_webgl, #myr_canvas_webgpu {
+#myr_canvas_background {
     z-index: 2;
     position: absolute;
     left: 0;

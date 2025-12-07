@@ -708,29 +708,40 @@ fn default_legend(session: Session, doppler: bool, pixel_values: u8) -> Legend {
         },
     });
 
+    // Start colors at 1/3 intensity (like signalk-radar) for more visible returns
+    const MIN_INTENSITY: f64 = 85.0; // WHITE / 3
+    const MAX_INTENSITY: f64 = 255.0;
+    let intensity_range = MAX_INTENSITY - MIN_INTENSITY;
+
     for v in 1..pixel_values {
         legend.pixels.push(Lookup {
             r#type: PixelType::Normal,
             color: Color {
                 // red starts at 2/3 and peaks at end
                 r: if v >= two_thirds {
-                    (255.0 * (v - two_thirds) as f64 / one_third as f64) as u8
+                    (MIN_INTENSITY + intensity_range * (v - two_thirds) as f64 / one_third as f64)
+                        as u8
                 } else {
                     0
                 },
                 // green starts at 1/3 and peaks at 2/3
                 g: if v >= one_third && v < two_thirds {
-                    (255.0 * (v - one_third) as f64 / one_third as f64) as u8
+                    (MIN_INTENSITY + intensity_range * (v - one_third) as f64 / one_third as f64)
+                        as u8
                 } else if v >= two_thirds {
-                    (255.0 * (pixels_with_color - v) as f64 / one_third as f64) as u8
+                    (MIN_INTENSITY
+                        + intensity_range * (pixels_with_color - v) as f64 / one_third as f64)
+                        as u8
                 } else {
                     0
                 },
                 // blue peaks at 1/3
                 b: if v < one_third {
-                    (255.0 * v as f64 / one_third as f64) as u8
+                    (MIN_INTENSITY + intensity_range * v as f64 / one_third as f64) as u8
                 } else if v >= one_third && v < two_thirds {
-                    (255.0 * (two_thirds - v) as f64 / one_third as f64) as u8
+                    (MIN_INTENSITY
+                        + intensity_range * (two_thirds - v) as f64 / one_third as f64)
+                        as u8
                 } else {
                     0
                 },

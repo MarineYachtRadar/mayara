@@ -52,28 +52,30 @@ impl From<&RadarDiscovery> for RadarState {
         let ip = d.address.split(':').next().unwrap_or(&d.address);
 
         // Build default legend (256 entries)
-        // Color gradient: black -> yellow -> orange -> dark red -> bright red
+        // Color gradient like TimeZero Pro: blue (weak) -> red (strong)
+        // Index 0 = transparent, indices 1-9 also transparent (noise floor)
+        // Real returns start at index 10+
         let mut legend = BTreeMap::new();
         for i in 0..256u16 {
-            let (r, g, b) = if i == 0 {
-                // Index 0: transparent/black background
+            let (r, g, b) = if i < 10 {
+                // Index 0-9: transparent/black (noise floor)
                 (0u8, 0u8, 0u8)
-            } else if i < 64 {
-                // 1-63: black to yellow (increase R and G)
-                let t = (i * 4) as u8;
-                (t, t, 0)
-            } else if i < 128 {
-                // 64-127: yellow to orange (G decreases)
-                let t = ((128 - i) * 4) as u8;
-                (255, t, 0)
-            } else if i < 192 {
-                // 128-191: orange to dark red (R stays, G already 0)
-                let t = ((192 - i) * 4) as u8;
-                (128 + t / 2, 0, 0)
+            } else if i < 20 {
+                // 10-19: dark blue (very weak returns)
+                let t = ((i - 10) * 15) as u8;
+                (0, 0, 80 + t)
+            } else if i < 40 {
+                // 20-39: blue to purple transition
+                let t = ((i - 20) * 10) as u8;
+                (t * 2, 0, 180 - t)
+            } else if i < 60 {
+                // 40-59: purple to red transition
+                let t = ((i - 40) * 8) as u8;
+                (180 + t / 2, 0, 80 - t)
             } else {
-                // 192-255: dark red to bright red
-                let t = ((i - 192) * 2) as u8;
-                (180 + t, t / 3, t / 4)
+                // 60-255: red to bright red (strong returns)
+                let t = ((i - 60) as u16 * 55 / 196).min(55) as u8;
+                (220 + t / 2, t / 2, t / 3)
             };
             let color = format!("#{:02X}{:02X}{:02X}", r, g, b);
             legend.insert(i.to_string(), LegendEntry { color });

@@ -16,8 +16,130 @@ class render_webgpu {
     this.pendingLegend = null;
     this.pendingSpokes = null;
 
+    // Tunable settings (can be adjusted via settings panel)
+    this.settings = {
+      transparencyThreshold: 11,  // Values below this are transparent (0-255)
+      fillMultiplier: 2.4,        // Angular fill multiplier
+      radialFill: 2.6,            // Radial fill expansion
+      spokeCount: 2048,           // Number of spokes
+      interpolation: 0.3,         // 0=max only, 1=mix+max
+      gamma: 1.6,                 // Color gamma correction
+      edgeSoftness: 0.06,         // Edge anti-aliasing width
+      sampleCount: 6,             // Number of angular samples (1-15)
+    };
+
+    // Create settings panel
+    this.#createSettingsPanel();
+
     // Start async initialization
     this.initPromise = this.#initWebGPU();
+  }
+
+  #createSettingsPanel() {
+    const controller = document.getElementById("myr_controller");
+    if (!controller) return;
+
+    const settingsDiv = document.createElement("div");
+    settingsDiv.id = "myr_webgpu_settings";
+    settingsDiv.innerHTML = `
+      <div style="margin-top: 20px; padding: 10px; border-top: 1px solid #555;">
+        <div style="font-weight: bold; margin-bottom: 10px; color: #0f0;">WebGPU Settings</div>
+
+        <label style="display: block; margin: 5px 0; color: #ccc; font-size: 12px;">
+          Transparency: <span id="thresh_val">${this.settings.transparencyThreshold}</span>
+          <input type="range" id="webgpu_threshold" min="0" max="50" value="${this.settings.transparencyThreshold}" style="width: 100%;">
+        </label>
+
+        <label style="display: block; margin: 5px 0; color: #ccc; font-size: 12px;">
+          Angular Fill: <span id="fill_val">${this.settings.fillMultiplier.toFixed(1)}</span>
+          <input type="range" id="webgpu_fill" min="0" max="200" value="${this.settings.fillMultiplier * 10}" style="width: 100%;">
+        </label>
+
+        <label style="display: block; margin: 5px 0; color: #ccc; font-size: 12px;">
+          Radial Fill: <span id="radial_val">${this.settings.radialFill.toFixed(1)}</span>
+          <input type="range" id="webgpu_radial" min="0" max="100" value="${this.settings.radialFill * 10}" style="width: 100%;">
+        </label>
+
+        <label style="display: block; margin: 5px 0; color: #ccc; font-size: 12px;">
+          Samples: <span id="samples_val">${this.settings.sampleCount}</span>
+          <input type="range" id="webgpu_samples" min="1" max="15" value="${this.settings.sampleCount}" style="width: 100%;">
+        </label>
+
+        <label style="display: block; margin: 5px 0; color: #ccc; font-size: 12px;">
+          Interpolation: <span id="interp_val">${this.settings.interpolation.toFixed(1)}</span>
+          <input type="range" id="webgpu_interp" min="0" max="10" value="${this.settings.interpolation * 10}" style="width: 100%;">
+        </label>
+
+        <label style="display: block; margin: 5px 0; color: #ccc; font-size: 12px;">
+          Gamma: <span id="gamma_val">${this.settings.gamma.toFixed(1)}</span>
+          <input type="range" id="webgpu_gamma" min="1" max="30" value="${this.settings.gamma * 10}" style="width: 100%;">
+        </label>
+
+        <label style="display: block; margin: 5px 0; color: #ccc; font-size: 12px;">
+          Edge Soft: <span id="edge_val">${this.settings.edgeSoftness.toFixed(2)}</span>
+          <input type="range" id="webgpu_edge" min="0" max="20" value="${this.settings.edgeSoftness * 100}" style="width: 100%;">
+        </label>
+      </div>
+    `;
+    controller.appendChild(settingsDiv);
+
+    // Event listeners for all sliders
+    document.getElementById("webgpu_threshold").addEventListener("input", (e) => {
+      this.settings.transparencyThreshold = parseInt(e.target.value);
+      document.getElementById("thresh_val").textContent = this.settings.transparencyThreshold;
+      this.#updateSettingsBuffer();
+    });
+
+    document.getElementById("webgpu_fill").addEventListener("input", (e) => {
+      this.settings.fillMultiplier = parseInt(e.target.value) / 10;
+      document.getElementById("fill_val").textContent = this.settings.fillMultiplier.toFixed(1);
+      this.#updateSettingsBuffer();
+    });
+
+    document.getElementById("webgpu_radial").addEventListener("input", (e) => {
+      this.settings.radialFill = parseInt(e.target.value) / 10;
+      document.getElementById("radial_val").textContent = this.settings.radialFill.toFixed(1);
+      this.#updateSettingsBuffer();
+    });
+
+    document.getElementById("webgpu_samples").addEventListener("input", (e) => {
+      this.settings.sampleCount = parseInt(e.target.value);
+      document.getElementById("samples_val").textContent = this.settings.sampleCount;
+      this.#updateSettingsBuffer();
+    });
+
+    document.getElementById("webgpu_interp").addEventListener("input", (e) => {
+      this.settings.interpolation = parseInt(e.target.value) / 10;
+      document.getElementById("interp_val").textContent = this.settings.interpolation.toFixed(1);
+      this.#updateSettingsBuffer();
+    });
+
+    document.getElementById("webgpu_gamma").addEventListener("input", (e) => {
+      this.settings.gamma = parseInt(e.target.value) / 10;
+      document.getElementById("gamma_val").textContent = this.settings.gamma.toFixed(1);
+      this.#updateSettingsBuffer();
+    });
+
+    document.getElementById("webgpu_edge").addEventListener("input", (e) => {
+      this.settings.edgeSoftness = parseInt(e.target.value) / 100;
+      document.getElementById("edge_val").textContent = this.settings.edgeSoftness.toFixed(2);
+      this.#updateSettingsBuffer();
+    });
+  }
+
+  #updateSettingsBuffer() {
+    if (!this.ready || !this.settingsBuffer) return;
+    const settingsData = new Float32Array([
+      this.settings.transparencyThreshold / 255.0,
+      this.settings.fillMultiplier,
+      this.settings.radialFill,
+      this.settings.sampleCount,
+      this.settings.interpolation,
+      this.settings.gamma,
+      this.settings.edgeSoftness,
+      0.0  // Padding
+    ]);
+    this.device.queue.writeBuffer(this.settingsBuffer, 0, settingsData);
   }
 
   async #initWebGPU() {
@@ -58,6 +180,13 @@ class render_webgpu {
       size: 64, // 4x4 matrix = 16 floats = 64 bytes
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+
+    // Create settings buffer for shader parameters
+    this.settingsBuffer = this.device.createBuffer({
+      size: 32, // 8 floats = 32 bytes
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.#updateSettingsBuffer();
 
     // Create vertex buffer for fullscreen quad
     // TexCoords match WebGL: [0,0], [1,0], [0,1], [1,1]
@@ -185,6 +314,11 @@ class render_webgpu {
           visibility: GPUShaderStage.VERTEX,
           buffer: { type: "uniform" },
         },
+        {
+          binding: 4,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: "uniform" },
+        },
       ],
     });
 
@@ -227,6 +361,7 @@ class render_webgpu {
         { binding: 1, resource: this.colorTexture.createView() },
         { binding: 2, resource: this.sampler },
         { binding: 3, resource: { buffer: this.uniformBuffer } },
+        { binding: 4, resource: { buffer: this.settingsBuffer } },
       ],
     });
   }
@@ -250,7 +385,6 @@ class render_webgpu {
   // Render accumulated spokes to screen
   render() {
     if (!this.ready || !this.data || !this.pipeline) {
-      console.log("WebGPU render skipped - ready:", this.ready, "data:", !!this.data, "pipeline:", !!this.pipeline);
       return;
     }
 
@@ -349,12 +483,26 @@ class render_webgpu {
 }
 
 const shaderCode = `
+const PI: f32 = 3.14159265359;
+
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
   @location(0) texCoord: vec2<f32>,
 }
 
+struct Settings {
+  transparencyThreshold: f32,
+  fillMultiplier: f32,
+  radialFill: f32,
+  sampleCount: f32,
+  interpolation: f32,
+  gamma: f32,
+  edgeSoftness: f32,
+  pad: f32,
+}
+
 @group(0) @binding(3) var<uniform> u_transform: mat4x4<f32>;
+@group(0) @binding(4) var<uniform> settings: Settings;
 
 @vertex
 fn vertexMain(
@@ -376,23 +524,95 @@ fn fragmentMain(@location(0) texCoord: vec2<f32>) -> @location(0) vec4<f32> {
   // Convert texture coordinates to polar coordinates
   let centered = texCoord - vec2<f32>(0.5, 0.5);
   let r = length(centered) * 2.0;
-  let theta = atan2(centered.y, centered.x);
 
-  // Normalize theta to [0, 1] range (matches WebGL shader)
-  let normalizedTheta = 1.0 - (theta + 3.14159265) / (2.0 * 3.14159265);
+  // Outside radar circle -> transparent
+  let insideCircle = step(r, 1.0);
 
-  // Sample the index from polar data texture (always sample, avoid non-uniform control flow)
-  let index = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta)).r;
+  // Calculate angle, normalize to [0, 1]
+  var theta = atan2(centered.y, centered.x);
+  if (theta < 0.0) {
+    theta = theta + 2.0 * PI;
+  }
+  let normalizedTheta = theta / (2.0 * PI);
+
+  // Angular interpolation between adjacent spokes
+  let spokeCount = 2048.0;
+  let spoke_f = normalizedTheta * spokeCount;
+  let spoke0 = floor(spoke_f);
+  let spoke1 = spoke0 + 1.0;
+  let t = fract(spoke_f);
+
+  // Sample two adjacent spokes for interpolation
+  let uv0 = vec2<f32>(r, spoke0 / spokeCount);
+  let uv1 = vec2<f32>(r, spoke1 / spokeCount);
+  let idx0 = textureSample(polarData, texSampler, uv0).r;
+  let idx1 = textureSample(polarData, texSampler, uv1).r;
+
+  // Interpolated value between spokes
+  let interpIndex = mix(idx0, idx1, t);
+
+  // Angular fill expansion sampling
+  let angularStep = settings.fillMultiplier / spokeCount;
+  let radialStep = settings.radialFill * 0.01;
+
+  // Sample grid around the pixel for better fill
+  // Angular samples at different offsets
+  var maxIndex = interpIndex * settings.interpolation;
+
+  // Sample 1: center
+  let s0 = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta)).r;
+  maxIndex = max(maxIndex, s0);
+
+  // Sample 2-3: angular +/-
+  let s1 = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta + angularStep)).r;
+  let s2 = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta - angularStep)).r;
+  maxIndex = max(maxIndex, max(s1, s2));
+
+  // Sample 4-5: angular +/- x2 (if sampleCount > 3)
+  let s3 = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta + angularStep * 2.0)).r;
+  let s4 = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta - angularStep * 2.0)).r;
+  let use45 = step(3.0, settings.sampleCount);
+  maxIndex = max(maxIndex, max(s3, s4) * use45);
+
+  // Sample 6-7: angular +/- x3 (if sampleCount > 5)
+  let s5 = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta + angularStep * 3.0)).r;
+  let s6 = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta - angularStep * 3.0)).r;
+  let use67 = step(5.0, settings.sampleCount);
+  maxIndex = max(maxIndex, max(s5, s6) * use67);
+
+  // Sample 8-9: radial +/- (if sampleCount > 7)
+  let s7 = textureSample(polarData, texSampler, vec2<f32>(r + radialStep, normalizedTheta)).r;
+  let s8 = textureSample(polarData, texSampler, vec2<f32>(r - radialStep, normalizedTheta)).r;
+  let use89 = step(7.0, settings.sampleCount);
+  maxIndex = max(maxIndex, max(s7, s8) * use89);
+
+  // Sample 10-13: diagonal radial+angular (if sampleCount > 9)
+  let s9 = textureSample(polarData, texSampler, vec2<f32>(r + radialStep, normalizedTheta + angularStep)).r;
+  let s10 = textureSample(polarData, texSampler, vec2<f32>(r + radialStep, normalizedTheta - angularStep)).r;
+  let s11 = textureSample(polarData, texSampler, vec2<f32>(r - radialStep, normalizedTheta + angularStep)).r;
+  let s12 = textureSample(polarData, texSampler, vec2<f32>(r - radialStep, normalizedTheta - angularStep)).r;
+  let useDiag = step(9.0, settings.sampleCount);
+  maxIndex = max(maxIndex, max(max(s9, s10), max(s11, s12)) * useDiag);
+
+  // Sample 14-15: angular +/- x4 (if sampleCount > 13)
+  let s13 = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta + angularStep * 4.0)).r;
+  let s14 = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta - angularStep * 4.0)).r;
+  let use1415 = step(13.0, settings.sampleCount);
+  maxIndex = max(maxIndex, max(s13, s14) * use1415);
+
+  // Apply gamma correction
+  let finalIndex = pow(maxIndex, 1.0 / settings.gamma);
 
   // Look up color from color table
-  let color = textureSample(colorTable, texSampler, vec2<f32>(index, 0.0));
+  let color = textureSample(colorTable, texSampler, vec2<f32>(finalIndex, 0.0));
 
-  // Use step functions to mask out areas (avoids if statements)
-  // Outside radar circle (r > 1.0) or index 0 (no data) -> transparent
-  let insideCircle = step(r, 1.0);  // 1.0 if r <= 1.0, else 0.0
-  let hasData = step(0.004, index);  // 1.0 if index >= 0.004, else 0.0
-  let alpha = insideCircle * hasData * color.a;
+  // Soft edge anti-aliasing at radar boundary
+  let edgeFade = smoothstep(1.0, 1.0 - settings.edgeSoftness, r);
 
-  return vec4<f32>(color.rgb, alpha);
+  // Threshold check
+  let aboveThreshold = step(settings.transparencyThreshold, finalIndex);
+  let alpha = insideCircle * aboveThreshold * color.a * edgeFade;
+
+  return vec4<f32>(color.rgb * alpha, alpha);
 }
 `;

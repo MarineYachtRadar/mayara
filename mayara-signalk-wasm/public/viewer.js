@@ -284,8 +284,8 @@ function drawBackground(obj, txt) {
   // Use actual_range as fallback if range not set from controls
   const range = obj.range || obj.actual_range;
 
-  obj.background_ctx.strokeStyle = "white";
-  obj.background_ctx.fillStyle = "white";
+  obj.background_ctx.strokeStyle = "#00ff00";
+  obj.background_ctx.fillStyle = "#00ff00";
   obj.background_ctx.font = "bold 16px/1 Verdana, Geneva, sans-serif";
   for (let i = 0; i <= 4; i++) {
     obj.background_ctx.beginPath();
