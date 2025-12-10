@@ -91,6 +91,45 @@ div.myr_button {
   display: block;
 }
 
+/* Power buttons container */
+div.myr_power_buttons {
+  display: flex;
+  gap: 8px;
+  margin: 8px 2px;
+  padding: 4px;
+}
+
+/* Power buttons styling */
+.myr_power_button {
+  flex: 1;
+  padding: 12px 8px;
+  font-size: 14px;
+  font-weight: bold;
+  border: 2px solid #444;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background-color: #222;
+  color: #888;
+}
+
+.myr_power_button:hover {
+  border-color: #666;
+  background-color: #333;
+}
+
+.myr_power_button_transmit.myr_power_active {
+  background-color: #1a4d1a;
+  border-color: #2d8a2d;
+  color: #4dff4d;
+}
+
+.myr_power_button_standby.myr_power_active {
+  background-color: #4d4d1a;
+  border-color: #8a8a2d;
+  color: #ffff4d;
+}
+
 div.myr_button::after {
   content: "";
   clear: both;

@@ -59,6 +59,31 @@ extern "C" {
     ) -> i32;
     fn sk_udp_close(socket_id: i32);
     fn sk_udp_pending(socket_id: i32) -> i32;
+    fn sk_udp_set_broadcast(socket_id: i32, enabled: i32) -> i32;
+
+    // TCP Socket functions (rawSockets capability)
+    fn sk_tcp_create() -> i32;
+    fn sk_tcp_connect(
+        socket_id: i32,
+        addr_ptr: *const u8,
+        addr_len: usize,
+        port: u16,
+    ) -> i32;
+    fn sk_tcp_connected(socket_id: i32) -> i32;
+    fn sk_tcp_set_line_buffering(socket_id: i32, line_buffering: i32) -> i32;
+    fn sk_tcp_send(socket_id: i32, data_ptr: *const u8, data_len: usize) -> i32;
+    fn sk_tcp_recv_line(
+        socket_id: i32,
+        buf_ptr: *mut u8,
+        buf_max_len: usize,
+    ) -> i32;
+    fn sk_tcp_recv_raw(
+        socket_id: i32,
+        buf_ptr: *mut u8,
+        buf_max_len: usize,
+    ) -> i32;
+    fn sk_tcp_pending(socket_id: i32) -> i32;
+    fn sk_tcp_close(socket_id: i32);
 }
 
 // =============================================================================
@@ -136,6 +161,18 @@ impl UdpSocket {
     /// Use 0 for any available port.
     pub fn bind_port(&self, port: u16) -> Result<(), i32> {
         let result = unsafe { sk_udp_bind(self.id, port) };
+        if result < 0 {
+            Err(result)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Enable or disable broadcast mode
+    ///
+    /// Must be enabled before sending to broadcast addresses.
+    pub fn set_broadcast(&self, enabled: bool) -> Result<(), i32> {
+        let result = unsafe { sk_udp_set_broadcast(self.id, if enabled { 1 } else { 0 }) };
         if result < 0 {
             Err(result)
         } else {
@@ -229,6 +266,149 @@ impl UdpSocket {
 }
 
 impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+// =============================================================================
+// TCP Socket wrapper
+// =============================================================================
+
+/// A TCP socket wrapper that uses SignalK's host socket implementation
+///
+/// Supports both line-buffered (text protocol) and raw (binary) modes.
+/// Default is line-buffered mode, suitable for protocols like Furuno that
+/// use \r\n terminated commands.
+pub struct TcpSocket {
+    id: i32,
+}
+
+impl TcpSocket {
+    /// Create a new TCP socket
+    pub fn new() -> Result<Self, i32> {
+        let id = unsafe { sk_tcp_create() };
+        if id < 0 {
+            Err(id)
+        } else {
+            Ok(Self { id })
+        }
+    }
+
+    /// Connect to a remote host
+    ///
+    /// This initiates a connection asynchronously. Use `is_connected()` to check status.
+    pub fn connect(&self, addr: &str, port: u16) -> Result<(), i32> {
+        let result = unsafe {
+            sk_tcp_connect(self.id, addr.as_ptr(), addr.len(), port)
+        };
+        if result < 0 {
+            Err(result)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Check if the socket is connected
+    pub fn is_connected(&self) -> bool {
+        unsafe { sk_tcp_connected(self.id) == 1 }
+    }
+
+    /// Check if the socket exists (not closed/errored)
+    /// Returns false if the socket was closed due to error
+    pub fn is_valid(&self) -> bool {
+        unsafe { sk_tcp_connected(self.id) >= 0 }
+    }
+
+    /// Set buffering mode
+    ///
+    /// * `true` - Line-buffered mode (default): receives complete \r\n or \n terminated lines
+    /// * `false` - Raw mode: receives binary data chunks as they arrive
+    pub fn set_line_buffering(&self, enabled: bool) -> Result<(), i32> {
+        let result = unsafe {
+            sk_tcp_set_line_buffering(self.id, if enabled { 1 } else { 0 })
+        };
+        if result < 0 {
+            Err(result)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Send data over the connection
+    pub fn send(&self, data: &[u8]) -> Result<usize, i32> {
+        if !self.is_connected() {
+            return Err(-1);
+        }
+        let result = unsafe {
+            sk_tcp_send(self.id, data.as_ptr(), data.len())
+        };
+        if result < 0 {
+            Err(result)
+        } else {
+            Ok(result as usize)
+        }
+    }
+
+    /// Send a string with \r\n terminator
+    pub fn send_line(&self, line: &str) -> Result<usize, i32> {
+        let data = format!("{}\r\n", line);
+        self.send(data.as_bytes())
+    }
+
+    /// Receive a complete line (non-blocking)
+    ///
+    /// Only works in line-buffered mode. Returns None if no complete line is available.
+    pub fn recv_line(&self, buf: &mut [u8]) -> Option<usize> {
+        let result = unsafe {
+            sk_tcp_recv_line(self.id, buf.as_mut_ptr(), buf.len())
+        };
+        if result <= 0 {
+            None
+        } else {
+            Some(result as usize)
+        }
+    }
+
+    /// Receive a line as a String (non-blocking)
+    ///
+    /// Convenience method that allocates a buffer and returns a String.
+    pub fn recv_line_string(&self) -> Option<String> {
+        let mut buf = [0u8; 1024];
+        self.recv_line(&mut buf).map(|len| {
+            String::from_utf8_lossy(&buf[..len]).to_string()
+        })
+    }
+
+    /// Receive raw data (non-blocking)
+    ///
+    /// Only works in raw mode. Returns None if no data is available.
+    pub fn recv_raw(&self, buf: &mut [u8]) -> Option<usize> {
+        let result = unsafe {
+            sk_tcp_recv_raw(self.id, buf.as_mut_ptr(), buf.len())
+        };
+        if result <= 0 {
+            None
+        } else {
+            Some(result as usize)
+        }
+    }
+
+    /// Get number of buffered items waiting to be received
+    pub fn pending(&self) -> i32 {
+        unsafe { sk_tcp_pending(self.id) }
+    }
+
+    /// Close the socket
+    pub fn close(&mut self) {
+        if self.id >= 0 {
+            unsafe { sk_tcp_close(self.id) };
+            self.id = -1;
+        }
+    }
+}
+
+impl Drop for TcpSocket {
     fn drop(&mut self) {
         self.close();
     }

@@ -30,10 +30,10 @@
 │     (Native Runtime)            │  │                               │
 │                                 │  │   - sk_udp_create/bind/send   │
 │   - Tokio async runtime         │  │   - sk_udp_recv (non-block)   │
-│   - tokio::net::UdpSocket       │  │   - Provided by SignalK       │
-│   - Platform networking         │  │                               │
-│   - Session management          │  └───────────────────────────────┘
-└────────────┬────────────────────┘
+│   - tokio::net::UdpSocket       │  │   - sk_tcp_create/connect     │
+│   - Platform networking         │  │   - sk_tcp_send/recv_line     │
+│   - Session management          │  │   - Provided by SignalK       │
+└────────────┬────────────────────┘  └───────────────────────────────┘
              │
              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -66,6 +66,7 @@
 **Contains**:
 - Protocol constants (ports, headers, addresses)
 - Packet parsing functions (`&[u8]` → `Result<T>`)
+- Command formatting functions (pure string generation)
 - Data structures (RadarInfo, Legend, Controls)
 - Spoke data structures and encoding
 - Protobuf RadarMessage generation
@@ -295,10 +296,11 @@ Radar Hardware
 - [ ] Verify mayara-server still works
 
 ### Phase 3: Create mayara-wasm
-- [ ] New crate targeting wasm32-wasip1
-- [ ] Implement SignalK socket FFI wrappers
-- [ ] Implement radar locator using mayara-core
-- [ ] Register as SignalK Radar Provider
+- [x] New crate targeting wasm32-wasip1 (wasm32-unknown-unknown)
+- [x] Implement SignalK socket FFI wrappers (UDP + TCP)
+- [x] Implement radar locator using mayara-core
+- [x] Register as SignalK Radar Provider
+- [x] FurunoController for direct TCP radar control
 - [ ] Test with real hardware
 
 ### Phase 4: SignalK Radar API (separate PR)
@@ -328,7 +330,9 @@ mayara/
 │       ├── spoke.rs              # Spoke data structures
 │       ├── protocol/
 │       │   ├── mod.rs
-│       │   ├── furuno.rs         # Furuno parsing
+│       │   ├── furuno/
+│       │   │   ├── mod.rs        # Furuno parsing
+│       │   │   └── command.rs    # Furuno command formatting
 │       │   ├── navico.rs         # Navico parsing
 │       │   ├── raymarine.rs      # Raymarine parsing
 │       │   └── garmin.rs         # Garmin parsing
@@ -349,14 +353,17 @@ mayara/
 │   │   └── main.rs
 │   └── web/                      # Existing web UI (also used by webapp)
 │
-├── mayara-wasm/                  # NEW: SignalK WASM plugin
+├── mayara-signalk-wasm/          # SignalK WASM plugin
 │   ├── Cargo.toml
 │   ├── package.json              # SignalK WASM plugin manifest
 │   └── src/
 │       ├── lib.rs                # WASM exports
-│       ├── signalk_ffi.rs        # Socket/delta FFI
-│       ├── locator.rs            # Poll-based locator
-│       └── radar_provider.rs     # SignalK Radar API
+│       ├── signalk_ffi.rs        # Socket/delta FFI (UDP + TCP)
+│       ├── locator.rs            # Poll-based radar locator
+│       ├── radar_provider.rs     # SignalK Radar API
+│       ├── furuno_controller.rs  # Direct TCP radar control
+│       ├── spoke_receiver.rs     # Spoke data reception
+│       └── protobuf.rs           # Protobuf encoding
 │
 └── mayara-webapp/                # NEW: SignalK WebApp (radar display)
     ├── package.json              # SignalK webapp manifest

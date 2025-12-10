@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use mayara_core::radar::RadarDiscovery;
 
+use crate::furuno_controller::FurunoController;
 use crate::locator::RadarLocator;
 use crate::signalk_ffi::{debug, emit_json};
 use crate::spoke_receiver::SpokeReceiver;
@@ -133,6 +134,8 @@ impl From<&RadarDiscovery> for RadarState {
 pub struct RadarProvider {
     locator: RadarLocator,
     spoke_receiver: SpokeReceiver,
+    /// TCP controllers for Furuno radars (keyed by radar ID)
+    furuno_controllers: BTreeMap<String, FurunoController>,
     poll_count: u64,
 }
 
@@ -145,6 +148,7 @@ impl RadarProvider {
         Self {
             locator,
             spoke_receiver: SpokeReceiver::new(),
+            furuno_controllers: BTreeMap::new(),
             poll_count: 0,
         }
     }
@@ -164,26 +168,41 @@ impl RadarProvider {
             self.emit_radar_discovered(discovery);
         }
 
-        // Register ALL Furuno radars for spoke tracking (not just new ones)
+        // Register ALL Furuno radars for spoke tracking and create controllers
         // This ensures radars discovered before spoke_receiver was ready are also tracked
         let radar_count = self.locator.radars.len();
         if self.poll_count % 100 == 1 {
             debug(&format!("Checking {} radars for spoke tracking", radar_count));
         }
 
-        for radar_info in self.locator.radars.values() {
+        // Collect radar info first to avoid borrow issues
+        let furuno_radars: Vec<(String, String)> = self.locator.radars.values()
+            .filter(|r| r.discovery.brand == mayara_core::Brand::Furuno)
+            .map(|r| {
+                let state = RadarState::from(&r.discovery);
+                let ip = r.discovery.address.split(':').next().unwrap_or(&r.discovery.address).to_string();
+                (state.id, ip)
+            })
+            .collect();
+
+        for (radar_id, ip) in furuno_radars {
             if self.poll_count % 100 == 1 {
-                debug(&format!("Radar: {} brand={:?}", radar_info.discovery.name, radar_info.discovery.brand));
+                debug(&format!("Furuno radar {} at {} for spokes", radar_id, ip));
             }
-            if radar_info.discovery.brand == mayara_core::Brand::Furuno {
-                let state = RadarState::from(&radar_info.discovery);
-                let ip = radar_info.discovery.address.split(':').next().unwrap_or(&radar_info.discovery.address);
-                if self.poll_count % 100 == 1 {
-                    debug(&format!("Registering Furuno {} at {} for spokes", state.id, ip));
-                }
-                // add_furuno_radar checks for duplicates internally
-                self.spoke_receiver.add_furuno_radar(&state.id, ip);
+            // Register for spoke tracking
+            self.spoke_receiver.add_furuno_radar(&radar_id, &ip);
+
+            // Create controller if not exists
+            if !self.furuno_controllers.contains_key(&radar_id) {
+                debug(&format!("Creating FurunoController for {}", radar_id));
+                let controller = FurunoController::new(&radar_id, &ip);
+                self.furuno_controllers.insert(radar_id.clone(), controller);
             }
+        }
+
+        // Poll all Furuno controllers
+        for controller in self.furuno_controllers.values_mut() {
+            controller.poll();
         }
 
         // Poll for spoke data and emit to SignalK stream
@@ -285,10 +304,31 @@ impl RadarProvider {
 
     /// Set radar power state
     pub fn set_power(&mut self, radar_id: &str, state: &str) -> bool {
-        debug(&format!("set_power({}, {})", radar_id, state));
+        debug(&format!("set_power({}, {}) - {} controllers registered",
+            radar_id, state, self.furuno_controllers.len()));
 
+        // Debug: list all controller IDs
+        for id in self.furuno_controllers.keys() {
+            debug(&format!("  Registered controller: '{}'", id));
+        }
+
+        // For Furuno radars, use the direct TCP controller
+        if let Some(controller) = self.furuno_controllers.get_mut(radar_id) {
+            let transmit = state == "transmit";
+            debug(&format!("Using FurunoController for {} (transmit={})", radar_id, transmit));
+
+            // Send announce packets immediately before TCP connection attempt
+            // The radar only accepts TCP from clients that have recently announced
+            self.locator.send_furuno_announce();
+
+            controller.set_transmit(transmit);
+            return true;
+        }
+
+        debug(&format!("No FurunoController found for '{}', falling back to UDP", radar_id));
+
+        // Fallback to UDP for other radar types (requires mayara-server)
         if let Some(radar) = self.find_radar(radar_id) {
-            // Send command to mayara-server via UDP
             let ip = radar.discovery.address.split(':').next().unwrap_or("127.0.0.1");
             let cmd = serde_json::json!({
                 "type": "set_power",

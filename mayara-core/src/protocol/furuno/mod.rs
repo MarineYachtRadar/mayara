@@ -3,6 +3,8 @@
 //! This module contains pure parsing functions for Furuno radar packets.
 //! No I/O operations - just `&[u8]` → `Result<T>` functions.
 
+pub mod command;
+
 use serde::Deserialize;
 use crate::error::ParseError;
 use crate::Brand;

@@ -79,6 +79,76 @@ const ButtonValue = (id, name) =>
     )
   );
 
+const PowerButton = (state, label, isActive) =>
+  button(
+    {
+      type: "button",
+      class: `myr_power_button ${isActive ? "myr_power_active" : ""}`,
+      onclick: () => sendPowerCommand(state),
+    },
+    label
+  );
+
+function sendPowerCommand(state) {
+  if (!myr_radar) return;
+
+  // Find the power control ID (typically "1")
+  let powerControlId = null;
+  for (const [k, v] of Object.entries(myr_controls)) {
+    if (v.name === "Power") {
+      powerControlId = k;
+      break;
+    }
+  }
+
+  if (powerControlId) {
+    const message = { id: powerControlId, value: state };
+    const cv = JSON.stringify(message);
+    sendControlMessage(cv, "Power");
+
+    // Update button states immediately for responsiveness
+    updatePowerButtonStates(state);
+  }
+}
+
+function updatePowerButtonStates(activeState) {
+  const transmitBtn = document.querySelector(".myr_power_button_transmit");
+  const standbyBtn = document.querySelector(".myr_power_button_standby");
+
+  if (transmitBtn) {
+    transmitBtn.classList.toggle("myr_power_active", activeState === "transmit");
+  }
+  if (standbyBtn) {
+    standbyBtn.classList.toggle("myr_power_active", activeState === "standby");
+  }
+}
+
+function buildPowerButtons(container) {
+  const currentStatus = myr_radar.status || "standby";
+
+  const powerDiv = div(
+    { class: "myr_power_buttons" },
+    button(
+      {
+        type: "button",
+        class: `myr_power_button myr_power_button_transmit ${currentStatus === "transmit" ? "myr_power_active" : ""}`,
+        onclick: () => sendPowerCommand("transmit"),
+      },
+      "Transmit"
+    ),
+    button(
+      {
+        type: "button",
+        class: `myr_power_button myr_power_button_standby ${currentStatus === "standby" ? "myr_power_active" : ""}`,
+        onclick: () => sendPowerCommand("standby"),
+      },
+      "Standby"
+    )
+  );
+
+  van.add(container, powerDiv);
+}
+
 const AutoButton = (id) =>
   div(
     { class: "myr_button" },
@@ -327,6 +397,14 @@ function setControl(v) {
       }
     }
 
+    // Update power buttons when Status or Power control changes
+    if (control.name === "Status" || control.name === "Power") {
+      const state = String(v.value).toLowerCase();
+      if (state === "transmit" || state === "standby") {
+        updatePowerButtonStates(state);
+      }
+    }
+
     myr_control_callbacks.forEach((cb) => {
       cb(control, v);
     });
@@ -344,6 +422,10 @@ function buildControls() {
 
   c = get_element_by_server_id("controls");
   c.innerHTML = "";
+
+  // Add power buttons at the top
+  buildPowerButtons(c);
+
   for (const [k, v] of Object.entries(myr_controls)) {
     if (v["isReadOnly"]) {
       if (k == 0) {

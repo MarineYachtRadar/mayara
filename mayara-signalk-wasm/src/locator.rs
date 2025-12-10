@@ -10,6 +10,9 @@ use mayara_core::radar::RadarDiscovery;
 
 use crate::signalk_ffi::{debug, set_error, UdpSocket};
 
+/// Furuno beacon/announce broadcast address
+const FURUNO_BEACON_BROADCAST: &str = "172.31.255.255";
+
 /// A discovered radar with its metadata
 #[derive(Debug, Clone)]
 pub struct DiscoveredRadar {
@@ -19,7 +22,8 @@ pub struct DiscoveredRadar {
 
 /// Radar locator that discovers radars on the network
 pub struct RadarLocator {
-    /// Furuno beacon socket
+    /// Furuno beacon socket (for receiving beacons AND sending announces)
+    /// Both use port 10010 - the radar requires announces from the beacon port
     furuno_socket: Option<UdpSocket>,
     /// Navico BR24 beacon socket
     navico_br24_socket: Option<UdpSocket>,
@@ -35,6 +39,9 @@ pub struct RadarLocator {
 
     /// Current timestamp (updated externally)
     pub current_time_ms: u64,
+
+    /// Poll counter for periodic announce
+    poll_count: u64,
 }
 
 impl RadarLocator {
@@ -48,6 +55,7 @@ impl RadarLocator {
             garmin_socket: None,
             radars: BTreeMap::new(),
             current_time_ms: 0,
+            poll_count: 0,
         }
     }
 
@@ -61,20 +69,67 @@ impl RadarLocator {
     }
 
     fn start_furuno(&mut self) {
+        // Create socket for both receiving beacons AND sending announces
+        // IMPORTANT: We must send announces from port 10010 (same as we listen on)
+        // The Furuno radar only accepts TCP connections from clients that announce
+        // from the beacon port (10010), not from ephemeral ports.
         match UdpSocket::new() {
             Ok(socket) => {
+                // Enable broadcast mode BEFORE binding (required for sending to 172.31.255.255)
+                if let Err(e) = socket.set_broadcast(true) {
+                    debug(&format!("Warning: Failed to enable broadcast: {}", e));
+                } else {
+                    debug("Enabled broadcast on Furuno socket");
+                }
+
                 if socket.bind_port(furuno::BEACON_PORT).is_ok() {
                     debug(&format!(
-                        "Listening for Furuno beacons on port {}",
+                        "Listening for Furuno beacons on port {} (also used for announces)",
                         furuno::BEACON_PORT
                     ));
                     self.furuno_socket = Some(socket);
+                    // Send initial announce from the same socket (port 10010)
+                    self.send_furuno_announce();
                 } else {
                     set_error("Failed to bind Furuno beacon socket");
                 }
             }
             Err(e) => {
                 set_error(&format!("Failed to create Furuno socket: {}", e));
+            }
+        }
+
+        // No separate announce socket needed - we use furuno_socket for both
+        // receiving beacons and sending announces (from port 10010)
+    }
+
+    /// Send Furuno announce and beacon request packets
+    ///
+    /// This should be called before attempting TCP connections to Furuno radars,
+    /// as the radar only accepts TCP from clients that have recently announced.
+    /// Announces are sent from port 10010 (the beacon port) - this is required
+    /// for the radar to accept our TCP connections.
+    pub fn send_furuno_announce(&self) {
+        if let Some(socket) = &self.furuno_socket {
+            // Send to broadcast address on the Furuno subnet
+            let addr = FURUNO_BEACON_BROADCAST;
+            let port = furuno::BEACON_PORT;
+
+            // Send beacon request
+            if let Err(e) = socket.send_to(&furuno::REQUEST_BEACON_PACKET, addr, port) {
+                debug(&format!("Failed to send Furuno beacon request: {}", e));
+            }
+
+            // Send model request
+            if let Err(e) = socket.send_to(&furuno::REQUEST_MODEL_PACKET, addr, port) {
+                debug(&format!("Failed to send Furuno model request: {}", e));
+            }
+
+            // Send announce packet - this tells the radar we exist
+            if let Err(e) = socket.send_to(&furuno::ANNOUNCE_PACKET, addr, port) {
+                debug(&format!("Failed to send Furuno announce: {}", e));
+            } else {
+                debug(&format!("Sent Furuno announce to {}:{}", addr, port));
             }
         }
     }
@@ -179,6 +234,16 @@ impl RadarLocator {
     ///
     /// Returns list of newly discovered radars.
     pub fn poll(&mut self) -> Vec<RadarDiscovery> {
+        self.poll_count += 1;
+
+        // Send Furuno announce periodically (every ~2 seconds at 10 polls/sec)
+        // This is needed for the radar to accept TCP connections from us
+        // Native mayara-lib sends every 2 seconds
+        const ANNOUNCE_INTERVAL: u64 = 20;
+        if self.poll_count % ANNOUNCE_INTERVAL == 0 {
+            self.send_furuno_announce();
+        }
+
         let mut discoveries = Vec::new();
         let mut buf = [0u8; 2048];
 
