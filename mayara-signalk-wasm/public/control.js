@@ -283,12 +283,12 @@ function buildRangeButtons(container) {
   van.add(container, rangeDiv);
 }
 
-// Gain/Sea/Rain slider state
+// Gain/Sea/Rain slider state - defaults for Furuno DRS4D-NXT
 var myr_gain_value = 50;
-var myr_gain_auto = false;
+var myr_gain_auto = true;   // Gain defaults to auto
 var myr_sea_value = 50;
-var myr_sea_auto = false;
-var myr_rain_value = 50;
+var myr_sea_auto = true;    // Sea defaults to auto
+var myr_rain_value = 0;     // Rain defaults to 0 (off)
 var myr_rain_auto = false;
 
 // Send gain command via REST API

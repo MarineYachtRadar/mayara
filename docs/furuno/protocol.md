@@ -124,7 +124,7 @@ ${mode}{command_id},{arg1},{arg2},...\r\n
 | 64 | Sea | Sea clutter |
 | 65 | Rain | Rain clutter |
 | 66 | CustomPictureAll | All picture settings |
-| 67 | CustomPicture | Individual picture setting |
+| 67 | NoiseReduction | Noise Reduction ON/OFF |
 | 69 | Status | Transmit/standby status |
 | 77 | BlindSector | No-transmit zones |
 | 83 | MainBangSize | Main bang suppression |
@@ -135,6 +135,7 @@ ${mode}{command_id},{arg1},{arg2},...\r\n
 | 89 | AntennaRevolution | Scan speed |
 | 96 | Modules | Module information |
 | E3 | AliveCheck | Keep-alive (every 5s) |
+| EE | RezBoost | RezBoost level (0=OFF, 1=Low, 2=Med, 3=High) |
 
 ### Common Commands
 
@@ -189,12 +190,13 @@ offset. In captures, port **10100** was observed (offset = 100).
 | 61 | DispMode | `$R61,0,0,{idx}` | Display mode |
 | 62 | Range | `$S62,{idx},0,0` | Range selection (0-21) |
 | 63 | Gain | `$S63,{auto},{value},0,80,0` | Gain control (auto=0/1, value=0-100) |
-| 64 | Sea | `$S64,{auto},{value},50,0,0,0` | Sea clutter (auto=0/1, value=0-100) |
+| 64 | Sea | `$S64,{auto},{val},50,0,{mode},0` | Sea clutter (auto=0/1, val=0-100, mode: 0=Adv, 1=Coast) |
 | 65 | Rain | `$S65,{auto},{value},0,0,0,0` | Rain clutter (auto=0/1, value=0-100) |
 | 66 | CustomPictureAll | `$R66` | Request all picture settings |
-| 67 | CustomPicture | `$R67,0,{idx},,{sub}` | Individual picture setting |
+| 67 | NoiseReduction | `$S67,0,3,{enabled},0` | Noise Reduction (0=OFF, 1=ON) |
 | 68 | Unknown | `$N68,2,{idx},5/6,0,0` | Unknown (observed in responses) |
 | 69 | Status | `$S69,{status},0,0,60,300,0` | Transmit (2) / Standby (1) |
+| 6B | AcquireTarget | `$S6B,{x},{y},0` | Acquire target at coordinates |
 | 6D | Unknown | `$N6D,1,1,0,0,30,0` | Unknown |
 | 6E | Unknown | `$N6E,9,0,4,60,0,0,1` | Unknown |
 | 70 | Unknown | `$N70,0,0,0` | Unknown |
@@ -209,15 +211,15 @@ offset. In captures, port **10100** was observed (offset = 100).
 | 7E | Unknown | `$R7E,0,0` | Unknown |
 | 7F | Unknown | `$N7F,0,{idx}` | Unknown |
 | 80 | Unknown | `$N80,1,32,0` | Unknown |
-| 81 | Unknown | `$N81,60,0` | Unknown |
+| 81 | HeadingAlign | `$S81,{deg*10},0` | Antenna heading alignment (0-3599, neg wraps: -1°=3590) |
 | 82 | Unknown | `$N82,43,0,0,0,0` | Unknown |
-| 83 | MainBangSize | `$N83,128,{level}` | Main bang suppression (level 0-5) |
-| 84 | AntennaHeight | `$N84,1,5,0` | Antenna height |
+| 83 | MainBangSize | `$S83,{val},0` | Main bang suppression (val=0-255, 0%=0, 100%=255) |
+| 84 | AntennaHeight | `$S84,{cat},{m},0` | Antenna height (0,2=<3m; 1,5=3-10m; 2,15=>10m) |
 | 85 | NearSTC | `$N85,2` | Near STC |
 | 86 | MiddleSTC | `$R86,0` | Middle STC |
 | 87 | FarSTC | `$R87,0` | Far STC |
 | 88 | Unknown | `$N88,1` | Unknown |
-| 89 | ScanSpeed | `$N89,2,0` | Antenna revolution speed |
+| 89 | ScanSpeed | `$S89,{mode},0` | Antenna rotation (0=24rpm, 2=Auto) |
 | 8A | Unknown | `$N8A,1` | Unknown |
 | 8B-8D | Unknown | Various | Unknown |
 | 8E | Unknown | `$N8E,83777400` | Large numeric value |
@@ -229,11 +231,17 @@ offset. In captures, port **10100** was observed (offset = 100).
 | B0-C5 | Unknown | Various | Unknown settings |
 | C6 | Unknown | `$NC6,150` | Unknown |
 | C7 | Unknown | `$NC7,0,0` | Unknown |
-| CA-D8 | Unknown | Various | Unknown |
+| CA-D2 | Unknown | Various | Unknown |
+| D3 | Unknown | `$SD3,1,0` | Sent after $S67 IntReject changes (commit?) |
+| D4-D8 | Unknown | Various | Unknown |
 | E0 | ClutterStatus | `$NE0,{idx},{auto},0,{value},0,0,0,1` | Clutter status report |
 | E1-E2 | Unknown | Various | Unknown |
 | E3 | KeepAlive | `$RE3` / `$NE3` | Keep-alive (send every ~5s) |
-| E4-EF | Unknown | Various | Unknown |
+| E4-EB | Unknown | Various | Unknown |
+| EC | TxChannel | `$SEC,{ch}` | TX Channel (0=Auto, 1-3=Ch1-3) |
+| ED | BirdMode | `$SED,{level},0` | Bird Mode (0=OFF, 1=Low, 2=Med, 3=High) |
+| EE | RezBoost | `$SEE,{level},0` | RezBoost (0=OFF, 1=Low, 2=Med, 3=High) |
+| EF | TargetAnalyzer | `$SEF,{enabled},{mode},0` | Target Analyzer (mode: 0=Target, 1=Rain) |
 | F0 | Unknown | `$NF0,1` | Unknown |
 | F4-F5 | Status | `$NF5,{mode},{counter},0,0,0` | Periodic status (mode 3/4) |
 | F8-FD | Unknown | Various | Unknown |
@@ -260,13 +268,14 @@ $N69,{status},0,0,60,300,0\r\n
 ```
 $S62,{range_index},0,0\r\n
 ```
-Range indices observed:
+Range indices (DRS4D-NXT):
 | Index | Range |
 |-------|-------|
-| 0 | 1/8 nm |
-| 1 | 1/4 nm |
-| 2 | 1/2 nm |
-| 3 | 3/4 nm |
+| 21 | 1/16 nm (0.063) |
+| 0 | 1/8 nm (0.125) |
+| 1 | 1/4 nm (0.25) |
+| 2 | 1/2 nm (0.5) |
+| 3 | 3/4 nm (0.75) |
 | 4 | 1 nm |
 | 5 | 1.5 nm |
 | 6 | 2 nm |
@@ -277,10 +286,11 @@ Range indices observed:
 | 11 | 12 nm |
 | 12 | 16 nm |
 | 13 | 24 nm |
-| 14 | 36 nm |
+| 14 | 32 nm |
+| 19 | 36 nm |
 | 15 | 48 nm |
-| 19 | ? |
-| 21 | ? |
+
+Note: Index 21 is minimum range, index 15 is maximum. Index 19 (36nm) is out of sequence.
 
 #### Gain (0x63)
 ```
@@ -308,6 +318,41 @@ $S65,{auto},{value},0,0,0,0\r\n
 ```
 - auto: 0=manual, 1=auto
 - value: 0-100
+
+#### RezBoost ($SEE)
+```
+$SEE,{level},0\r\n
+```
+| Level | Value |
+|-------|-------|
+| OFF | 0 |
+| Low | 1 |
+| Medium | 2 |
+| High | 3 |
+
+#### Signal Processing Settings (0x67)
+Command 67 is a multi-purpose signal processing command. The 2nd parameter selects the feature:
+```
+$S67,0,{feature},{value},0\r\n
+```
+
+| Feature | Value | Description |
+|---------|-------|-------------|
+| 0 | 0/2 | Interference Rejection (0=OFF, 2=ON) |
+| 3 | 0/1 | Noise Reduction (0=OFF, 1=ON) |
+
+**Noise Reduction:**
+```
+$S67,0,3,{enabled},0\r\n
+```
+- enabled: 0=OFF, 1=ON
+
+**Interference Rejection:**
+```
+$S67,0,0,{enabled},0\r\n
+```
+- enabled: 0=OFF, 2=ON
+- Note: TimeZero also sends `$SD3,1,0` after this command (purpose unclear, possibly "apply/commit")
 
 ### Periodic Messages
 
@@ -388,6 +433,165 @@ The implementation handles:
 - Keep-alive every 5 seconds
 - Automatic reconnection on disconnect
 
+## Wireshark Capture Tips
+
+### Display Filter for Commands
+To capture only control commands (filtering out keepalive and data packets):
+```
+ip.addr == 172.31.3.212 && tcp.payload contains 24:53
+```
+This filters for packets containing `$S` (hex `24 53`), which is the command prefix.
+
+### Alternative Filters
+```
+# All TCP traffic to/from radar
+ip.addr == 172.31.3.212 && tcp
+
+# Multiple radar IPs
+(ip.addr == 172.31.3.212 || ip.addr == 172.31.3.54) && tcp.payload contains 24:53
+
+# Command port range (if known)
+tcp.port >= 10001 && tcp.port <= 10110 && tcp.len > 0
+```
+
+## Signal Processing Commands (0xEC-0xEF)
+
+These commands control advanced signal processing features. They were decoded via Wireshark captures
+from TimeZero Professional.
+
+### TX Channel (0xEC)
+```
+$SEC,{channel}\r\n
+```
+| Value | Setting |
+|-------|---------|
+| 0 | Auto |
+| 1 | Channel 1 |
+| 2 | Channel 2 |
+| 3 | Channel 3 |
+
+Used to select transmission channel to avoid interference with other nearby radars.
+
+### Bird Mode (0xED)
+```
+$SED,{level},0\r\n
+```
+| Value | Setting |
+|-------|---------|
+| 0 | OFF |
+| 1 | Low |
+| 2 | Medium |
+| 3 | High |
+
+Optimizes radar display for detecting flocks of birds (useful for fishing).
+
+### RezBoost (0xEE)
+```
+$SEE,{level},0\r\n
+```
+| Value | Setting |
+|-------|---------|
+| 0 | OFF |
+| 1 | Low |
+| 2 | Medium |
+| 3 | High |
+
+Resolution boost - enhances target separation and definition.
+
+### Target Analyzer (0xEF)
+```
+$SEF,{enabled},{mode},0\r\n
+```
+| Enabled | Mode | Setting |
+|---------|------|---------|
+| 0 | - | OFF |
+| 1 | 0 | Target mode |
+| 1 | 1 | Rain mode |
+
+Analyzes echoes to identify targets or rain patterns.
+
+## Antenna Settings
+
+### Antenna Height (0x84)
+```
+$S84,{category},{meters},0\r\n
+```
+| Category | Meters | Height Range |
+|----------|--------|--------------|
+| 0 | 2 | Under 3m |
+| 1 | 5 | 3-10m |
+| 2 | 15 | Over 10m |
+
+Antenna height affects sea clutter calculations.
+
+### Heading Alignment (0x81)
+```
+$S81,{degrees_x10},0\r\n
+```
+- Value: 0-3599 (representing 0.0° to 359.9°)
+- Negative values wrap: -1° = 3590, -2° = 3580
+- Used to compensate for antenna mounting offset
+
+### Scan Speed (0x89)
+```
+$S89,{mode},0\r\n
+```
+| Value | Setting |
+|-------|---------|
+| 0 | 24 RPM |
+| 2 | Auto |
+
+### Main Bang Suppression (0x83)
+```
+$S83,{value},0\r\n
+```
+- Value: 0-255 (linear mapping to 0-100%)
+- Formula: percentage = value / 2.55
+- Example: 50% = 128, 100% = 255
+
+Suppresses the main bang (center reflection) on the radar display.
+
+## ARPA Target Acquisition
+
+### Acquire Target (0x6B)
+```
+$S6B,{x},{y},0\r\n
+```
+Coordinates for manual target acquisition. The x,y values are screen/spoke coordinates.
+
+## Command Summary by Category
+
+### Display & Control
+| ID | Name | Description |
+|----|------|-------------|
+| 62 | Range | Range selection (0-21) |
+| 63 | Gain | Gain control (0-100, auto) |
+| 64 | Sea | Sea clutter (0-100, auto, mode) |
+| 65 | Rain | Rain clutter (0-100, auto) |
+| 69 | Status | Transmit/Standby |
+
+### Signal Processing
+| ID | Name | Description |
+|----|------|-------------|
+| 67 | Processing | Multi-purpose (IntReject, NoiseReduction) |
+| EE | RezBoost | Resolution boost (OFF/Low/Med/High) |
+| EF | TargetAnalyzer | Target/Rain analysis |
+| ED | BirdMode | Bird detection (OFF/Low/Med/High) |
+
+### Antenna
+| ID | Name | Description |
+|----|------|-------------|
+| 81 | HeadingAlign | Heading offset (0-359.9°) |
+| 83 | MainBang | Main bang suppression (0-100%) |
+| 84 | AntennaHeight | Height category |
+| 89 | ScanSpeed | Rotation speed |
+| EC | TxChannel | TX channel selection |
+
+### Targets
+| ID | Name | Description |
+|----|------|-------------|
+| 6B | AcquireTarget | Manual ARPA target acquisition |
+
 ## References
 
 - mayara-lib source: `src/brand/furuno/`
@@ -396,3 +600,4 @@ The implementation handles:
   - `research/furuno/furuno_commands` - Complete command session dump
   - `/home/dirk/dev/furuno_pcap/furuno4.pcap` - TCP session with transmit/standby
 - TimeZero Professional: https://mytimezero.com/tz-professional
+- Protocol decoded via Wireshark analysis of TimeZero ↔ DRS4D-NXT communication

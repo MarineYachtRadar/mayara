@@ -14,14 +14,6 @@ class render_webgpu {
     this.pendingLegend = null;
     this.pendingSpokes = null;
 
-    // Accumulation settings
-    this.decay = 0.985;           // Temporal persistence (lower = faster fade)
-    this.accumGain = 0.4;         // How much new data adds to accumulation
-    this.accumulationSize = 1024; // Cartesian accumulation texture size
-
-    // Ping-pong texture index (0 or 1)
-    this.pingPongIndex = 0;
-
     // Start async initialization
     this.initPromise = this.#initWebGPU();
   }
@@ -46,17 +38,17 @@ class render_webgpu {
       alphaMode: "premultiplied",
     });
 
-    // Create sampler
+    // Create sampler for polar data (linear for smooth display like TZ Pro)
     this.sampler = this.device.createSampler({
       magFilter: "linear",
       minFilter: "linear",
       addressModeU: "clamp-to-edge",
-      addressModeV: "clamp-to-edge",
+      addressModeV: "repeat",  // Wrap around for angles
     });
 
-    // Create uniform buffer for transformation matrix
+    // Create uniform buffer for parameters
     this.uniformBuffer = this.device.createBuffer({
-      size: 64,
+      size: 32,  // scaleX, scaleY, spokesPerRev, maxSpokeLen + padding
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -74,28 +66,8 @@ class render_webgpu {
     });
     this.device.queue.writeBuffer(this.vertexBuffer, 0, vertices);
 
-    // Create ping-pong accumulation textures (rgba8unorm supports render target)
-    this.accumTextures = [
-      this.device.createTexture({
-        size: [this.accumulationSize, this.accumulationSize],
-        format: "rgba8unorm",
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
-      }),
-      this.device.createTexture({
-        size: [this.accumulationSize, this.accumulationSize],
-        format: "rgba8unorm",
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
-      }),
-    ];
-
-    // Create accumulation parameters buffer [decay, gain, spokesPerRev, maxSpokeLen]
-    this.accumParamsBuffer = this.device.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
-    // Create accumulation pipeline (renders polar data into cartesian accumulation texture)
-    await this.#createAccumulationPipeline();
+    // Create render pipeline
+    await this.#createRenderPipeline();
 
     this.ready = true;
     this.redrawCanvas();
@@ -108,63 +80,27 @@ class render_webgpu {
       this.setLegend(this.pendingLegend);
       this.pendingLegend = null;
     }
-    console.log("WebGPU initialized with ping-pong accumulation");
+    console.log("WebGPU initialized (direct polar rendering)");
   }
 
-  async #createAccumulationPipeline() {
-    // Accumulation shader - combines previous accumulation with new polar data
-    const accumShaderModule = this.device.createShaderModule({
-      code: accumulationShaderCode,
+  async #createRenderPipeline() {
+    const shaderModule = this.device.createShaderModule({
+      code: shaderCode,
     });
 
-    this.accumBindGroupLayout = this.device.createBindGroupLayout({
+    this.bindGroupLayout = this.device.createBindGroupLayout({
       entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } }, // previous accum
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } }, // polar data
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
-        { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },      // params
-      ],
-    });
-
-    this.accumPipeline = this.device.createRenderPipeline({
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.accumBindGroupLayout] }),
-      vertex: {
-        module: accumShaderModule,
-        entryPoint: "vertexMain",
-        buffers: [{
-          arrayStride: 16,
-          attributes: [
-            { shaderLocation: 0, offset: 0, format: "float32x2" },
-            { shaderLocation: 1, offset: 8, format: "float32x2" },
-          ],
-        }],
-      },
-      fragment: {
-        module: accumShaderModule,
-        entryPoint: "fragmentMain",
-        targets: [{ format: "rgba8unorm" }],
-      },
-      primitive: { topology: "triangle-strip" },
-    });
-
-    // Final render shader - displays accumulation with color lookup
-    const renderShaderModule = this.device.createShaderModule({
-      code: finalRenderShaderCode,
-    });
-
-    this.renderBindGroupLayout = this.device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } }, // accumulation
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } }, // polar data
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } }, // color table
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
-        { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+        { binding: 3, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       ],
     });
 
     this.renderPipeline = this.device.createRenderPipeline({
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.renderBindGroupLayout] }),
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] }),
       vertex: {
-        module: renderShaderModule,
+        module: shaderModule,
         entryPoint: "vertexMain",
         buffers: [{
           arrayStride: 16,
@@ -175,7 +111,7 @@ class render_webgpu {
         }],
       },
       fragment: {
-        module: renderShaderModule,
+        module: shaderModule,
         entryPoint: "fragmentMain",
         targets: [{ format: this.canvasFormat }],
       },
@@ -198,20 +134,14 @@ class render_webgpu {
     this.max_spoke_len = max_spoke_len;
     this.data = new Uint8Array(spokesPerRevolution * max_spoke_len);
 
-    // Create polar data texture
+    // Create polar data texture (width = range samples, height = angles)
     this.polarTexture = this.device.createTexture({
       size: [max_spoke_len, spokesPerRevolution],
       format: "r8unorm",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
 
-    // Update accumulation params
-    this.device.queue.writeBuffer(
-      this.accumParamsBuffer, 0,
-      new Float32Array([this.decay, this.accumGain, spokesPerRevolution, max_spoke_len])
-    );
-
-    this.#createBindGroups();
+    this.#createBindGroup();
   }
 
   setRange(range) {
@@ -248,58 +178,22 @@ class render_webgpu {
     );
 
     if (this.polarTexture) {
-      this.#createBindGroups();
+      this.#createBindGroup();
     }
   }
 
-  #createBindGroups() {
+  #createBindGroup() {
     if (!this.polarTexture || !this.colorTexture) return;
 
-    // Create bind groups for both ping-pong directions
-    this.accumBindGroups = [
-      // Read from texture 0, write to texture 1
-      this.device.createBindGroup({
-        layout: this.accumBindGroupLayout,
-        entries: [
-          { binding: 0, resource: this.accumTextures[0].createView() },
-          { binding: 1, resource: this.polarTexture.createView() },
-          { binding: 2, resource: this.sampler },
-          { binding: 3, resource: { buffer: this.accumParamsBuffer } },
-        ],
-      }),
-      // Read from texture 1, write to texture 0
-      this.device.createBindGroup({
-        layout: this.accumBindGroupLayout,
-        entries: [
-          { binding: 0, resource: this.accumTextures[1].createView() },
-          { binding: 1, resource: this.polarTexture.createView() },
-          { binding: 2, resource: this.sampler },
-          { binding: 3, resource: { buffer: this.accumParamsBuffer } },
-        ],
-      }),
-    ];
-
-    // Create render bind groups for both textures
-    this.renderBindGroups = [
-      this.device.createBindGroup({
-        layout: this.renderBindGroupLayout,
-        entries: [
-          { binding: 0, resource: this.accumTextures[1].createView() }, // After writing to 1
-          { binding: 1, resource: this.colorTexture.createView() },
-          { binding: 2, resource: this.sampler },
-          { binding: 3, resource: { buffer: this.uniformBuffer } },
-        ],
-      }),
-      this.device.createBindGroup({
-        layout: this.renderBindGroupLayout,
-        entries: [
-          { binding: 0, resource: this.accumTextures[0].createView() }, // After writing to 0
-          { binding: 1, resource: this.colorTexture.createView() },
-          { binding: 2, resource: this.sampler },
-          { binding: 3, resource: { buffer: this.uniformBuffer } },
-        ],
-      }),
-    ];
+    this.bindGroup = this.device.createBindGroup({
+      layout: this.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: this.polarTexture.createView() },
+        { binding: 1, resource: this.colorTexture.createView() },
+        { binding: 2, resource: this.sampler },
+        { binding: 3, resource: { buffer: this.uniformBuffer } },
+      ],
+    });
   }
 
   drawSpoke(spoke) {
@@ -318,7 +212,7 @@ class render_webgpu {
   }
 
   render() {
-    if (!this.ready || !this.data || !this.accumBindGroups || !this.renderBindGroups) {
+    if (!this.ready || !this.data || !this.bindGroup) {
       return;
     }
 
@@ -332,22 +226,6 @@ class render_webgpu {
 
     const encoder = this.device.createCommandEncoder();
 
-    // Pass 1: Accumulation - read from texture[pingPongIndex], write to texture[1-pingPongIndex]
-    const writeIndex = 1 - this.pingPongIndex;
-    const accumPass = encoder.beginRenderPass({
-      colorAttachments: [{
-        view: this.accumTextures[writeIndex].createView(),
-        loadOp: "load",  // Keep previous data for decay
-        storeOp: "store",
-      }],
-    });
-    accumPass.setPipeline(this.accumPipeline);
-    accumPass.setBindGroup(0, this.accumBindGroups[this.pingPongIndex]);
-    accumPass.setVertexBuffer(0, this.vertexBuffer);
-    accumPass.draw(4);
-    accumPass.end();
-
-    // Pass 2: Final render to screen
     const renderPass = encoder.beginRenderPass({
       colorAttachments: [{
         view: this.context.getCurrentTexture().createView(),
@@ -357,15 +235,12 @@ class render_webgpu {
       }],
     });
     renderPass.setPipeline(this.renderPipeline);
-    renderPass.setBindGroup(0, this.renderBindGroups[this.pingPongIndex]);
+    renderPass.setBindGroup(0, this.bindGroup);
     renderPass.setVertexBuffer(0, this.vertexBuffer);
     renderPass.draw(4);
     renderPass.end();
 
     this.device.queue.submit([encoder.finish()]);
-
-    // Swap ping-pong index
-    this.pingPongIndex = writeIndex;
   }
 
   redrawCanvas() {
@@ -387,7 +262,7 @@ class render_webgpu {
       Math.max(this.center_x, this.center_y) * RANGE_SCALE
     );
 
-    this.drawBackgroundCallback(this, "MAYARA (WebGPU Accum)");
+    this.drawBackgroundCallback(this, "MAYARA (WebGPU)");
 
     if (this.ready) {
       this.context.configure({
@@ -395,130 +270,121 @@ class render_webgpu {
         format: this.canvasFormat,
         alphaMode: "premultiplied",
       });
-      this.#setTransformationMatrix();
+      this.#updateUniforms();
     }
   }
 
-  #setTransformationMatrix() {
+  #updateUniforms() {
     const range = this.range || this.actual_range || 1500;
     const scale = (1.0 * this.actual_range) / range;
-    const angle = Math.PI / 2;
 
     const scaleX = scale * ((2 * this.beam_length) / this.width);
     const scaleY = scale * ((2 * this.beam_length) / this.height);
 
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-
-    const transformMatrix = new Float32Array([
-      cos * scaleX, -sin * scaleX, 0.0, 0.0,
-      sin * scaleY,  cos * scaleY, 0.0, 0.0,
-      0.0, 0.0, 1.0, 0.0,
-      0.0, 0.0, 0.0, 1.0,
+    // Pack uniforms: scaleX, scaleY, spokesPerRev, maxSpokeLen
+    const uniforms = new Float32Array([
+      scaleX, scaleY,
+      this.spokesPerRevolution || 2048,
+      this.max_spoke_len || 512,
+      0, 0, 0, 0  // padding to 32 bytes
     ]);
 
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, transformMatrix);
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
 
     this.background_ctx.fillStyle = "lightgreen";
     this.background_ctx.fillText("Beamlength " + this.beam_length, 5, 40);
     this.background_ctx.fillText("Range " + formatRangeValue(is_metric(range), range), 5, 60);
-    this.background_ctx.fillText("Spoke " + this.actual_range, 5, 80);
-    this.background_ctx.fillText("Decay " + this.decay.toFixed(3), 5, 100);
+    this.background_ctx.fillText("Spoke range " + this.actual_range, 5, 80);
   }
 }
 
-// Accumulation shader - converts polar to cartesian and accumulates
-const accumulationShaderCode = `
+// Direct polar-to-cartesian shader with color lookup
+// Radar convention: angle 0 = bow (up), angles increase CLOCKWISE
+// So angle spokesPerRev/4 = starboard (right), spokesPerRev/2 = stern (down)
+const shaderCode = `
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
   @location(0) texCoord: vec2<f32>,
 }
 
-@vertex
-fn vertexMain(@location(0) pos: vec2<f32>, @location(1) texCoord: vec2<f32>) -> VertexOutput {
-  var output: VertexOutput;
-  output.position = vec4<f32>(pos, 0.0, 1.0);
-  output.texCoord = texCoord;
-  return output;
+struct Uniforms {
+  scaleX: f32,
+  scaleY: f32,
+  spokesPerRev: f32,
+  maxSpokeLen: f32,
 }
 
-@group(0) @binding(0) var prevAccum: texture_2d<f32>;
-@group(0) @binding(1) var polarData: texture_2d<f32>;
-@group(0) @binding(2) var texSampler: sampler;
-@group(0) @binding(3) var<uniform> params: vec4<f32>;  // [decay, gain, spokesPerRev, maxSpokeLen]
-
-const PI: f32 = 3.14159265359;
-
-@fragment
-fn fragmentMain(@location(0) texCoord: vec2<f32>) -> @location(0) vec4<f32> {
-  let decay = params.x;
-  let gain = params.y;
-
-  // Previous accumulated value (decayed)
-  let prevValue = textureSample(prevAccum, texSampler, texCoord).r * decay;
-
-  // Convert cartesian (texCoord) to polar for sampling radar data
-  // Accumulation texture is square [0,1]x[0,1], center at (0.5, 0.5)
-  // Final render applies 90° rotation, so pre-rotate by -90°
-  let centered = texCoord - vec2<f32>(0.5, 0.5);
-
-  // Pre-rotate to compensate for final render transformation
-  let rotated = vec2<f32>(centered.y, centered.x);
-  let r = length(rotated) * 2.0;
-  let theta = atan2(rotated.y, rotated.x);
-
-  // Normalize theta to [0, 1] range
-  let normalizedTheta = 1.0 - (theta + PI) / (2.0 * PI);
-
-  // Sample polar data (new radar return)
-  let newValue = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta)).r;
-
-  // Accumulate: add new value (scaled) to decayed previous
-  // Use max to prevent washing out strong returns
-  var accumulated = max(prevValue, prevValue + newValue * gain);
-  accumulated = clamp(accumulated, 0.0, 1.0);
-
-  // Mask outside circle
-  let insideCircle = step(r, 1.0);
-  accumulated *= insideCircle;
-
-  return vec4<f32>(accumulated, accumulated, accumulated, 1.0);
-}
-`;
-
-// Final render shader - applies color lookup to accumulated data
-const finalRenderShaderCode = `
-struct VertexOutput {
-  @builtin(position) position: vec4<f32>,
-  @location(0) texCoord: vec2<f32>,
-}
-
-@group(0) @binding(3) var<uniform> u_transform: mat4x4<f32>;
+@group(0) @binding(3) var<uniform> uniforms: Uniforms;
 
 @vertex
 fn vertexMain(@location(0) pos: vec2<f32>, @location(1) texCoord: vec2<f32>) -> VertexOutput {
   var output: VertexOutput;
-  output.position = u_transform * vec4<f32>(pos, 0.0, 1.0);
+  // Apply scaling
+  let scaledPos = vec2<f32>(pos.x * uniforms.scaleX, pos.y * uniforms.scaleY);
+  output.position = vec4<f32>(scaledPos, 0.0, 1.0);
   output.texCoord = texCoord;
   return output;
 }
 
-@group(0) @binding(0) var accumTex: texture_2d<f32>;
+@group(0) @binding(0) var polarData: texture_2d<f32>;
 @group(0) @binding(1) var colorTable: texture_2d<f32>;
 @group(0) @binding(2) var texSampler: sampler;
 
+const PI: f32 = 3.14159265359;
+const TWO_PI: f32 = 6.28318530718;
+
 @fragment
 fn fragmentMain(@location(0) texCoord: vec2<f32>) -> @location(0) vec4<f32> {
-  // Sample accumulated energy
-  let energy = textureSample(accumTex, texSampler, texCoord).r;
+  // Convert cartesian (texCoord) to polar for sampling radar data
+  // texCoord is [0,1]x[0,1], center at (0.5, 0.5)
+  //
+  // IMPORTANT: In our vertex setup, texCoord.y=0 is BOTTOM, texCoord.y=1 is TOP
+  // (WebGPU clip space has Y pointing up)
+  // So centered.y is POSITIVE at TOP of screen, NEGATIVE at BOTTOM
+  let centered = texCoord - vec2<f32>(0.5, 0.5);
+
+  // Calculate radius (0 at center, 1 at edge of unit circle)
+  let r = length(centered) * 2.0;
+
+  // Calculate angle from center for clockwise rotation from top (bow)
+  //
+  // Our coordinate system (after centering):
+  // - Top of screen (bow):      centered = (0, +0.5)
+  // - Right of screen (stbd):   centered = (+0.5, 0)
+  // - Bottom of screen (stern): centered = (0, -0.5)
+  // - Left of screen (port):    centered = (-0.5, 0)
+  //
+  // Radar convention (from protobuf):
+  // - angle 0 = bow (top on screen)
+  // - angle increases clockwise: bow -> starboard -> stern -> port -> bow
+  //
+  // Use atan2(x, y) to get clockwise angle from top:
+  // - Top:    (0, 0.5)   -> atan2(0, 0.5) = 0
+  // - Right:  (0.5, 0)   -> atan2(0.5, 0) = PI/2
+  // - Bottom: (0, -0.5)  -> atan2(0, -0.5) = PI
+  // - Left:   (-0.5, 0)  -> atan2(-0.5, 0) = -PI/2 -> normalized to 3PI/2
+  var theta = atan2(centered.x, centered.y);
+  if (theta < 0.0) {
+    theta = theta + TWO_PI;
+  }
+
+  // Normalize to [0, 1] for texture V coordinate
+  let normalizedTheta = theta / TWO_PI;
+
+  // Sample polar data (always sample, mask later to avoid non-uniform control flow)
+  // U = radius [0,1], V = angle [0,1] where 0=bow, 0.25=starboard, 0.5=stern, 0.75=port
+  let radarValue = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta)).r;
 
   // Look up color from table
-  let color = textureSample(colorTable, texSampler, vec2<f32>(energy, 0.0));
+  let color = textureSample(colorTable, texSampler, vec2<f32>(radarValue, 0.0));
 
-  // Threshold for visibility
-  let hasData = step(0.01, energy);
-  let alpha = hasData * color.a;
+  // Mask pixels outside the radar circle (use step instead of if)
+  let insideCircle = step(r, 1.0);
 
-  return vec4<f32>(color.rgb, alpha);
+  // Use alpha from color table, but make background transparent
+  let hasData = step(0.004, radarValue);  // ~1/255 threshold
+  let alpha = hasData * color.a * insideCircle;
+
+  return vec4<f32>(color.rgb * insideCircle, alpha);
 }
 `;

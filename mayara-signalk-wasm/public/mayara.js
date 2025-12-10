@@ -58,22 +58,36 @@ const RadarEntry = (id, name) =>
     )
   );
 
+// Check URL params to see if auto-redirect is disabled
+const urlParams = new URLSearchParams(window.location.search);
+const autoRedirect = urlParams.get("auto") !== "false";
+
 function radarsLoaded(d) {
-  let c = Object.keys(d).length;
+  let radarIds = Object.keys(d);
+  let c = radarIds.length;
   let r = document.getElementById("radars");
 
   // Clear previous content
   r.innerHTML = "";
 
   if (c > 0) {
+    // Auto-redirect to the first radar's WebGPU PPI view
+    if (autoRedirect) {
+      let firstRadarId = radarIds.sort()[0];
+      window.location.href = "viewer.html?id=" + firstRadarId + "&draw=webgpu";
+      return;
+    }
+
     van.add(r, div(c + " radar(s) detected"));
     let table = document.createElement("table");
     r.appendChild(table);
-    Object.keys(d)
+    radarIds
       .sort()
       .forEach(function (v, i) {
         van.add(table, RadarEntry(v, d[v].name));
       });
+    // Radar found, poll less frequently
+    setTimeout(loadRadars, 15000);
   } else {
     van.add(r, div({ class: "myr_warning" }, "No radars detected. Waiting for radar beacons..."));
 
@@ -98,9 +112,9 @@ function radarsLoaded(d) {
         )
       )
     );
+    // No radar found, poll more frequently (every 2 seconds)
+    setTimeout(loadRadars, 2000);
   }
-
-  setTimeout(loadRadars, 15000);
 }
 
 function interfacesLoaded(d) {
