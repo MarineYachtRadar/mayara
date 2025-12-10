@@ -110,6 +110,47 @@ PUT /radars/{id}/noTransmitZones
 ```
 Note: Number of zones varies by vendor (Furuno: 2, Navico: 2-4, Garmin: 1)
 
+**Important for Furuno**: Sector blanking uses **width** not end angle. To convert:
+```
+width = (end_angle - start_angle + 360) mod 360
+```
+
+---
+
+## Dual Display / Dual Scan Support
+
+Some radars support displaying two independent range views simultaneously. The API supports this via a `screen` parameter on per-screen controls.
+
+### Furuno Dual Scan
+
+DRS-NXT radars support dual scan mode with two independent displays (up to 12nm each range).
+
+| Control | Behavior |
+|---------|----------|
+| Range | Per-screen |
+| Power/Status | Per-screen |
+| RezBoost | Per-screen |
+| Gain | Universal (affects both) |
+| Sea Clutter | Universal (affects both) |
+| Rain Clutter | Universal (affects both) |
+| Bird Mode | Universal (affects both) |
+| Target Analyzer | Universal (affects both) |
+| Int. Rejection | Universal (affects both) |
+| TX Channel | Universal (single transmitter) |
+
+#### Per-Screen Control Schema
+```json
+PUT /radars/{id}/range
+{
+  "value": 5000,
+  "screen": 0  // 0=primary, 1=secondary (optional, defaults to 0)
+}
+```
+
+### Navico Dual Range
+
+HALO radars support dual range display with similar per-screen controls.
+
 ---
 
 ## Vendor-Specific Controls API
@@ -127,12 +168,13 @@ GET /radars/{id}/{vendor}/{control}
 | Control | Endpoint | Description |
 |---------|----------|-------------|
 | RezBoost | `PUT /furuno/rezboost` | Beam sharpening (0=off, 1-3=levels) |
-| Bird Mode | `PUT /furuno/birdMode` | Optimizes for bird detection |
-| Target Analyzer | `PUT /furuno/targetAnalyzer` | Doppler-based threat highlighting |
-| TX Channel | `PUT /furuno/txChannel` | Transmit frequency channel |
+| Bird Mode | `PUT /furuno/birdMode` | Optimizes for bird detection (0=off, 1-3=levels) |
+| Target Analyzer | `PUT /furuno/targetAnalyzer` | Doppler-based threat highlighting (target/rain modes) |
+| TX Channel | `PUT /furuno/txChannel` | Transmit frequency channel (auto, 1-3) |
+| Auto Acquire | `PUT /furuno/autoAcquire` | ARPA auto target acquisition by Doppler |
 | Fast Target Tracking | `PUT /furuno/fastTargetTracking` | Quick target acquisition |
 | Echo Trail | `PUT /furuno/echoTrail` | Historical echo persistence |
-| Main Bang | `PUT /furuno/mainBang` | Suppresses transmitter pulse |
+| Main Bang | `PUT /furuno/mainBang` | Suppresses transmitter pulse (0-100%) |
 | Near/Middle/Far STC | `PUT /furuno/stc` | Range-based sensitivity control |
 
 #### RezBoost Schema
@@ -147,7 +189,32 @@ PUT /radars/{id}/furuno/rezboost
 ```json
 PUT /radars/{id}/furuno/targetAnalyzer
 {
-  "enabled": true
+  "enabled": true,
+  "mode": "target"  // "target" | "rain"
+}
+```
+
+#### Bird Mode Schema
+```json
+PUT /radars/{id}/furuno/birdMode
+{
+  "value": 2  // 0=off, 1=low, 2=medium, 3=high
+}
+```
+
+#### TX Channel Schema
+```json
+PUT /radars/{id}/furuno/txChannel
+{
+  "value": 0  // 0=auto, 1=ch1, 2=ch2, 3=ch3
+}
+```
+
+#### Auto Acquire Schema
+```json
+PUT /radars/{id}/furuno/autoAcquire
+{
+  "enabled": true  // ARPA auto acquire by Doppler
 }
 ```
 
@@ -315,16 +382,50 @@ GET /radars/{id}/controls/{controlName}
     "furuno/targetAnalyzer": {
       "name": "Target Analyzer",
       "vendor": "furuno",
-      "description": "Uses Doppler processing to color-code radar targets based on their relative motion. Approaching targets are highlighted in red for immediate threat identification, while stationary or receding targets appear in green.",
+      "description": "Uses Doppler processing to analyze radar echoes. In 'target' mode, highlights approaching targets for collision avoidance. In 'rain' mode, identifies precipitation patterns.",
       "marketingNote": "Target Analyzer™ is FURUNO's exclusive Doppler-based threat detection that works independent of vessel speed.",
-      "type": "boolean",
-      "default": true
+      "type": "compound",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "mode": { "type": "enum", "values": ["target", "rain"] }
+      },
+      "default": { "enabled": true, "mode": "target" },
+      "note": "Universal setting - affects both screens in dual scan mode"
     },
 
     "furuno/birdMode": {
       "name": "Bird Mode",
       "vendor": "furuno",
-      "description": "Automatically adjusts gain and sea clutter settings optimized for detecting birds, which often indicate fish schools below. Essential for sportfishing applications.",
+      "description": "Optimizes radar display for detecting flocks of birds, which often indicate fish schools below. Essential for sportfishing applications.",
+      "type": "enum",
+      "values": [
+        { "value": 0, "label": "Off", "description": "Bird mode disabled" },
+        { "value": 1, "label": "Low", "description": "Mild bird detection sensitivity" },
+        { "value": 2, "label": "Medium", "description": "Moderate bird detection sensitivity" },
+        { "value": 3, "label": "High", "description": "Maximum bird detection sensitivity" }
+      ],
+      "default": 0,
+      "note": "Universal setting - affects both screens in dual scan mode"
+    },
+
+    "furuno/txChannel": {
+      "name": "TX Channel",
+      "vendor": "furuno",
+      "description": "Selects the transmission frequency channel to avoid interference with other nearby radars operating on similar frequencies.",
+      "type": "enum",
+      "values": [
+        { "value": 0, "label": "Auto", "description": "Automatic channel selection" },
+        { "value": 1, "label": "Channel 1", "description": "Fixed channel 1" },
+        { "value": 2, "label": "Channel 2", "description": "Fixed channel 2" },
+        { "value": 3, "label": "Channel 3", "description": "Fixed channel 3" }
+      ],
+      "default": 0
+    },
+
+    "furuno/autoAcquire": {
+      "name": "Auto Acquire",
+      "vendor": "furuno",
+      "description": "Enables automatic ARPA target acquisition using Doppler detection. When enabled, the radar automatically begins tracking moving targets without manual selection.",
       "type": "boolean",
       "default": false
     },
@@ -583,11 +684,15 @@ router.ws('/radars/:id/state', ...);
 
 | Feature | Marketing Name | Technical Description |
 |---------|---------------|----------------------|
-| RezBoost™ | Beam Sharpening | Signal processing that narrows effective beam width for improved target separation |
-| Target Analyzer™ | Doppler Threat Detection | Color-codes targets by relative motion (red=approaching, green=receding/stationary) |
-| Bird Mode | Fish Finder Aid | Auto-tunes radar for detecting bird flocks indicating fish schools |
+| RezBoost™ | Beam Sharpening | Signal processing that narrows effective beam width for improved target separation. Per-screen setting in dual scan. |
+| Target Analyzer™ | Doppler Threat Detection | Dual-mode analysis: Target mode highlights approaching threats, Rain mode identifies precipitation. Universal setting. |
+| Bird Mode | Fish Finder Aid | 4-level sensitivity (Off/Low/Med/High) for detecting bird flocks indicating fish schools. Universal setting. |
+| TX Channel | Frequency Selection | Select transmission channel (Auto/1/2/3) to avoid interference with nearby radars |
+| Auto Acquire | Doppler ARPA | Automatic ARPA target acquisition using Doppler motion detection |
+| Dual Scan | Dual Range Display | Two independent radar displays with different ranges (up to 12nm each), sharing antenna rotation |
 | Fast Target Tracking™ | Rapid ARPA | Generates target vectors in seconds vs traditional ARPA delay |
 | Echo Trail | Target History | Displays historical echo positions showing target movement |
+| Sector Blanking | No-Transmit Zones | Up to 2 configurable sectors where radar won't transmit (start angle + width) |
 
 ### Navico (Simrad/Lowrance/B&G)
 

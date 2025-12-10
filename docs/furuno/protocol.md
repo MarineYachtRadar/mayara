@@ -203,7 +203,7 @@ offset. In captures, port **10100** was observed (offset = 100).
 | 73 | Unknown | `$R73,0,0` | Unknown |
 | 74 | Unknown | `$N74,0,5,10,5000,600` | Unknown |
 | 75 | Unknown | `$N75,1,1475,{idx}` | Unknown |
-| 77 | BlindSector | `$R77,0,0,0,0,0` | No-transmit zones |
+| 77 | BlindSector | `$S77,{idx},{start},{width},0,0` | Sector blanking (start + width in degrees) |
 | 78 | Unknown | `$N78,0,0,0` | Unknown |
 | 7A | Unknown | `$R7A,0` | Unknown |
 | 7C | Unknown | `$R7C,0` | Unknown |
@@ -232,7 +232,7 @@ offset. In captures, port **10100** was observed (offset = 100).
 | C6 | Unknown | `$NC6,150` | Unknown |
 | C7 | Unknown | `$NC7,0,0` | Unknown |
 | CA-D2 | Unknown | Various | Unknown |
-| D3 | Unknown | `$SD3,1,0` | Sent after $S67 IntReject changes (commit?) |
+| D3 | Commit | `$SD3,1,0` | Apply/commit command (sent after IntReject changes) |
 | D4-D8 | Unknown | Various | Unknown |
 | E0 | ClutterStatus | `$NE0,{idx},{auto},0,{value},0,0,0,1` | Clutter status report |
 | E1-E2 | Unknown | Various | Unknown |
@@ -474,33 +474,43 @@ Used to select transmission channel to avoid interference with other nearby rada
 
 ### Bird Mode (0xED)
 ```
-$SED,{level},0\r\n
+$SED,{level},{screen}\r\n
 ```
-| Value | Setting |
+| Level | Setting |
 |-------|---------|
 | 0 | OFF |
 | 1 | Low |
 | 2 | Medium |
 | 3 | High |
 
-Optimizes radar display for detecting flocks of birds (useful for fishing).
+| Screen | Display |
+|--------|---------|
+| 0 | Primary |
+| 1 | Secondary (dual scan) |
+
+Optimizes radar display for detecting flocks of birds (useful for fishing). Note: Despite having a screen parameter, this appears to affect both screens (universal effect).
 
 ### RezBoost (0xEE)
 ```
-$SEE,{level},0\r\n
+$SEE,{level},{screen}\r\n
 ```
-| Value | Setting |
+| Level | Setting |
 |-------|---------|
 | 0 | OFF |
 | 1 | Low |
 | 2 | Medium |
 | 3 | High |
 
-Resolution boost - enhances target separation and definition.
+| Screen | Display |
+|--------|---------|
+| 0 | Primary |
+| 1 | Secondary (dual scan) |
+
+Resolution boost - enhances target separation and definition. Per-screen setting in dual scan mode.
 
 ### Target Analyzer (0xEF)
 ```
-$SEF,{enabled},{mode},0\r\n
+$SEF,{enabled},{mode},{screen}\r\n
 ```
 | Enabled | Mode | Setting |
 |---------|------|---------|
@@ -508,7 +518,12 @@ $SEF,{enabled},{mode},0\r\n
 | 1 | 0 | Target mode |
 | 1 | 1 | Rain mode |
 
-Analyzes echoes to identify targets or rain patterns.
+| Screen | Display |
+|--------|---------|
+| 0 | Primary |
+| 1 | Secondary (dual scan) |
+
+Analyzes echoes to identify targets or rain patterns. Note: Despite having a screen parameter, this appears to affect both screens (universal effect).
 
 ## Antenna Settings
 
@@ -581,16 +596,128 @@ Coordinates for manual target acquisition. The x,y values are screen/spoke coord
 ### Antenna
 | ID | Name | Description |
 |----|------|-------------|
+| 77 | BlindSector | Sector blanking (no-transmit zones) |
 | 81 | HeadingAlign | Heading offset (0-359.9°) |
 | 83 | MainBang | Main bang suppression (0-100%) |
 | 84 | AntennaHeight | Height category |
 | 89 | ScanSpeed | Rotation speed |
 | EC | TxChannel | TX channel selection |
 
+### Sector Blanking / Blind Sector (0x77)
+```
+$S77,{s2_enable},{sector1_start},{sector1_width},{sector2_start},{sector2_width}\r\n
+```
+
+- `s2_enable`: Sector 2 enabled flag (0=sector 2 off, 1=sector 2 on)
+- `sector1_start`: Sector 1 start angle in degrees (0-359)
+- `sector1_width`: Sector 1 width in degrees (0 = sector 1 disabled)
+- `sector2_start`: Sector 2 start angle in degrees (0-359)
+- `sector2_width`: Sector 2 width in degrees
+
+**Note**: The width parameters are sector **width**, not end angle.
+
+To calculate width from UI start/end angles:
+```
+width = (end_angle - start_angle + 360) mod 360
+```
+
+**Examples:**
+
+Sector 1 only (Start=200°, End=300°):
+```
+$S77,0,200,100,0,0
+```
+
+Both sectors (Sector 1: 200°-300°, Sector 2: 320°-20°):
+```
+$S77,1,200,100,320,60
+```
+(Sector 2 width: (20-320+360) mod 360 = 60°)
+
+Disable both sectors:
+```
+$S77,0,0,0,0,0
+```
+
+Creates no-transmit zones where the radar won't transmit. Useful to avoid interference or protect areas.
+
 ### Targets
 | ID | Name | Description |
 |----|------|-------------|
 | 6B | AcquireTarget | Manual ARPA target acquisition |
+| F0 | AutoAcquire | ARPA auto acquire by Doppler |
+
+### ARPA Auto Acquire (0xF0)
+```
+$SF0,{enabled}\r\n
+```
+| Value | Setting |
+|-------|---------|
+| 0 | OFF |
+| 1 | ON (by Doppler) |
+
+Enables automatic ARPA target acquisition based on Doppler detection. When enabled, the radar automatically tracks moving targets.
+
+## Dual Scan Mode (Dual Range Display)
+
+DRS-NXT radars support dual scan mode, allowing two independent radar displays with different ranges (up to 12nm each). Commands include a **screen index** parameter to target the specific display.
+
+### Screen Index Parameter
+
+The screen index identifies which radar display to control:
+- `0` = Primary (1st) radar screen
+- `1` = Secondary (2nd) radar screen
+
+**Important**: The position of the screen parameter varies by command!
+
+### Dual Scan Command Formats
+
+| Command | Format | Screen Position |
+|---------|--------|-----------------|
+| 0x69 Status | `$S69,{status},{screen},0,60,300,0` | 3rd parameter |
+| 0x62 Range | `$S62,{range},0,{screen}` | 4th parameter |
+
+### Examples
+
+**Transmit on 1st screen:**
+```
+$S69,2,0,0,60,300,0
+```
+
+**Transmit on 2nd screen:**
+```
+$S69,2,1,0,60,300,0
+```
+
+**Set range 3nm on 1st screen:**
+```
+$S62,7,0,0
+```
+
+**Set range 3nm on 2nd screen:**
+```
+$S62,7,0,1
+```
+
+### Dual Scan Limitations
+
+- Maximum range for dual scan: 12nm (index 11)
+- Both screens share the same antenna rotation
+
+### Per-Screen vs Universal Settings
+
+| Setting | Behavior |
+|---------|----------|
+| Range (0x62) | Per-screen (has screen index) |
+| Status (0x69) | Per-screen (has screen index) |
+| RezBoost (0xEE) | Per-screen (`$SEE,{level},{screen}`) |
+| Gain (0x63) | Universal (affects both screens) |
+| Sea clutter (0x64) | Universal (affects both screens) |
+| Rain clutter (0x65) | Universal (affects both screens) |
+| Bird Mode (0xED) | Universal (has screen param but affects both) |
+| Target Analyzer (0xEF) | Universal (has screen param but affects both) |
+| Int. Rejection (0x67) | Universal (affects both screens) |
+| TX Channel (0xEC) | Universal (no screen param, single transmitter) |
 
 ## References
 
