@@ -1,10 +1,10 @@
 # Mayara WebGPU Renderer Analysis (render_webgpu.js)
 
-This document analyzes the WebGPU-based renderer from Mayara, which uses texture-based polar-to-cartesian conversion similar to render_webgl.js but with the modern WebGPU API.
+This document analyzes the WebGPU-based renderer from Mayara, which uses texture-based polar-to-cartesian conversion with the modern WebGPU API.
 
 ## Source File
-- **Location**: `mayara-signalk-wasm/public/render_webgpu.js` (commit: 52639a5)
-- **Lines**: ~290
+- **Location**: `mayara-signalk-wasm/public/render_webgpu.js`
+- **Lines**: ~490
 - **API**: WebGPU (navigator.gpu)
 
 ---
@@ -13,21 +13,46 @@ This document analyzes the WebGPU-based renderer from Mayara, which uses texture
 
 ### Approach: WebGPU Texture-Based Rendering
 
-Same conceptual approach as render_webgl.js:
 1. Store radar data in a 2D texture (polar: angle × radius)
 2. Draw fullscreen quad (4 vertices, TRIANGLE_STRIP)
 3. Fragment shader converts cartesian to polar coordinates
 4. Sample radar texture and color table for final color
+5. **Overlay canvas** for range rings on top of radar
 
-### Key Differences from WebGL Version
+### Key Features (Current Implementation)
 - **Async initialization**: WebGPU requires await for device setup
-- **Bind groups**: Resources bound via bind groups, not individual uniforms
-- **WGSL shaders**: WebGPU Shading Language instead of GLSL
-- **Command encoding**: Explicit command buffer recording
+- **Bind groups**: Resources bound via bind groups
+- **WGSL shaders**: WebGPU Shading Language
+- **Neighbor filling**: Enhances adjacent spokes for solid appearance
+- **Overlay canvas**: Separate canvas for range rings on top of radar
+- **Range change clearing**: Clears spoke data when range changes
 
 ---
 
-## 2. Async Initialization
+## 2. Canvas Architecture
+
+### Three-Layer Canvas Stack
+
+```
+z-index 3: myr_canvas_overlay  (range rings - green, on TOP)
+z-index 2: myr_canvas_webgpu   (radar spokes - WebGPU rendered)
+z-index 1: myr_canvas_background (title, no-transmit zones)
+```
+
+```javascript
+constructor(canvas_dom, canvas_background_dom, drawBackground) {
+    this.dom = canvas_dom;  // WebGPU canvas
+    this.background_dom = canvas_background_dom;
+    this.background_ctx = this.background_dom.getContext("2d");
+    // Overlay canvas for range rings (on top of radar)
+    this.overlay_dom = document.getElementById("myr_canvas_overlay");
+    this.overlay_ctx = this.overlay_dom ? this.overlay_dom.getContext("2d") : null;
+}
+```
+
+---
+
+## 3. Async Initialization
 
 ### Constructor Pattern
 
@@ -36,6 +61,7 @@ constructor(canvas_dom, canvas_background_dom, drawBackground) {
     this.ready = false;
     this.pendingLegend = null;
     this.pendingSpokes = null;
+    this.actual_range = 0;
 
     // Start async initialization
     this.initPromise = this.#initWebGPU();
@@ -47,12 +73,16 @@ async #initWebGPU() {
     }
 
     const adapter = await navigator.gpu.requestAdapter();
-    const device = await adapter.requestDevice();
-    const context = this.dom.getContext("webgpu");
+    if (!adapter) {
+        throw new Error("No WebGPU adapter found");
+    }
+
+    this.device = await adapter.requestDevice();
+    this.context = this.dom.getContext("webgpu");
 
     this.canvasFormat = navigator.gpu.getPreferredCanvasFormat();
-    context.configure({
-        device: device,
+    this.context.configure({
+        device: this.device,
         format: this.canvasFormat,
         alphaMode: "premultiplied",
     });
@@ -65,13 +95,14 @@ async #initWebGPU() {
 ```
 
 ### Pending Call Pattern
-Since setSpokes/setLegend may be called before WebGPU is ready, they queue pending operations:
+Since setSpokes/setLegend may be called before WebGPU is ready:
 
 ```javascript
 setSpokes(spokesPerRevolution, max_spoke_len) {
     if (!this.ready) {
         this.pendingSpokes = { spokesPerRevolution, max_spoke_len };
-        // Still create CPU buffer for data accumulation
+        this.spokesPerRevolution = spokesPerRevolution;
+        this.max_spoke_len = max_spoke_len;
         this.data = new Uint8Array(spokesPerRevolution * max_spoke_len);
         return;
     }
@@ -81,7 +112,7 @@ setSpokes(spokesPerRevolution, max_spoke_len) {
 
 ---
 
-## 3. Resource Creation
+## 4. Resource Creation
 
 ### Polar Data Texture
 
@@ -110,13 +141,6 @@ for (let i = 0; i < l.length; i++) {
     colorTableData[i * 4 + 2] = l[i][2];  // B
     colorTableData[i * 4 + 3] = l[i][3];  // A
 }
-
-this.device.queue.writeTexture(
-    { texture: this.colorTexture },
-    colorTableData,
-    { bytesPerRow: 256 * 4 },
-    { width: 256, height: 1 }
-);
 ```
 
 ### Sampler
@@ -126,43 +150,25 @@ this.sampler = this.device.createSampler({
     magFilter: "linear",
     minFilter: "linear",
     addressModeU: "clamp-to-edge",
-    addressModeV: "clamp-to-edge",
+    addressModeV: "repeat",  // Wrap around for angles
 });
 ```
 
-### Uniform Buffer (Transformation Matrix)
+### Uniform Buffer
 
 ```javascript
 this.uniformBuffer = this.device.createBuffer({
-    size: 64,  // 4x4 matrix = 16 floats = 64 bytes
+    size: 32,  // scaleX, scaleY, spokesPerRev, maxSpokeLen + padding
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 });
 ```
 
-### Vertex Buffer
-
-```javascript
-const vertices = new Float32Array([
-    // Position (x, y), TexCoord (u, v)
-    -1.0, -1.0, 0.0, 0.0,
-     1.0, -1.0, 1.0, 0.0,
-    -1.0,  1.0, 0.0, 1.0,
-     1.0,  1.0, 1.0, 1.0,
-]);
-
-this.vertexBuffer = this.device.createBuffer({
-    size: vertices.byteLength,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-});
-this.device.queue.writeBuffer(this.vertexBuffer, 0, vertices);
-```
-
 ---
 
-## 4. Bind Group Layout
+## 5. Bind Group Layout
 
 ```javascript
-const bindGroupLayout = this.device.createBindGroupLayout({
+this.bindGroupLayout = this.device.createBindGroupLayout({
     entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "float" } },           // polar data
@@ -170,13 +176,13 @@ const bindGroupLayout = this.device.createBindGroupLayout({
           texture: { sampleType: "float" } },           // color table
         { binding: 2, visibility: GPUShaderStage.FRAGMENT,
           sampler: { type: "filtering" } },             // sampler
-        { binding: 3, visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "uniform" } },                // transform matrix
+        { binding: 3, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+          buffer: { type: "uniform" } },                // uniforms
     ],
 });
 
 this.bindGroup = this.device.createBindGroup({
-    layout: bindGroupLayout,
+    layout: this.bindGroupLayout,
     entries: [
         { binding: 0, resource: this.polarTexture.createView() },
         { binding: 1, resource: this.colorTexture.createView() },
@@ -188,13 +194,13 @@ this.bindGroup = this.device.createBindGroup({
 
 ---
 
-## 5. Render Pipeline
+## 6. Render Pipeline
 
 ```javascript
-this.pipeline = this.device.createRenderPipeline({
-    layout: pipelineLayout,
+this.renderPipeline = this.device.createRenderPipeline({
+    layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] }),
     vertex: {
-        module: this.shaderModule,
+        module: shaderModule,
         entryPoint: "vertexMain",
         buffers: [{
             arrayStride: 16,  // 4 floats × 4 bytes
@@ -205,7 +211,7 @@ this.pipeline = this.device.createRenderPipeline({
         }],
     },
     fragment: {
-        module: this.shaderModule,
+        module: shaderModule,
         entryPoint: "fragmentMain",
         targets: [{ format: this.canvasFormat }],
     },
@@ -215,7 +221,20 @@ this.pipeline = this.device.createRenderPipeline({
 
 ---
 
-## 6. WGSL Shaders
+## 7. WGSL Shaders
+
+### Uniform Structure
+
+```wgsl
+struct Uniforms {
+  scaleX: f32,
+  scaleY: f32,
+  spokesPerRev: f32,
+  maxSpokeLen: f32,
+}
+
+@group(0) @binding(3) var<uniform> uniforms: Uniforms;
+```
 
 ### Vertex Shader
 
@@ -225,15 +244,11 @@ struct VertexOutput {
     @location(0) texCoord: vec2<f32>,
 }
 
-@group(0) @binding(3) var<uniform> u_transform: mat4x4<f32>;
-
 @vertex
-fn vertexMain(
-    @location(0) pos: vec2<f32>,
-    @location(1) texCoord: vec2<f32>
-) -> VertexOutput {
+fn vertexMain(@location(0) pos: vec2<f32>, @location(1) texCoord: vec2<f32>) -> VertexOutput {
     var output: VertexOutput;
-    output.position = u_transform * vec4<f32>(pos, 0.0, 1.0);
+    let scaledPos = vec2<f32>(pos.x * uniforms.scaleX, pos.y * uniforms.scaleY);
+    output.position = vec4<f32>(scaledPos, 0.0, 1.0);
     output.texCoord = texCoord;
     return output;
 }
@@ -246,61 +261,235 @@ fn vertexMain(
 @group(0) @binding(1) var colorTable: texture_2d<f32>;
 @group(0) @binding(2) var texSampler: sampler;
 
+const PI: f32 = 3.14159265359;
+const TWO_PI: f32 = 6.28318530718;
+
 @fragment
 fn fragmentMain(@location(0) texCoord: vec2<f32>) -> @location(0) vec4<f32> {
-    // Convert cartesian to polar
+    // Convert cartesian (texCoord) to polar for sampling radar data
     let centered = texCoord - vec2<f32>(0.5, 0.5);
+
+    // Calculate radius (0 at center, 1 at edge)
     let r = length(centered) * 2.0;
-    let theta = atan2(centered.y, centered.x);
 
-    // Normalize theta to [0, 1]
-    let normalizedTheta = 1.0 - (theta + 3.14159265) / (2.0 * 3.14159265);
+    // Calculate angle - clockwise from top (bow)
+    // atan2(x, y) gives clockwise angle from Y-axis
+    var theta = atan2(centered.x, centered.y);
+    if (theta < 0.0) {
+        theta = theta + TWO_PI;
+    }
 
-    // Sample radar data (index 0-1)
-    let index = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta)).r;
+    // Normalize to [0, 1] for texture V coordinate
+    let normalizedTheta = theta / TWO_PI;
 
-    // Color table lookup
-    let color = textureSample(colorTable, texSampler, vec2<f32>(index, 0.0));
+    // Sample polar data
+    // U = radius [0,1], V = angle [0,1]
+    // V: 0=bow, 0.25=starboard, 0.5=stern, 0.75=port
+    let radarValue = textureSample(polarData, texSampler, vec2<f32>(r, normalizedTheta)).r;
 
-    // Mask outside circle and empty data
+    // Look up color from table
+    let color = textureSample(colorTable, texSampler, vec2<f32>(radarValue, 0.0));
+
+    // Mask pixels outside radar circle
     let insideCircle = step(r, 1.0);
-    let hasData = step(0.004, index);  // ~1/255 threshold
-    let alpha = insideCircle * hasData * color.a;
+    let hasData = step(0.004, radarValue);  // ~1/255 threshold
+    let alpha = hasData * color.a * insideCircle;
 
-    return vec4<f32>(color.rgb, alpha);
+    return vec4<f32>(color.rgb * insideCircle, alpha);
 }
 ```
 
-### Key Shader Features
-- **step() functions**: Avoids if-statements for better GPU performance
-- **Masking**: Transparent outside radar circle and for empty data
-- **Same math**: Identical polar conversion as WebGL version
+### Radar Angle Convention
+
+```
+Radar convention (from Furuno protobuf):
+- angle 0 = bow (top on screen)
+- angle increases clockwise: bow -> starboard -> stern -> port -> bow
+
+Screen coordinates (after centering):
+- Top (bow):      centered = (0, +0.5)   -> theta = 0
+- Right (stbd):   centered = (+0.5, 0)   -> theta = PI/2
+- Bottom (stern): centered = (0, -0.5)   -> theta = PI
+- Left (port):    centered = (-0.5, 0)   -> theta = 3PI/2
+```
 
 ---
 
-## 7. Rendering
+## 8. Neighbor Filling (Solid Radar Display)
 
-### drawSpoke() - Accumulate Data
+The renderer enhances adjacent spokes for a more solid appearance:
 
 ```javascript
 drawSpoke(spoke) {
     if (!this.data) return;
 
+    // Clear data when range changes
+    if (this.actual_range != spoke.range) {
+        this.actual_range = spoke.range;
+        this.data.fill(0);
+        this.redrawCanvas();
+    }
+
+    const spokeLen = spoke.data.length;
+    const maxLen = this.max_spoke_len;
+    const spokes = this.spokesPerRevolution;
+
+    // Calculate neighbor spoke offsets (±4 spokes with wrap-around)
+    const blendFactors = [0.9, 0.75, 0.55, 0.35]; // Falloff for each distance
+
+    const neighborOffsets = [];
+    for (let d = 1; d <= 4; d++) {
+        const prev = (spoke.angle + spokes - d) % spokes;
+        const next = (spoke.angle + d) % spokes;
+        neighborOffsets.push({
+            prevOffset: prev * maxLen,
+            nextOffset: next * maxLen,
+            blend: blendFactors[d - 1]
+        });
+    }
+
     let offset = spoke.angle * this.max_spoke_len;
-    this.data.set(spoke.data, offset);
-    if (spoke.data.length < this.max_spoke_len) {
-        this.data.fill(0, offset + spoke.data.length, offset + this.max_spoke_len);
+
+    for (let i = 0; i < spokeLen; i++) {
+        const val = spoke.data[i];
+        // Write current spoke at full value
+        this.data[offset + i] = val;
+
+        // Enhance neighbors if this pixel has signal
+        if (val > 1) {
+            for (const n of neighborOffsets) {
+                const blendVal = Math.floor(val * n.blend);
+                if (this.data[n.prevOffset + i] < blendVal) {
+                    this.data[n.prevOffset + i] = blendVal;
+                }
+                if (this.data[n.nextOffset + i] < blendVal) {
+                    this.data[n.nextOffset + i] = blendVal;
+                }
+            }
+        }
     }
 }
 ```
 
-### render() - GPU Upload and Draw
+### Blend Factor Falloff
+
+| Distance | Factor | Effect |
+|----------|--------|--------|
+| ±1 spoke | 0.90 | 90% intensity |
+| ±2 spokes | 0.75 | 75% intensity |
+| ±3 spokes | 0.55 | 55% intensity |
+| ±4 spokes | 0.35 | 35% intensity |
+
+---
+
+## 9. Overlay Canvas (Range Rings)
+
+Range rings are drawn on a separate overlay canvas on TOP of radar:
+
+```javascript
+#drawOverlay() {
+    if (!this.overlay_ctx) return;
+
+    const ctx = this.overlay_ctx;
+    const range = this.range || this.actual_range;
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.width, this.height);
+
+    // Draw range rings in bright green on top of radar
+    ctx.strokeStyle = "#00ff00";
+    ctx.lineWidth = 1.5;
+    ctx.fillStyle = "#00ff00";
+    ctx.font = "bold 14px/1 Verdana, Geneva, sans-serif";
+
+    for (let i = 1; i <= 4; i++) {
+        const radius = (i * this.beam_length) / 4;
+        ctx.beginPath();
+        ctx.arc(this.center_x, this.center_y, radius, 0, 2 * Math.PI);
+        ctx.stroke();
+
+        // Draw range labels at 45 degrees (upper right)
+        if (range) {
+            const text = formatRangeValue(is_metric(range), (range * i) / 4);
+            const labelX = this.center_x + (radius * 0.707);
+            const labelY = this.center_y - (radius * 0.707);
+            ctx.fillText(text, labelX + 5, labelY - 5);
+        }
+    }
+}
+```
+
+---
+
+## 10. Range Change Handling
+
+When range changes, old spoke data is cleared:
+
+```javascript
+setRange(range) {
+    this.range = range;
+    // Clear spoke data when range changes - old data is no longer valid
+    if (this.data) {
+        this.data.fill(0);
+    }
+    this.redrawCanvas();
+}
+
+drawSpoke(spoke) {
+    // Also check in drawSpoke when range comes from spoke data
+    if (this.actual_range != spoke.range) {
+        this.actual_range = spoke.range;
+        this.data.fill(0);  // Clear old data
+        this.redrawCanvas();
+    }
+    // ...
+}
+```
+
+---
+
+## 11. Debug Display
+
+Debug information is drawn on the background canvas:
+
+```javascript
+#updateUniforms() {
+    const range = this.range || this.actual_range || 1500;
+    const scale = (1.0 * this.actual_range) / range;
+
+    const scaleX = scale * ((2 * this.beam_length) / this.width);
+    const scaleY = scale * ((2 * this.beam_length) / this.height);
+
+    // Pack uniforms
+    const uniforms = new Float32Array([
+        scaleX, scaleY,
+        this.spokesPerRevolution || 2048,
+        this.max_spoke_len || 512,
+        0, 0, 0, 0  // padding to 32 bytes
+    ]);
+
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
+
+    // Debug labels with units
+    this.background_ctx.fillStyle = "lightgreen";
+    this.background_ctx.fillText("Beam length: " + this.beam_length + " px", 5, 40);
+    this.background_ctx.fillText("Display range: " + formatRangeValue(is_metric(range), range), 5, 60);
+    this.background_ctx.fillText("Radar range: " + formatRangeValue(is_metric(this.actual_range), this.actual_range), 5, 80);
+    this.background_ctx.fillText("Spoke length: " + (this.max_spoke_len || 0) + " px", 5, 100);
+}
+```
+
+---
+
+## 12. Rendering Loop
 
 ```javascript
 render() {
-    if (!this.ready || !this.data || !this.pipeline) return;
+    if (!this.ready || !this.data || !this.bindGroup) {
+        return;
+    }
 
-    // Upload spoke data to GPU texture
+    // Upload spoke data to GPU
     this.device.queue.writeTexture(
         { texture: this.polarTexture },
         this.data,
@@ -308,11 +497,9 @@ render() {
         { width: this.max_spoke_len, height: this.spokesPerRevolution }
     );
 
-    // Create command encoder
     const encoder = this.device.createCommandEncoder();
 
-    // Begin render pass
-    const pass = encoder.beginRenderPass({
+    const renderPass = encoder.beginRenderPass({
         colorAttachments: [{
             view: this.context.getCurrentTexture().createView(),
             clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
@@ -321,119 +508,15 @@ render() {
         }],
     });
 
-    // Draw
-    pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bindGroup);
-    pass.setVertexBuffer(0, this.vertexBuffer);
-    pass.draw(4);
-    pass.end();
+    renderPass.setPipeline(this.renderPipeline);
+    renderPass.setBindGroup(0, this.bindGroup);
+    renderPass.setVertexBuffer(0, this.vertexBuffer);
+    renderPass.draw(4);
+    renderPass.end();
 
-    // Submit
     this.device.queue.submit([encoder.finish()]);
 }
 ```
-
----
-
-## 8. Transformation Matrix
-
-```javascript
-#setTransformationMatrix() {
-    const range = this.range || this.actual_range || 1500;
-    const scale = (1.0 * this.actual_range) / range;
-    const angle = Math.PI / 2;  // 90° rotation
-
-    const scaleX = scale * ((2 * this.beam_length) / this.width);
-    const scaleY = scale * ((2 * this.beam_length) / this.height);
-
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-
-    // Combined rotation + scaling (column-major for WebGPU)
-    const transformMatrix = new Float32Array([
-        cos * scaleX, -sin * scaleX, 0.0, 0.0,
-        sin * scaleY,  cos * scaleY, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
-    ]);
-
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, transformMatrix);
-}
-```
-
----
-
-## 9. Pros and Cons
-
-### Advantages
-1. **Modern API**: WebGPU is the future of web graphics
-2. **Better performance potential**: More explicit control
-3. **Compute shader ready**: Could add GPU preprocessing
-4. **Cross-platform**: Same code works on all WebGPU implementations
-
-### Disadvantages
-1. **Browser support**: Not yet universal (Chrome/Edge only as of 2024)
-2. **Complexity**: More boilerplate than WebGL
-3. **Async setup**: Requires careful handling of initialization
-4. **No fallback**: Must detect and use WebGL if unavailable
-
----
-
-## 10. WebGPU vs WebGL Comparison
-
-| Aspect | WebGPU | WebGL2 |
-|--------|--------|--------|
-| API style | Modern, explicit | Legacy OpenGL |
-| Initialization | Async (await) | Sync |
-| Resource binding | Bind groups | Individual uniforms |
-| Shader language | WGSL | GLSL ES |
-| Command submission | Command encoder | Immediate mode |
-| Browser support | Chrome, Edge | Universal |
-| Texture upload | queue.writeTexture | texImage2D |
-
----
-
-## 11. Error Handling
-
-```javascript
-async #initWebGPU() {
-    if (!navigator.gpu) {
-        throw new Error("WebGPU not supported");
-    }
-
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) {
-        throw new Error("No WebGPU adapter found");
-    }
-
-    this.device = await adapter.requestDevice();
-    // ...
-}
-```
-
-Caller should catch these errors and fall back to WebGL.
-
----
-
-## 12. Canvas Configuration
-
-```javascript
-// Initial setup
-this.context.configure({
-    device: this.device,
-    format: this.canvasFormat,
-    alphaMode: "premultiplied",
-});
-
-// On resize (in redrawCanvas)
-this.context.configure({
-    device: this.device,
-    format: this.canvasFormat,
-    alphaMode: "premultiplied",
-});
-```
-
-**alphaMode: "premultiplied"**: Enables transparency, important for overlaying radar on charts.
 
 ---
 
@@ -443,7 +526,7 @@ this.context.configure({
 
 | Texture | Format | Size | Bytes |
 |---------|--------|------|-------|
-| Polar data | r8unorm | 1024 × 2048 | 2 MB |
+| Polar data | r8unorm | max_spoke_len × spokesPerRev | ~2 MB (512×8192) |
 | Color table | rgba8unorm | 256 × 1 | 1 KB |
 | **Total** | | | ~2 MB |
 
@@ -451,29 +534,44 @@ this.context.configure({
 
 | Buffer | Size | Purpose |
 |--------|------|---------|
-| Uniform | 64 bytes | Transform matrix |
-| Vertex | 64 bytes | Fullscreen quad |
-| **Total** | 128 bytes | |
+| Uniform | 32 bytes | scaleX, scaleY, spokesPerRev, maxSpokeLen |
+| Vertex | 64 bytes | Fullscreen quad (4 vertices × 4 floats) |
+| **Total** | ~100 bytes | |
 
 ---
 
-## 14. Source Code Reference
+## 14. Pros and Cons
 
-**File**: `mayara-signalk-wasm/public/render_webgpu.js` (commit 52639a5)
+### Advantages
+1. **Modern API**: WebGPU is the future of web graphics
+2. **Better performance potential**: More explicit control over GPU
+3. **Neighbor filling**: Creates solid radar display without manual blending
+4. **Overlay canvas**: Range rings visible on top of radar spokes
+5. **Range-aware clearing**: Properly handles range changes
 
-Key functions:
-- `constructor()` - Start async init
-- `#initWebGPU()` - Device setup, pipeline creation
-- `#createPipelineAndBindGroup()` - WebGPU pipeline setup
-- `setSpokes()` - Create polar texture, handle pending
-- `setLegend()` - Create color table texture
-- `drawSpoke()` - Copy spoke data to CPU buffer
-- `render()` - Texture upload, command encoding, submit
-- `#setTransformationMatrix()` - Update uniform buffer
+### Disadvantages
+1. **Browser support**: Requires modern browsers (Chrome 113+, Edge, Firefox Nightly)
+2. **Complexity**: More boilerplate than WebGL
+3. **Async setup**: Requires careful handling of initialization
+4. **No fallback**: Must detect and use WebGL if unavailable
 
 ---
 
-## 15. Usage in viewer.js
+## 15. WebGPU vs WebGL Comparison
+
+| Aspect | WebGPU | WebGL2 |
+|--------|--------|--------|
+| API style | Modern, explicit | Legacy OpenGL |
+| Initialization | Async (await) | Sync |
+| Resource binding | Bind groups | Individual uniforms |
+| Shader language | WGSL | GLSL ES |
+| Command submission | Command encoder | Immediate mode |
+| Browser support | Chrome 113+, Edge | Universal |
+| Texture upload | queue.writeTexture | texImage2D |
+
+---
+
+## 16. Usage in viewer.js
 
 ```javascript
 // Detection and fallback
@@ -485,6 +583,27 @@ try {
     console.log("WebGPU not available, falling back to WebGL");
     renderer = new render_webgl(canvas, background, drawBackground);
 }
+
+// Default behavior: WebGPU if available
+if (navigator.gpu) {
+    renderer = new render_webgpu(canvas, background, drawBackground);
+} else {
+    renderer = new render_webgl(canvas, background, drawBackground);
+}
 ```
 
-The viewer should detect WebGPU support and fall back gracefully.
+---
+
+## 17. Key Implementation Details
+
+### Furuno DRS4D-NXT Specifics
+- **6-bit pixel values**: Spoke data uses values 0-63 (scaled in color table)
+- **8192 spokes/revolution**: High spoke count for smooth display
+- **512 samples/spoke**: Range resolution per spoke
+- **Range table**: Non-sequential wire indices for Furuno protocol
+
+### Color Table
+- 256 entries for full 8-bit lookup
+- First 64 entries used for actual radar data (6-bit)
+- Index 0 = transparent (background)
+- Higher values = stronger returns (typically yellow/red)
