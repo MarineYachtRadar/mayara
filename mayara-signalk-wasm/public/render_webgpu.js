@@ -7,6 +7,9 @@ class render_webgpu {
     this.dom = canvas_dom;
     this.background_dom = canvas_background_dom;
     this.background_ctx = this.background_dom.getContext("2d");
+    // Overlay canvas for range rings (on top of radar)
+    this.overlay_dom = document.getElementById("myr_canvas_overlay");
+    this.overlay_ctx = this.overlay_dom ? this.overlay_dom.getContext("2d") : null;
     this.drawBackgroundCallback = drawBackground;
 
     this.actual_range = 0;
@@ -146,6 +149,10 @@ class render_webgpu {
 
   setRange(range) {
     this.range = range;
+    // Clear spoke data when range changes - old data is no longer valid
+    if (this.data) {
+      this.data.fill(0);
+    }
     this.redrawCanvas();
   }
 
@@ -201,6 +208,8 @@ class render_webgpu {
 
     if (this.actual_range != spoke.range) {
       this.actual_range = spoke.range;
+      // Clear spoke data when range changes - old data is at wrong scale
+      this.data.fill(0);
       this.redrawCanvas();
     }
 
@@ -218,9 +227,48 @@ class render_webgpu {
       return;
     }
 
-    this.data.set(spoke.data, offset);
-    if (spoke.data.length < this.max_spoke_len) {
-      this.data.fill(0, offset + spoke.data.length, offset + this.max_spoke_len);
+    // Write spoke data with neighbor enhancement
+    // For each pixel, if it has a value, also boost adjacent spokes
+    const spokeLen = spoke.data.length;
+    const maxLen = this.max_spoke_len;
+    const spokes = this.spokesPerRevolution;
+
+    // Calculate neighbor spoke offsets (with wrap-around) - 4 spokes each direction
+    const neighborOffsets = [];
+    const blendFactors = [0.9, 0.75, 0.55, 0.35]; // Falloff for each distance
+
+    for (let d = 1; d <= 4; d++) {
+      const prev = (spoke.angle + spokes - d) % spokes;
+      const next = (spoke.angle + d) % spokes;
+      neighborOffsets.push({
+        prevOffset: prev * maxLen,
+        nextOffset: next * maxLen,
+        blend: blendFactors[d - 1]
+      });
+    }
+
+    for (let i = 0; i < spokeLen; i++) {
+      const val = spoke.data[i];
+      // Write current spoke at full value
+      this.data[offset + i] = val;
+
+      // Enhance neighbors if this pixel has signal
+      if (val > 1) {
+        for (const n of neighborOffsets) {
+          const blendVal = Math.floor(val * n.blend);
+          if (this.data[n.prevOffset + i] < blendVal) {
+            this.data[n.prevOffset + i] = blendVal;
+          }
+          if (this.data[n.nextOffset + i] < blendVal) {
+            this.data[n.nextOffset + i] = blendVal;
+          }
+        }
+      }
+    }
+
+    // Clear remainder of spoke if data is shorter than max
+    if (spokeLen < maxLen) {
+      this.data.fill(0, offset + spokeLen, offset + maxLen);
     }
   }
 
@@ -266,6 +314,10 @@ class render_webgpu {
     this.dom.height = h;
     this.background_dom.width = w;
     this.background_dom.height = h;
+    if (this.overlay_dom) {
+      this.overlay_dom.width = w;
+      this.overlay_dom.height = h;
+    }
 
     this.width = this.dom.width;
     this.height = this.dom.height;
@@ -276,6 +328,7 @@ class render_webgpu {
     );
 
     this.drawBackgroundCallback(this, "MAYARA (WebGPU)");
+    this.#drawOverlay();
 
     if (this.ready) {
       this.context.configure({
@@ -284,6 +337,38 @@ class render_webgpu {
         alphaMode: "premultiplied",
       });
       this.#updateUniforms();
+    }
+  }
+
+  #drawOverlay() {
+    if (!this.overlay_ctx) return;
+
+    const ctx = this.overlay_ctx;
+    const range = this.range || this.actual_range;
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.width, this.height);
+
+    // Draw range rings in bright green on top of radar
+    ctx.strokeStyle = "#00ff00";
+    ctx.lineWidth = 1.5;
+    ctx.fillStyle = "#00ff00";
+    ctx.font = "bold 14px/1 Verdana, Geneva, sans-serif";
+
+    for (let i = 1; i <= 4; i++) {
+      const radius = (i * this.beam_length) / 4;
+      ctx.beginPath();
+      ctx.arc(this.center_x, this.center_y, radius, 0, 2 * Math.PI);
+      ctx.stroke();
+
+      // Draw range labels
+      if (range) {
+        const text = formatRangeValue(is_metric(range), (range * i) / 4);
+        // Position labels at 45 degrees (upper right)
+        const labelX = this.center_x + (radius * 0.707);
+        const labelY = this.center_y - (radius * 0.707);
+        ctx.fillText(text, labelX + 5, labelY - 5);
+      }
     }
   }
 

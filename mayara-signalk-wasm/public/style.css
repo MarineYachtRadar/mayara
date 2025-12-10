@@ -236,6 +236,14 @@ div.myr_ppi {
     top: 0;
 }
 
+#myr_canvas_overlay {
+    z-index: 3;
+    position: absolute;
+    left: 0;
+    top: 0;
+    pointer-events: none;
+}
+
 /* Clutter controls (Gain/Sea/Rain) */
 .myr_clutter_control {
   margin: 8px 2px;

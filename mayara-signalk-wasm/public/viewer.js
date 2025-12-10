@@ -269,34 +269,8 @@ function drawBackground(obj, txt) {
   obj.background_ctx.setTransform(1, 0, 0, 1, 0, 0);
   obj.background_ctx.clearRect(0, 0, obj.width, obj.height);
 
-  // Use actual_range as fallback if range not set from controls
-  const range = obj.range || obj.actual_range;
-
-  obj.background_ctx.strokeStyle = "white";
-  obj.background_ctx.fillStyle = "white";
-  obj.background_ctx.font = "bold 16px/1 Verdana, Geneva, sans-serif";
-  for (let i = 0; i <= 4; i++) {
-    obj.background_ctx.beginPath();
-    obj.background_ctx.arc(
-      obj.center_x,
-      obj.center_y,
-      (i * obj.beam_length) / 4,
-      0,
-      2 * Math.PI
-    );
-    obj.background_ctx.stroke();
-    if (i > 0 && range) {
-      let text = formatRangeValue(is_metric(range), (range * i) / 4);
-      obj.background_ctx.fillText(
-        text,
-        obj.center_x + (i * obj.beam_length * 1.41) / 8,
-        obj.center_y + (i * obj.beam_length * -1.41) / 8
-      );
-    }
-  }
-
+  // No transmit zones (drawn on background, behind radar)
   obj.background_ctx.fillStyle = "lightgrey";
-
   if (typeof noTransmitAngles == "array") {
     noTransmitAngles.forEach((e) => {
       if (e && e[0]) {
@@ -312,6 +286,9 @@ function drawBackground(obj, txt) {
       }
     });
   }
+
+  // Title text
   obj.background_ctx.fillStyle = "lightblue";
+  obj.background_ctx.font = "bold 16px/1 Verdana, Geneva, sans-serif";
   obj.background_ctx.fillText(txt, 5, 20);
 }
