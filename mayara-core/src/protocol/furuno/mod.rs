@@ -19,7 +19,7 @@ use super::c_string;
 pub const SPOKES_PER_REVOLUTION: u16 = 8192;
 
 /// Maximum spoke length in pixels
-pub const MAX_SPOKE_LEN: u16 = 883;
+pub const MAX_SPOKE_LEN: u16 = 884;
 
 /// Base port for Furuno radar communication
 pub const BASE_PORT: u16 = 10000;
@@ -542,8 +542,9 @@ fn decode_encoding_3(data: &[u8], prev_spoke: &[u8], sweep_len: usize) -> (Vec<u
 }
 
 /// Standard Furuno DRS-NXT range table (in meters)
-/// Index 0-23 correspond to range_index values
-/// Based on nautical mile increments: 1/8, 1/4, 1/2, 3/4, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48 nm
+/// Index 0-21 correspond to Furuno DRS range_index values
+/// Note: Furuno uses non-sequential indexing!
+/// Index 21 = minimum (1/16 nm), Index 15 = maximum (48 nm), Index 19 = 36 nm (out of sequence)
 /// 1 nautical mile = 1852 meters
 pub const RANGE_TABLE: [u32; 24] = [
     231,    // 0: 1/8 nm
@@ -560,16 +561,16 @@ pub const RANGE_TABLE: [u32; 24] = [
     22224,  // 11: 12 nm
     29632,  // 12: 16 nm
     44448,  // 13: 24 nm
-    66672,  // 14: 36 nm
-    88896,  // 15: 48 nm
-    133344, // 16: 72 nm (extrapolated)
-    177792, // 17: 96 nm
-    222240, // 18: 120 nm
-    296320, // 19: 160 nm
-    370400, // 20: 200 nm
-    444480, // 21: 240 nm
-    592640, // 22: 320 nm
-    740800, // 23: 400 nm
+    59264,  // 14: 32 nm
+    88896,  // 15: 48 nm (maximum)
+    0,      // 16: unused
+    0,      // 17: unused
+    0,      // 18: unused
+    66672,  // 19: 36 nm (out of sequence!)
+    0,      // 20: unused
+    116,    // 21: 1/16 nm (minimum)
+    0,      // 22: unused
+    0,      // 23: unused
 ];
 
 /// Get range in meters from range index
@@ -608,7 +609,7 @@ mod tests {
         assert_eq!(discovery.brand, Brand::Furuno);
         assert_eq!(discovery.name, "RD003212");
         assert_eq!(discovery.spokes_per_revolution, 8192);
-        assert_eq!(discovery.max_spoke_len, 883);
+        assert_eq!(discovery.max_spoke_len, 884);
     }
 
     #[test]

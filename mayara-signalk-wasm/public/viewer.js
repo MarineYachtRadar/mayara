@@ -13,6 +13,7 @@ import "./protobuf/protobuf.min.js";
 import { render_2d } from "./render_2d.js";
 import { render_webgl } from "./render_webgl.js";
 import { render_webgl_alt } from "./render_webgl_alt.js";
+import { render_webgpu } from "./render_webgpu.js";
 
 var webSocket;
 var RadarMessage;
@@ -102,13 +103,35 @@ window.onload = function () {
         document.getElementById("myr_canvas_background"),
         drawBackground
       );
-    } else {
-      // Default: WebGL with line-pairs for filled areas
+    } else if (draw == "webgpu") {
+      // WebGPU - texture-based polar rendering
+      renderer = new render_webgpu(
+        document.getElementById("myr_canvas_webgl"),
+        document.getElementById("myr_canvas_background"),
+        drawBackground
+      );
+    } else if (draw == "alt") {
+      // WebGL with line-pairs for filled areas
       renderer = new render_webgl_alt(
         document.getElementById("myr_canvas_webgl"),
         document.getElementById("myr_canvas_background"),
         drawBackground
       );
+    } else {
+      // Default: WebGPU if available, else WebGL
+      if (navigator.gpu) {
+        renderer = new render_webgpu(
+          document.getElementById("myr_canvas_webgl"),
+          document.getElementById("myr_canvas_background"),
+          drawBackground
+        );
+      } else {
+        renderer = new render_webgl(
+          document.getElementById("myr_canvas_webgl"),
+          document.getElementById("myr_canvas_background"),
+          drawBackground
+        );
+      }
     }
   } catch (e) {
     console.log(e);
@@ -171,37 +194,8 @@ function radarLoaded(r) {
         for (let i = 0; i < message.spokes.length; i++) {
           let spoke = message.spokes[i];
 
-          // The number of spokes actually sent can be lower than the stated angles,
-          // fill out the spokes between prev_angle and spoke.angle by generating a blankish spoke.
-          if (
-            prev_angle > -1 &&
-            (prev_angle + 1) % spokesPerRevolution != spoke.angle
-          ) {
-            prev_angle = (prev_angle + 1) % spokesPerRevolution;
-            let empty_spoke = {
-              angle: prev_angle,
-              bearing: spoke.bearing,
-              range: spoke.range,
-              data: new Uint8Array(maxSpokeLen).fill(1),
-            };
-            if (prev_angle > spoke.angle) {
-              for (
-                let angle = prev_angle + 1;
-                angle < spokesPerRevolution;
-                angle++
-              ) {
-                empty_spoke.angle = angle;
-                renderer.drawSpoke(empty_spoke);
-              }
-              prev_angle = -1; // Reset to -1 so we can start at 0 again
-            }
-            if (prev_angle < spoke.angle) {
-              for (let angle = prev_angle + 1; angle < spoke.angle; angle++) {
-                empty_spoke.angle = angle;
-                renderer.drawSpoke(empty_spoke);
-              }
-            }
-          }
+          // Gap-filling disabled for high spoke counts (8192) - not needed
+          // The texture-based renderers handle sparse data well
           renderer.drawSpoke(spoke);
           prev_angle = spoke.angle;
           // Update range display from spoke data

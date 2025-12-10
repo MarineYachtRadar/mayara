@@ -6,9 +6,10 @@ use mayara_core::protocol::furuno::{self, ParsedSpoke};
 use crate::signalk_ffi::{debug, UdpSocket, emit_radar_spokes};
 use crate::protobuf::encode_radar_message;
 
-/// Furuno sends 8192 spokes per revolution, we reduce to 2048 for WebSocket efficiency
+/// Furuno sends 8192 spokes per revolution
+/// Set to 1 for full resolution, 4 for reduced (2048 spokes)
 const FURUNO_SPOKE_REDUCTION: usize = 4;
-/// Output spokes per revolution after reduction (8192 / 4 = 2048)
+/// Output spokes per revolution (8192 / FURUNO_SPOKE_REDUCTION)
 pub const FURUNO_OUTPUT_SPOKES: u16 = 2048;
 
 /// State for a single radar's spoke reception

@@ -54,37 +54,38 @@ impl From<&RadarDiscovery> for RadarState {
         let ip = d.address.split(':').next().unwrap_or(&d.address);
 
         // Build default legend (256 entries)
-        // Color gradient matching TimeZero Pro style:
-        // - Index 0-9: transparent (noise floor)
-        // - Index 10-40: dark green (weak returns)
-        // - Index 40-80: green to yellow (medium returns)
-        // - Index 80-150: yellow to orange (stronger returns)
-        // - Index 150-255: orange to bright red (strong returns / land)
+        // Furuno radars use 6-bit values (0-63), so we scale to that range
+        // Color gradient matching TimeZero Pro style (Green → Yellow → Orange → Red):
+        // - Index 0: transparent (noise floor)
+        // - Index 1-15: dark green (weak returns)
+        // - Index 16-31: green to yellow (medium returns)
+        // - Index 32-47: yellow to orange (stronger returns)
+        // - Index 48-63: orange to bright red (strong returns / land)
+        // - Index 64-255: max red (overflow)
         let mut legend = BTreeMap::new();
         for i in 0..256u16 {
-            let (r, g, b) = if i < 10 {
-                // Index 0-9: transparent/black (noise floor)
+            let (r, g, b) = if i == 0 {
+                // Index 0: transparent/black (noise floor)
                 (0u8, 0u8, 0u8)
-            } else if i < 40 {
-                // 10-39: dark green (weak returns)
-                let t = ((i - 10) as f32 / 30.0 * 100.0) as u8;
-                (0, 50 + t, 0)
-            } else if i < 80 {
-                // 40-79: green to yellow-green
-                let t = ((i - 40) as f32 / 40.0 * 200.0) as u8;
-                (t, 150 + (t / 3), 0)
-            } else if i < 150 {
-                // 80-149: yellow to orange
-                let t = ((i - 80) as f32 / 70.0) as f32;
-                let r_val = (200.0 + t * 55.0) as u8;
-                let g_val = (180.0 - t * 100.0) as u8;
-                (r_val, g_val, 0)
+            } else if i <= 15 {
+                // 1-15: dark green (weak returns)
+                let t = (i - 1) as f32 / 14.0;
+                (0, (50.0 + t * 100.0) as u8, 0)
+            } else if i <= 31 {
+                // 16-31: green to yellow-green
+                let t = (i - 16) as f32 / 15.0;
+                ((t * 200.0) as u8, (150.0 + t * 55.0) as u8, 0)
+            } else if i <= 47 {
+                // 32-47: yellow to orange
+                let t = (i - 32) as f32 / 15.0;
+                ((200.0 + t * 55.0) as u8, (180.0 - t * 100.0) as u8, 0)
+            } else if i <= 63 {
+                // 48-63: orange to bright red (strong returns / land)
+                let t = (i - 48) as f32 / 15.0;
+                (255u8, (80.0 - t * 80.0).max(0.0) as u8, 0)
             } else {
-                // 150-255: orange to bright red (strong returns / land)
-                let t = ((i - 150) as f32 / 105.0) as f32;
-                let r_val = 255u8;
-                let g_val = (80.0 - t * 80.0).max(0.0) as u8;
-                (r_val, g_val, 0)
+                // 64-255: max red (overflow protection)
+                (255u8, 0u8, 0u8)
             };
             let color = format!("#{:02X}{:02X}{:02X}", r, g, b);
             legend.insert(i.to_string(), LegendEntry { color });

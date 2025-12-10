@@ -204,7 +204,20 @@ class render_webgpu {
       this.redrawCanvas();
     }
 
+    // Bounds check - log bad angles
+    if (spoke.angle >= this.spokesPerRevolution) {
+      console.error(`Bad spoke angle: ${spoke.angle} >= ${this.spokesPerRevolution}`);
+      return;
+    }
+
     let offset = spoke.angle * this.max_spoke_len;
+
+    // Check if data fits in buffer
+    if (offset + spoke.data.length > this.data.length) {
+      console.error(`Buffer overflow: offset=${offset}, data.len=${spoke.data.length}, buf.len=${this.data.length}, angle=${spoke.angle}, maxSpokeLen=${this.max_spoke_len}, spokes=${this.spokesPerRevolution}`);
+      return;
+    }
+
     this.data.set(spoke.data, offset);
     if (spoke.data.length < this.max_spoke_len) {
       this.data.fill(0, offset + spoke.data.length, offset + this.max_spoke_len);

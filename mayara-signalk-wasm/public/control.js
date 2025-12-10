@@ -263,6 +263,7 @@ async function sendRangeCommand(meters) {
 
 function rangeUp() {
   const currentIndex = findRangeIndex(myr_current_range);
+  console.log(`rangeUp: current=${myr_current_range}m, index=${currentIndex}, next=${currentIndex + 1}, nextValue=${RANGE_TABLE[currentIndex + 1]}m`);
   if (currentIndex < RANGE_TABLE.length - 1) {
     sendRangeCommand(RANGE_TABLE[currentIndex + 1]);
   }
@@ -270,6 +271,7 @@ function rangeUp() {
 
 function rangeDown() {
   const currentIndex = findRangeIndex(myr_current_range);
+  console.log(`rangeDown: current=${myr_current_range}m, index=${currentIndex}, prev=${currentIndex - 1}, prevValue=${RANGE_TABLE[currentIndex - 1]}m`);
   if (currentIndex > 0) {
     sendRangeCommand(RANGE_TABLE[currentIndex - 1]);
   }
@@ -285,6 +287,8 @@ function updateRangeDisplay() {
 // Called from viewer.js when spoke data contains range
 function setCurrentRange(meters) {
   if (meters > 0 && meters !== myr_current_range) {
+    const tableIndex = findRangeIndex(meters);
+    console.log(`setCurrentRange: radar reports ${meters}m, table index ${tableIndex} (${formatRange(meters)})`);
     myr_current_range = meters;
     updateRangeDisplay();
   }
