@@ -61,6 +61,10 @@ extern "C" {
     fn sk_udp_pending(socket_id: i32) -> i32;
     fn sk_udp_set_broadcast(socket_id: i32, enabled: i32) -> i32;
 
+    // Plugin configuration
+    fn sk_read_config(buf_ptr: *mut u8, buf_max_len: usize) -> i32;
+    fn sk_save_config(config_ptr: *const u8, config_len: usize) -> i32;
+
     // TCP Socket functions (rawSockets capability)
     fn sk_tcp_create() -> i32;
     fn sk_tcp_connect(
@@ -477,4 +481,35 @@ pub fn emit_json<T: serde::Serialize>(path: &str, value: &T) {
             set_error(&format!("Failed to serialize JSON for path {}: {}", path, e));
         }
     }
+}
+
+// =============================================================================
+// Plugin Configuration
+// =============================================================================
+
+/// Read the plugin configuration from SignalK
+///
+/// Returns the configuration as a JSON string, or None if not available.
+pub fn read_config() -> Option<String> {
+    const BUF_SIZE: usize = 32768; // 32KB should be enough for config
+    let mut buf = vec![0u8; BUF_SIZE];
+
+    let len = unsafe { sk_read_config(buf.as_mut_ptr(), buf.len()) };
+
+    if len <= 0 {
+        None
+    } else {
+        buf.truncate(len as usize);
+        String::from_utf8(buf).ok()
+    }
+}
+
+/// Save the plugin configuration to SignalK
+///
+/// Returns true on success.
+pub fn save_config(config_json: &str) -> bool {
+    let result = unsafe {
+        sk_save_config(config_json.as_ptr(), config_json.len())
+    };
+    result >= 0
 }

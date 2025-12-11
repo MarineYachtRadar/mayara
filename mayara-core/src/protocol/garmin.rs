@@ -346,6 +346,7 @@ pub fn create_discovery(source_addr: &str) -> RadarDiscovery {
         spokes_per_revolution: SPOKES_PER_REVOLUTION,
         max_spoke_len: MAX_SPOKE_LEN,
         pixel_values: PIXEL_VALUES,
+        serial_number: None,
     }
 }
 

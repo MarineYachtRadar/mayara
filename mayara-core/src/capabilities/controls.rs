@@ -1,0 +1,1357 @@
+//! Standard Control Definitions for SignalK Radar API v5
+//!
+//! This module provides factory functions for creating ControlDefinition
+//! instances for all standard controls (base and extended).
+
+use std::collections::HashMap;
+
+use super::{
+    ControlCategory, ControlDefinition, ControlType, EnumValue, PropertyDefinition, RangeSpec,
+};
+
+// =============================================================================
+// Base Controls (Required - All Radars)
+// =============================================================================
+
+/// Power control: off, standby, transmit
+pub fn control_power() -> ControlDefinition {
+    ControlDefinition {
+        id: "power".into(),
+        name: "Power".into(),
+        description: "Radar operational state".into(),
+        category: ControlCategory::Base,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: "off".into(),
+                label: "Off".into(),
+                description: Some("Radar powered off".into()),
+            },
+            EnumValue {
+                value: "standby".into(),
+                label: "Standby".into(),
+                description: Some("Radar on, not transmitting".into()),
+            },
+            EnumValue {
+                value: "transmit".into(),
+                label: "Transmit".into(),
+                description: Some("Radar transmitting".into()),
+            },
+            EnumValue {
+                value: "warming".into(),
+                label: "Warming Up".into(),
+                description: Some("Magnetron warming (read-only state)".into()),
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some("standby".into()),
+    }
+}
+
+/// Range control: detection range in meters
+pub fn control_range(supported_ranges: &[u32]) -> ControlDefinition {
+    let min = *supported_ranges.first().unwrap_or(&100) as f64;
+    let max = *supported_ranges.last().unwrap_or(&100000) as f64;
+
+    ControlDefinition {
+        id: "range".into(),
+        name: "Range".into(),
+        description: "Detection range in meters. Use supportedRanges from capabilities for valid values.".into(),
+        category: ControlCategory::Base,
+        control_type: ControlType::Number,
+        range: Some(RangeSpec {
+            min,
+            max,
+            step: None, // Discrete values, use supportedRanges
+            unit: Some("meters".into()),
+        }),
+        values: None,
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: None,
+    }
+}
+
+/// Gain control: signal amplification with auto/manual mode
+pub fn control_gain() -> ControlDefinition {
+    let mut properties = HashMap::new();
+
+    properties.insert(
+        "mode".into(),
+        PropertyDefinition {
+            prop_type: "enum".into(),
+            description: Some("Auto or manual control".into()),
+            range: None,
+            values: Some(vec![
+                EnumValue {
+                    value: "auto".into(),
+                    label: "Auto".into(),
+                    description: None,
+                },
+                EnumValue {
+                    value: "manual".into(),
+                    label: "Manual".into(),
+                    description: None,
+                },
+            ]),
+        },
+    );
+
+    properties.insert(
+        "value".into(),
+        PropertyDefinition {
+            prop_type: "number".into(),
+            description: Some("Gain level (0-100%)".into()),
+            range: Some(RangeSpec {
+                min: 0.0,
+                max: 100.0,
+                step: Some(1.0),
+                unit: Some("percent".into()),
+            }),
+            values: None,
+        },
+    );
+
+    ControlDefinition {
+        id: "gain".into(),
+        name: "Gain".into(),
+        description: "Signal amplification. Higher values increase sensitivity but may also amplify noise.".into(),
+        category: ControlCategory::Base,
+        control_type: ControlType::Compound,
+        range: None,
+        values: None,
+        properties: Some(properties),
+        modes: Some(vec!["auto".into(), "manual".into()]),
+        default_mode: Some("auto".into()),
+        read_only: false,
+        default: Some(serde_json::json!({"mode": "auto", "value": 50})),
+    }
+}
+
+/// Sea clutter control: suppresses returns from waves
+pub fn control_sea() -> ControlDefinition {
+    let mut properties = HashMap::new();
+
+    properties.insert(
+        "mode".into(),
+        PropertyDefinition {
+            prop_type: "enum".into(),
+            description: Some("Auto or manual control".into()),
+            range: None,
+            values: Some(vec![
+                EnumValue {
+                    value: "auto".into(),
+                    label: "Auto".into(),
+                    description: None,
+                },
+                EnumValue {
+                    value: "manual".into(),
+                    label: "Manual".into(),
+                    description: None,
+                },
+            ]),
+        },
+    );
+
+    properties.insert(
+        "value".into(),
+        PropertyDefinition {
+            prop_type: "number".into(),
+            description: Some("Sea clutter suppression (0-100%)".into()),
+            range: Some(RangeSpec {
+                min: 0.0,
+                max: 100.0,
+                step: Some(1.0),
+                unit: Some("percent".into()),
+            }),
+            values: None,
+        },
+    );
+
+    ControlDefinition {
+        id: "sea".into(),
+        name: "Sea Clutter".into(),
+        description: "Suppresses radar returns from waves near the vessel.".into(),
+        category: ControlCategory::Base,
+        control_type: ControlType::Compound,
+        range: None,
+        values: None,
+        properties: Some(properties),
+        modes: Some(vec!["auto".into(), "manual".into()]),
+        default_mode: Some("auto".into()),
+        read_only: false,
+        default: Some(serde_json::json!({"mode": "auto", "value": 30})),
+    }
+}
+
+/// Rain clutter control: suppresses returns from precipitation
+pub fn control_rain() -> ControlDefinition {
+    let mut properties = HashMap::new();
+
+    properties.insert(
+        "mode".into(),
+        PropertyDefinition {
+            prop_type: "string".into(),
+            description: Some("Auto or manual mode".into()),
+            range: None,
+            values: Some(vec![
+                EnumValue {
+                    value: serde_json::json!("auto"),
+                    label: "Auto".into(),
+                    description: None,
+                },
+                EnumValue {
+                    value: serde_json::json!("manual"),
+                    label: "Manual".into(),
+                    description: None,
+                },
+            ]),
+        },
+    );
+
+    properties.insert(
+        "value".into(),
+        PropertyDefinition {
+            prop_type: "number".into(),
+            description: Some("Rain clutter suppression (0-100%)".into()),
+            range: Some(RangeSpec {
+                min: 0.0,
+                max: 100.0,
+                step: Some(1.0),
+                unit: Some("percent".into()),
+            }),
+            values: None,
+        },
+    );
+
+    ControlDefinition {
+        id: "rain".into(),
+        name: "Rain Clutter".into(),
+        description: "Suppresses radar returns from rain and precipitation.".into(),
+        category: ControlCategory::Base,
+        control_type: ControlType::Compound,
+        range: None,
+        values: None,
+        properties: Some(properties),
+        modes: Some(vec!["auto".into(), "manual".into()]),
+        default_mode: Some("manual".into()),
+        read_only: false,
+        default: Some(serde_json::json!({"mode": "manual", "value": 0})),
+    }
+}
+
+// =============================================================================
+// Info Controls (Read-Only)
+// =============================================================================
+
+/// Serial number: radar hardware serial number (read-only)
+pub fn control_serial_number() -> ControlDefinition {
+    ControlDefinition {
+        id: "serialNumber".into(),
+        name: "Serial Number".into(),
+        description: "Radar hardware serial number.".into(),
+        category: ControlCategory::Base,
+        control_type: ControlType::String,
+        range: None,
+        values: None,
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: true,
+        default: None,
+    }
+}
+
+/// Firmware version: radar firmware version (read-only)
+pub fn control_firmware_version() -> ControlDefinition {
+    ControlDefinition {
+        id: "firmwareVersion".into(),
+        name: "Firmware Version".into(),
+        description: "Radar firmware version.".into(),
+        category: ControlCategory::Base,
+        control_type: ControlType::String,
+        range: None,
+        values: None,
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: true,
+        default: None,
+    }
+}
+
+/// Operating hours: total hours of radar operation (read-only)
+pub fn control_operating_hours() -> ControlDefinition {
+    ControlDefinition {
+        id: "operatingHours".into(),
+        name: "Operating Hours".into(),
+        description: "Total hours of radar operation.".into(),
+        category: ControlCategory::Base,
+        control_type: ControlType::Number,
+        range: Some(RangeSpec {
+            min: 0.0,
+            max: 999999.0,
+            step: Some(0.1),
+            unit: Some("hours".into()),
+        }),
+        values: None,
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: true,
+        default: None,
+    }
+}
+
+// =============================================================================
+// Extended Controls (Optional - Model-Specific)
+// =============================================================================
+
+/// Beam sharpening: digital beam narrowing for improved resolution
+///
+/// Furuno: RezBoost
+/// Navico: Beam Sharpening
+pub fn control_beam_sharpening() -> ControlDefinition {
+    ControlDefinition {
+        id: "beamSharpening".into(),
+        name: "Beam Sharpening".into(),
+        description: "Digital beam narrowing for improved target separation. Higher levels provide better resolution but may reduce sensitivity.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Off".into(),
+                description: Some("Beam sharpening disabled".into()),
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "Low".into(),
+                description: Some("Mild beam sharpening".into()),
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "Medium".into(),
+                description: Some("Moderate beam sharpening".into()),
+            },
+            EnumValue {
+                value: 3.into(),
+                label: "High".into(),
+                description: Some("Maximum beam sharpening".into()),
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(2.into()),
+    }
+}
+
+/// Doppler mode: motion-based target highlighting
+///
+/// Furuno: Target Analyzer
+/// Navico: VelocityTrack
+/// Raymarine: Doppler
+pub fn control_doppler_mode() -> ControlDefinition {
+    let mut properties = HashMap::new();
+
+    properties.insert(
+        "enabled".into(),
+        PropertyDefinition {
+            prop_type: "boolean".into(),
+            description: Some("Enable Doppler processing".into()),
+            range: None,
+            values: None,
+        },
+    );
+
+    properties.insert(
+        "mode".into(),
+        PropertyDefinition {
+            prop_type: "enum".into(),
+            description: Some("Doppler display mode".into()),
+            range: None,
+            values: Some(vec![
+                EnumValue {
+                    value: "approaching".into(),
+                    label: "Approaching Only".into(),
+                    description: Some("Highlight only approaching targets".into()),
+                },
+                EnumValue {
+                    value: "both".into(),
+                    label: "Both Directions".into(),
+                    description: Some("Highlight both approaching and receding targets".into()),
+                },
+                EnumValue {
+                    value: "target".into(),
+                    label: "Target Mode".into(),
+                    description: Some("Furuno: Highlights collision threats".into()),
+                },
+                EnumValue {
+                    value: "rain".into(),
+                    label: "Rain Mode".into(),
+                    description: Some("Furuno: Identifies precipitation".into()),
+                },
+            ]),
+        },
+    );
+
+    ControlDefinition {
+        id: "dopplerMode".into(),
+        name: "Doppler Mode".into(),
+        description: "Uses Doppler processing to highlight moving targets based on their relative motion.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Compound,
+        range: None,
+        values: None,
+        properties: Some(properties),
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(serde_json::json!({"enabled": true, "mode": "approaching"})),
+    }
+}
+
+/// Bird mode: optimizes display for detecting bird flocks
+pub fn control_bird_mode() -> ControlDefinition {
+    ControlDefinition {
+        id: "birdMode".into(),
+        name: "Bird Mode".into(),
+        description: "Optimizes radar display for detecting flocks of birds, which often indicate fish schools below.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Off".into(),
+                description: Some("Bird mode disabled".into()),
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "Low".into(),
+                description: Some("Mild bird detection sensitivity".into()),
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "Medium".into(),
+                description: Some("Moderate bird detection sensitivity".into()),
+            },
+            EnumValue {
+                value: 3.into(),
+                label: "High".into(),
+                description: Some("Maximum bird detection sensitivity".into()),
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(0.into()),
+    }
+}
+
+/// TX Channel: transmission frequency selection (Furuno)
+pub fn control_tx_channel() -> ControlDefinition {
+    ControlDefinition {
+        id: "txChannel".into(),
+        name: "TX Channel".into(),
+        description: "Selects the transmission frequency channel to avoid interference with nearby radars.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Auto".into(),
+                description: Some("Automatic channel selection".into()),
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "Channel 1".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "Channel 2".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 3.into(),
+                label: "Channel 3".into(),
+                description: None,
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(0.into()),
+    }
+}
+
+/// Interference rejection: filters interference from other radars
+pub fn control_interference_rejection() -> ControlDefinition {
+    ControlDefinition {
+        id: "interferenceRejection".into(),
+        name: "Interference Rejection".into(),
+        description: "Filters interference from other radars operating on similar frequencies.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Off".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "Low".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "Medium".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 3.into(),
+                label: "High".into(),
+                description: None,
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(1.into()),
+    }
+}
+
+/// Preset mode: pre-configured operating modes (Navico, Raymarine)
+pub fn control_preset_mode() -> ControlDefinition {
+    ControlDefinition {
+        id: "presetMode".into(),
+        name: "Preset Mode".into(),
+        description: "Pre-configured operating modes that automatically adjust multiple settings. In preset modes, some controls become read-only.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: "custom".into(),
+                label: "Custom".into(),
+                description: Some("Full manual control of all settings".into()),
+            },
+            EnumValue {
+                value: "harbor".into(),
+                label: "Harbor".into(),
+                description: Some("Optimized for busy ports with fast scanning".into()),
+            },
+            EnumValue {
+                value: "offshore".into(),
+                label: "Offshore".into(),
+                description: Some("Balanced settings for open water navigation".into()),
+            },
+            EnumValue {
+                value: "weather".into(),
+                label: "Weather".into(),
+                description: Some("Enhanced sensitivity for detecting precipitation".into()),
+            },
+            EnumValue {
+                value: "bird".into(),
+                label: "Bird".into(),
+                description: Some("Optimized for detecting bird flocks".into()),
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some("harbor".into()),
+    }
+}
+
+/// Target separation: distinguishes closely-spaced targets (Navico, Raymarine)
+pub fn control_target_separation() -> ControlDefinition {
+    ControlDefinition {
+        id: "targetSeparation".into(),
+        name: "Target Separation".into(),
+        description: "Improves ability to distinguish closely-spaced targets.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Off".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "Low".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "Medium".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 3.into(),
+                label: "High".into(),
+                description: None,
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(1.into()),
+    }
+}
+
+/// Bearing alignment: heading offset correction
+pub fn control_bearing_alignment() -> ControlDefinition {
+    ControlDefinition {
+        id: "bearingAlignment".into(),
+        name: "Bearing Alignment".into(),
+        description: "Corrects for antenna mounting offset from vessel heading.".into(),
+        category: ControlCategory::Installation,
+        control_type: ControlType::Number,
+        range: Some(RangeSpec {
+            min: -180.0,
+            max: 180.0,
+            step: Some(0.1),
+            unit: Some("degrees".into()),
+        }),
+        values: None,
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(0.0.into()),
+    }
+}
+
+/// Antenna height: height of radar antenna above waterline in meters
+///
+/// Affects sea clutter calculations.
+pub fn control_antenna_height() -> ControlDefinition {
+    ControlDefinition {
+        id: "antennaHeight".into(),
+        name: "Antenna Height".into(),
+        description: "Height of radar antenna above waterline in meters. Used for sea clutter calculations.".into(),
+        category: ControlCategory::Installation,
+        control_type: ControlType::Number,
+        range: Some(RangeSpec {
+            min: 0.0,
+            max: 100.0,
+            step: Some(1.0),
+            unit: Some("m".into()),
+        }),
+        values: None,
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(5.into()),
+    }
+}
+
+/// No-transmit zones: sectors where radar won't transmit
+pub fn control_no_transmit_zones(zone_count: u8) -> ControlDefinition {
+    ControlDefinition {
+        id: "noTransmitZones".into(),
+        name: "No-Transmit Zones".into(),
+        description: format!("Configure up to {} sectors where the radar will not transmit.", zone_count),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Compound,
+        range: None,
+        values: None,
+        properties: {
+            let mut props = HashMap::new();
+            props.insert(
+                "zones".into(),
+                PropertyDefinition {
+                    prop_type: "array".into(),
+                    description: Some("Array of zone objects with enabled, start, and end angles".into()),
+                    range: None,
+                    values: None,
+                },
+            );
+            Some(props)
+        },
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: None,
+    }
+}
+
+/// Scan speed: antenna rotation speed (Furuno, Navico)
+pub fn control_scan_speed() -> ControlDefinition {
+    ControlDefinition {
+        id: "scanSpeed".into(),
+        name: "Scan Speed".into(),
+        description: "Antenna rotation speed. Faster speeds update the display more frequently but may reduce sensitivity.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: "normal".into(),
+                label: "Normal".into(),
+                description: Some("Standard rotation speed".into()),
+            },
+            EnumValue {
+                value: "fast".into(),
+                label: "Fast".into(),
+                description: Some("Increased rotation speed".into()),
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some("normal".into()),
+    }
+}
+
+/// Auto acquire: automatic ARPA target acquisition (Furuno)
+pub fn control_auto_acquire() -> ControlDefinition {
+    ControlDefinition {
+        id: "autoAcquire".into(),
+        name: "Auto Acquire".into(),
+        description: "Automatically acquires and tracks moving targets using Doppler detection.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Boolean,
+        range: None,
+        values: None,
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(false.into()),
+    }
+}
+
+/// Noise reduction: reduces snow-like noise in the display
+///
+/// Furuno: Command 0x67 feature 3
+pub fn control_noise_reduction() -> ControlDefinition {
+    ControlDefinition {
+        id: "noiseReduction".into(),
+        name: "Noise Reduction".into(),
+        description: "Reduces snow-like noise in the radar display.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Boolean,
+        range: None,
+        values: None,
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(false.into()),
+    }
+}
+
+/// Main bang suppression: reduces center artifact
+///
+/// Furuno: Command 0x83
+/// Raymarine: Main bang suppression enabled
+pub fn control_main_bang_suppression() -> ControlDefinition {
+    ControlDefinition {
+        id: "mainBangSuppression".into(),
+        name: "Main Bang Suppression".into(),
+        description: "Reduces the main bang artifact at the center of the radar display.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Number,
+        range: Some(RangeSpec {
+            min: 0.0,
+            max: 100.0,
+            step: Some(1.0),
+            unit: Some("percent".into()),
+        }),
+        values: None,
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(50.into()),
+    }
+}
+
+/// Target expansion: makes small targets more visible
+///
+/// Navico: Target Expansion (0x09 C1 or 0x12 C1)
+/// Raymarine: Target Expansion
+pub fn control_target_expansion() -> ControlDefinition {
+    ControlDefinition {
+        id: "targetExpansion".into(),
+        name: "Target Expansion".into(),
+        description: "Makes small targets more visible by enlarging their display.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Off".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "On".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "High".into(),
+                description: Some("HALO only".into()),
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(0.into()),
+    }
+}
+
+/// Target boost: amplifies weak targets
+///
+/// Navico: Target Boost (0x0A C1)
+pub fn control_target_boost() -> ControlDefinition {
+    ControlDefinition {
+        id: "targetBoost".into(),
+        name: "Target Boost".into(),
+        description: "Amplifies weak targets to make them more visible.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Off".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "Low".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "High".into(),
+                description: None,
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(0.into()),
+    }
+}
+
+/// Sea state: preset sea clutter configuration
+///
+/// Navico: Sea State (0x0B C1)
+pub fn control_sea_state() -> ControlDefinition {
+    ControlDefinition {
+        id: "seaState".into(),
+        name: "Sea State".into(),
+        description: "Preset sea clutter configuration based on current sea conditions.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Calm".into(),
+                description: Some("Light seas with minimal wave action".into()),
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "Moderate".into(),
+                description: Some("Average sea conditions".into()),
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "Rough".into(),
+                description: Some("Heavy seas with large waves".into()),
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(0.into()),
+    }
+}
+
+/// Sidelobe suppression: reduces sidelobe artifacts
+///
+/// Navico: Sidelobe Suppression (0x06 C1 subtype 0x05)
+pub fn control_sidelobe_suppression() -> ControlDefinition {
+    let mut properties = HashMap::new();
+
+    properties.insert(
+        "mode".into(),
+        PropertyDefinition {
+            prop_type: "enum".into(),
+            description: Some("Auto or manual control".into()),
+            range: None,
+            values: Some(vec![
+                EnumValue {
+                    value: "auto".into(),
+                    label: "Auto".into(),
+                    description: None,
+                },
+                EnumValue {
+                    value: "manual".into(),
+                    label: "Manual".into(),
+                    description: None,
+                },
+            ]),
+        },
+    );
+
+    properties.insert(
+        "value".into(),
+        PropertyDefinition {
+            prop_type: "number".into(),
+            description: Some("Suppression level (0-100%)".into()),
+            range: Some(RangeSpec {
+                min: 0.0,
+                max: 100.0,
+                step: Some(1.0),
+                unit: Some("percent".into()),
+            }),
+            values: None,
+        },
+    );
+
+    ControlDefinition {
+        id: "sidelobeSuppression".into(),
+        name: "Sidelobe Suppression".into(),
+        description: "Reduces sidelobe artifacts caused by strong nearby targets.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Compound,
+        range: None,
+        values: None,
+        properties: Some(properties),
+        modes: Some(vec!["auto".into(), "manual".into()]),
+        default_mode: Some("auto".into()),
+        read_only: false,
+        default: Some(serde_json::json!({"mode": "auto", "value": 50})),
+    }
+}
+
+/// Noise rejection: filters radar noise
+///
+/// Navico: Noise Rejection (0x21 C1)
+pub fn control_noise_rejection() -> ControlDefinition {
+    ControlDefinition {
+        id: "noiseRejection".into(),
+        name: "Noise Rejection".into(),
+        description: "Filters out radar noise from the display.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Off".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "Low".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "Medium".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 3.into(),
+                label: "High".into(),
+                description: None,
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(0.into()),
+    }
+}
+
+/// Crosstalk rejection: filters interference from nearby radars
+///
+/// Garmin: Crosstalk Rejection (0x0932)
+pub fn control_crosstalk_rejection() -> ControlDefinition {
+    ControlDefinition {
+        id: "crosstalkRejection".into(),
+        name: "Crosstalk Rejection".into(),
+        description: "Filters interference from nearby radars operating on similar frequencies.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Off".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "On".into(),
+                description: None,
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(0.into()),
+    }
+}
+
+/// FTC (Fast Time Constant): reduces rain/snow clutter
+///
+/// Raymarine: FTC
+/// Garmin HD: FTC (0x02B8)
+pub fn control_ftc() -> ControlDefinition {
+    let mut properties = HashMap::new();
+
+    properties.insert(
+        "enabled".into(),
+        PropertyDefinition {
+            prop_type: "boolean".into(),
+            description: Some("Enable FTC processing".into()),
+            range: None,
+            values: None,
+        },
+    );
+
+    properties.insert(
+        "value".into(),
+        PropertyDefinition {
+            prop_type: "number".into(),
+            description: Some("FTC level (0-100%)".into()),
+            range: Some(RangeSpec {
+                min: 0.0,
+                max: 100.0,
+                step: Some(1.0),
+                unit: Some("percent".into()),
+            }),
+            values: None,
+        },
+    );
+
+    ControlDefinition {
+        id: "ftc".into(),
+        name: "FTC".into(),
+        description: "Fast Time Constant processing to reduce rain and snow clutter.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Compound,
+        range: None,
+        values: None,
+        properties: Some(properties),
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(serde_json::json!({"enabled": false, "value": 0})),
+    }
+}
+
+/// Tune: receiver tuning control
+///
+/// Raymarine: Tune (auto/manual)
+pub fn control_tune() -> ControlDefinition {
+    let mut properties = HashMap::new();
+
+    properties.insert(
+        "mode".into(),
+        PropertyDefinition {
+            prop_type: "enum".into(),
+            description: Some("Auto or manual tuning".into()),
+            range: None,
+            values: Some(vec![
+                EnumValue {
+                    value: "auto".into(),
+                    label: "Auto".into(),
+                    description: None,
+                },
+                EnumValue {
+                    value: "manual".into(),
+                    label: "Manual".into(),
+                    description: None,
+                },
+            ]),
+        },
+    );
+
+    properties.insert(
+        "value".into(),
+        PropertyDefinition {
+            prop_type: "number".into(),
+            description: Some("Tune value (0-100%)".into()),
+            range: Some(RangeSpec {
+                min: 0.0,
+                max: 100.0,
+                step: Some(1.0),
+                unit: Some("percent".into()),
+            }),
+            values: None,
+        },
+    );
+
+    ControlDefinition {
+        id: "tune".into(),
+        name: "Tune".into(),
+        description: "Receiver tuning for optimal signal reception.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Compound,
+        range: None,
+        values: None,
+        properties: Some(properties),
+        modes: Some(vec!["auto".into(), "manual".into()]),
+        default_mode: Some("auto".into()),
+        read_only: false,
+        default: Some(serde_json::json!({"mode": "auto", "value": 50})),
+    }
+}
+
+/// Color gain: adjusts color intensity
+///
+/// Raymarine Quantum: Color Gain
+pub fn control_color_gain() -> ControlDefinition {
+    let mut properties = HashMap::new();
+
+    properties.insert(
+        "mode".into(),
+        PropertyDefinition {
+            prop_type: "enum".into(),
+            description: Some("Auto or manual control".into()),
+            range: None,
+            values: Some(vec![
+                EnumValue {
+                    value: "auto".into(),
+                    label: "Auto".into(),
+                    description: None,
+                },
+                EnumValue {
+                    value: "manual".into(),
+                    label: "Manual".into(),
+                    description: None,
+                },
+            ]),
+        },
+    );
+
+    properties.insert(
+        "value".into(),
+        PropertyDefinition {
+            prop_type: "number".into(),
+            description: Some("Color gain level (0-100%)".into()),
+            range: Some(RangeSpec {
+                min: 0.0,
+                max: 100.0,
+                step: Some(1.0),
+                unit: Some("percent".into()),
+            }),
+            values: None,
+        },
+    );
+
+    ControlDefinition {
+        id: "colorGain".into(),
+        name: "Color Gain".into(),
+        description: "Adjusts the color intensity of radar returns.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Compound,
+        range: None,
+        values: None,
+        properties: Some(properties),
+        modes: Some(vec!["auto".into(), "manual".into()]),
+        default_mode: Some("auto".into()),
+        read_only: false,
+        default: Some(serde_json::json!({"mode": "auto", "value": 50})),
+    }
+}
+
+/// Accent light: pedestal illumination
+///
+/// Navico HALO: Accent Light (0x31 C1)
+pub fn control_accent_light() -> ControlDefinition {
+    ControlDefinition {
+        id: "accentLight".into(),
+        name: "Accent Light".into(),
+        description: "Controls the pedestal accent lighting brightness.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Off".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "Low".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "Medium".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 3.into(),
+                label: "High".into(),
+                description: None,
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(0.into()),
+    }
+}
+
+/// Doppler speed threshold: minimum speed for Doppler detection
+///
+/// Navico HALO: Doppler Speed (0x24 C1)
+/// Furuno: DopplerSpeed (command 0xEF related)
+pub fn control_doppler_speed() -> ControlDefinition {
+    ControlDefinition {
+        id: "dopplerSpeed".into(),
+        name: "Doppler Speed Threshold".into(),
+        description: "Minimum target speed for Doppler detection in knots.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Number,
+        range: Some(RangeSpec {
+            min: 0.5,
+            max: 100.0,
+            step: Some(0.5),
+            unit: Some("knots".into()),
+        }),
+        values: None,
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(5.0.into()),
+    }
+}
+
+/// Local interference rejection: filters local interference sources
+///
+/// Navico: Local Interference Rejection (0x0E C1)
+pub fn control_local_interference_rejection() -> ControlDefinition {
+    ControlDefinition {
+        id: "localInterferenceRejection".into(),
+        name: "Local Interference Rejection".into(),
+        description: "Filters interference from local sources such as ship electronics.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "Off".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 1.into(),
+                label: "Low".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "Medium".into(),
+                description: None,
+            },
+            EnumValue {
+                value: 3.into(),
+                label: "High".into(),
+                description: None,
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(0.into()),
+    }
+}
+
+// =============================================================================
+// Helper to get extended control by ID
+// =============================================================================
+
+/// Get an extended control definition by its semantic ID
+pub fn get_extended_control(id: &str) -> Option<ControlDefinition> {
+    match id {
+        // Signal processing
+        "beamSharpening" => Some(control_beam_sharpening()),
+        "dopplerMode" => Some(control_doppler_mode()),
+        "dopplerSpeed" => Some(control_doppler_speed()),
+        "birdMode" => Some(control_bird_mode()),
+        "noiseReduction" => Some(control_noise_reduction()),
+        "noiseRejection" => Some(control_noise_rejection()),
+        "mainBangSuppression" => Some(control_main_bang_suppression()),
+        // Interference
+        "interferenceRejection" => Some(control_interference_rejection()),
+        "localInterferenceRejection" => Some(control_local_interference_rejection()),
+        "crosstalkRejection" => Some(control_crosstalk_rejection()),
+        "sidelobeSuppression" => Some(control_sidelobe_suppression()),
+        // Target processing
+        "targetSeparation" => Some(control_target_separation()),
+        "targetExpansion" => Some(control_target_expansion()),
+        "targetBoost" => Some(control_target_boost()),
+        // Clutter
+        "seaState" => Some(control_sea_state()),
+        "ftc" => Some(control_ftc()),
+        // Modes
+        "presetMode" => Some(control_preset_mode()),
+        "txChannel" => Some(control_tx_channel()),
+        "scanSpeed" => Some(control_scan_speed()),
+        // Receiver
+        "tune" => Some(control_tune()),
+        "colorGain" => Some(control_color_gain()),
+        // Installation
+        "bearingAlignment" => Some(control_bearing_alignment()),
+        "antennaHeight" => Some(control_antenna_height()),
+        // Acquisition
+        "autoAcquire" => Some(control_auto_acquire()),
+        // Hardware
+        "accentLight" => Some(control_accent_light()),
+        _ => None,
+    }
+}
+
+/// Get extended control with customization for no-transmit zones
+pub fn get_extended_control_with_zones(id: &str, zone_count: u8) -> Option<ControlDefinition> {
+    if id == "noTransmitZones" {
+        Some(control_no_transmit_zones(zone_count))
+    } else {
+        get_extended_control(id)
+    }
+}

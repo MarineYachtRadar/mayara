@@ -1,8 +1,8 @@
 /**
- * API adapter for Mayara Radar
+ * API adapter for Mayara Radar v5
  *
  * Automatically detects whether running in SignalK or standalone mode
- * and provides a unified API interface.
+ * and provides a unified API interface for the capabilities-driven v5 API.
  */
 
 // API endpoints for different modes
@@ -12,6 +12,9 @@ const STANDALONE_INTERFACES_API = "/v1/api/interfaces";
 
 // Detected mode (null = not detected yet)
 let detectedMode = null;
+
+// Cache for capabilities (fetched once per radar)
+const capabilitiesCache = new Map();
 
 /**
  * Detect which API mode we're running in
@@ -58,7 +61,31 @@ export function getInterfacesUrl() {
 }
 
 /**
- * Fetch list of radars
+ * Fetch list of radar IDs
+ * @returns {Promise<string[]>} Array of radar IDs
+ */
+export async function fetchRadarIds() {
+  await detectMode();
+
+  const response = await fetch(getRadarsUrl());
+  const data = await response.json();
+
+  // SignalK v5 returns array of IDs: ["Furuno-RD003212", "Navico-HALO"]
+  if (Array.isArray(data)) {
+    // Could be array of IDs (strings) or array of radar objects
+    if (data.length > 0 && typeof data[0] === 'string') {
+      return data;
+    }
+    // Legacy: array of radar objects
+    return data.map(r => r.id);
+  }
+
+  // Standalone returns object keyed by ID
+  return Object.keys(data);
+}
+
+/**
+ * Fetch list of radars (legacy compatibility)
  * @returns {Promise<Object>} Radars object keyed by ID
  */
 export async function fetchRadars() {
@@ -78,6 +105,61 @@ export async function fetchRadars() {
   }
 
   return data;
+}
+
+/**
+ * Fetch radar capabilities (v5 API)
+ * Returns the capability manifest with controls schema, characteristics, etc.
+ * @param {string} radarId - The radar ID
+ * @returns {Promise<Object>} Capability manifest
+ */
+export async function fetchCapabilities(radarId) {
+  await detectMode();
+
+  // Don't cache capabilities - model info may be updated after TCP connects
+  // The radar model is identified via TCP $N96 response, which happens after
+  // initial discovery. Caching would return stale "Unknown" model.
+
+  const url = `${getRadarsUrl()}/${radarId}/capabilities`;
+  console.log(`Fetching capabilities: GET ${url}`);
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch capabilities: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Fetch radar state (v5 API)
+ * Returns current values of all controls
+ * @param {string} radarId - The radar ID
+ * @returns {Promise<Object>} Radar state
+ */
+export async function fetchState(radarId) {
+  await detectMode();
+
+  const url = `${getRadarsUrl()}/${radarId}/state`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch state: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Clear cached capabilities (e.g., when radar disconnects)
+ * @param {string} radarId - The radar ID, or omit to clear all
+ */
+export function clearCapabilitiesCache(radarId) {
+  if (radarId) {
+    capabilitiesCache.delete(radarId);
+  } else {
+    capabilitiesCache.clear();
+  }
 }
 
 /**
@@ -127,7 +209,50 @@ function mapPowerValue(value) {
 }
 
 /**
- * Send a control command to a radar via REST API
+ * Send a control command to a radar via REST API (v5 format)
+ *
+ * SignalK Radar API v5 format:
+ *   PUT /signalk/v2/api/vessels/self/radars/{radarId}/controls/{controlId}
+ *   Body: { value: ... }
+ *
+ * @param {string} radarId - The radar ID
+ * @param {string} controlId - The control ID (e.g., "power", "gain", "range")
+ * @param {any} value - The value to set (type depends on control)
+ * @returns {Promise<boolean>} True if successful
+ */
+export async function setControl(radarId, controlId, value) {
+  await detectMode();
+
+  const url = `${getRadarsUrl()}/${radarId}/controls/${controlId}`;
+  const body = { value };
+
+  console.log(`Setting control: PUT ${url}`, body);
+
+  try {
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (response.ok) {
+      console.log(`Control ${controlId} set successfully`);
+      return true;
+    } else {
+      const errorText = await response.text();
+      console.error(`Control command failed: ${response.status} ${response.statusText} for ${url}`, errorText);
+      return false;
+    }
+  } catch (e) {
+    console.error(`Control command error: ${e}`);
+    return false;
+  }
+}
+
+/**
+ * Send a control command to a radar via REST API (legacy format)
  *
  * SignalK Radar API format:
  *   PUT /signalk/v2/api/vessels/self/radars/{radarId}/{controlName}

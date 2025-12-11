@@ -83,15 +83,15 @@ impl FurunoDataReceiver {
         match create_udp_multicast_listen(&self.info.spoke_data_addr, &self.info.nic_addr) {
             Ok(sock) => {
                 self.multicast_socket = Some(sock);
-                log::debug!(
-                    "{} via {}: listening for spoke data",
+                log::info!(
+                    "{} via {}: listening for spoke data on multicast",
                     &self.info.spoke_data_addr,
                     &self.info.nic_addr
                 );
             }
             Err(e) => {
                 sleep(Duration::from_millis(1000)).await;
-                log::debug!(
+                log::warn!(
                     "{} via {}: listen multicast failed: {}",
                     &self.info.spoke_data_addr,
                     &self.info.nic_addr,
@@ -219,7 +219,7 @@ impl FurunoDataReceiver {
     }
 
     pub async fn run(mut self, subsys: SubsystemHandle) -> Result<(), RadarError> {
-        log::debug!("{}: data receiver starting", &self.key);
+        log::info!("{}: data receiver starting", &self.key);
 
         self.start_socket().await.unwrap();
         loop {

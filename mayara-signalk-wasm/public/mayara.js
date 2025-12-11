@@ -315,18 +315,31 @@ function getHardwareAccelerationInstructions(browser, os) {
   }
 }
 
-const RadarEntry = (id, name) =>
-  tr({ class: 'myr_radar_row' },
-    td({ class: 'myr_radar_name' }, name),
+const RadarEntry = (radar) => {
+  // Build display name: "Brand Model (Name)" or "Brand Name" if no model
+  const brand = radar.brand || '';
+  const model = radar.model || '';
+  const name = radar.name || '';
+
+  let displayName;
+  if (model && model !== 'Unknown') {
+    displayName = `${brand} ${model} (${name})`;
+  } else {
+    displayName = `${brand} ${name}`;
+  }
+
+  return tr({ class: 'myr_radar_row' },
+    td({ class: 'myr_radar_name' }, displayName),
     td({ class: 'myr_radar_actions' },
-      a({ href: "viewer.html?id=" + id, class: 'myr_radar_link myr_radar_link_primary' },
+      a({ href: "viewer.html?id=" + radar.id, class: 'myr_radar_link myr_radar_link_primary' },
         'Open Radar Display'
       ),
-      a({ href: "control.html?id=" + id, class: 'myr_radar_link myr_radar_link_secondary' },
+      a({ href: "control.html?id=" + radar.id, class: 'myr_radar_link myr_radar_link_secondary' },
         'Controls Only'
       )
     )
   );
+};
 
 function radarsLoaded(d) {
   let radarIds = Object.keys(d);
@@ -347,7 +360,9 @@ function radarsLoaded(d) {
     r.appendChild(table);
 
     radarIds.sort().forEach(function (v, i) {
-      van.add(table, RadarEntry(v, d[v].name));
+      // Pass the full radar object (includes id, name, brand, model)
+      const radar = { ...d[v], id: v };
+      van.add(table, RadarEntry(radar));
     });
 
     // Radar found, poll less frequently

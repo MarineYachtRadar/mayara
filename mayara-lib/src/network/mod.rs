@@ -165,14 +165,19 @@ fn bind_to_multicast(
         }
     }
 
-    let socketaddr = SocketAddr::new(IpAddr::V4(*addr.ip()), addr.port());
+    // Bind to 0.0.0.0:port instead of multicast_addr:port to match mayara-wasm behavior.
+    // On some Linux configurations, binding directly to the multicast address doesn't work
+    // properly for receiving packets. The IP_MULTICAST_ALL=0 above ensures we only receive
+    // packets for groups we've joined on this specific interface.
+    let socketaddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), addr.port());
     socket.bind(&socket2::SockAddr::from(socketaddr))?;
 
     socket.join_multicast_v4(addr.ip(), nic_addr)?;
 
     log::trace!(
-        "Binding multicast socket to {} nic {}",
+        "Binding multicast socket to {} for multicast group {} nic {}",
         socketaddr,
+        addr.ip(),
         nic_addr
     );
 

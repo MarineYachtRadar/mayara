@@ -718,6 +718,7 @@ fn parse_beacon_dual(data: &[u8], source_addr: &str) -> Result<RadarDiscovery, P
         spokes_per_revolution: SPOKES_PER_REVOLUTION,
         max_spoke_len: MAX_SPOKE_LEN,
         pixel_values: 16, // 4-bit pixels
+        serial_number: None,
     })
 }
 
@@ -737,6 +738,7 @@ fn parse_beacon_single(data: &[u8], source_addr: &str) -> Result<RadarDiscovery,
         spokes_per_revolution: SPOKES_PER_REVOLUTION,
         max_spoke_len: MAX_SPOKE_LEN,
         pixel_values: 16,
+        serial_number: None,
     })
 }
 
@@ -756,6 +758,7 @@ fn parse_beacon_br24(data: &[u8], source_addr: &str) -> Result<RadarDiscovery, P
         spokes_per_revolution: SPOKES_PER_REVOLUTION,
         max_spoke_len: MAX_SPOKE_LEN,
         pixel_values: 16,
+        serial_number: None,
     })
 }
 

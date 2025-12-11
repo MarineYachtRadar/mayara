@@ -54,6 +54,10 @@ pub enum CommandId {
     MainBangSize = 0x83,
     AntennaHeight = 0x84,
     ScanSpeed = 0x89,
+    /// Operating time in seconds
+    OnTime = 0x8E,
+    /// Module/firmware information
+    Modules = 0x96,
     AliveCheck = 0xE3,
     TxChannel = 0xEC,
     BirdMode = 0xED,
@@ -264,6 +268,27 @@ pub fn format_request_picture_all() -> String {
     format_command(CommandMode::Request, CommandId::CustomPictureAll, &[])
 }
 
+/// Format request for module/firmware information
+///
+/// # Returns
+/// Formatted command: `$R96\r\n`
+///
+/// Response format: `$N96,{part1}-{ver1},{part2}-{ver2},...`
+/// Example: `$N96,0359360-01.05,0359358-01.01,0359359-01.01,0359361-01.05,,,`
+pub fn format_request_modules() -> String {
+    format_command(CommandMode::Request, CommandId::Modules, &[])
+}
+
+/// Format request for operating time (hours of operation)
+///
+/// # Returns
+/// Formatted command: `$R8E,0,0\r\n`
+///
+/// Response format: `$N8E,{seconds}` where seconds is total operating time
+pub fn format_request_ontime() -> String {
+    format_command(CommandMode::Request, CommandId::OnTime, &[0, 0])
+}
+
 /// Format blind sector (no-transmit zone) command
 ///
 /// # Arguments
@@ -413,6 +438,19 @@ pub fn format_heading_align_command(degrees_x10: i32) -> String {
     format_command(CommandMode::Set, CommandId::HeadingAlign, &[degrees_x10, 0])
 }
 
+/// Format antenna height command
+///
+/// # Arguments
+/// * `meters` - Antenna height in meters
+///
+/// # Returns
+/// Formatted command: `$S84,0,{meters},0\r\n`
+///
+/// Antenna height affects sea clutter calculations.
+pub fn format_antenna_height_command(meters: i32) -> String {
+    format_command(CommandMode::Set, CommandId::AntennaHeight, &[0, meters, 0])
+}
+
 // =============================================================================
 // Response Parsing
 // =============================================================================
@@ -468,6 +506,141 @@ pub fn parse_status_response(line: &str) -> Option<bool> {
         return None;
     }
     args.first().map(|&status| status == 2)
+}
+
+/// Control value with auto/manual mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlValue {
+    pub auto: bool,
+    pub value: i32,
+}
+
+/// Parse gain response
+///
+/// Response: `$N63,{auto},{value},0,80,0`
+/// - auto=0: Manual, auto=1: Auto
+/// - value: 0-100
+///
+/// # Returns
+/// ControlValue with auto mode and value
+pub fn parse_gain_response(line: &str) -> Option<ControlValue> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::Gain.as_hex() {
+        return None;
+    }
+    if args.len() >= 2 {
+        Some(ControlValue {
+            auto: args[0] == 1,
+            value: args[1],
+        })
+    } else {
+        None
+    }
+}
+
+/// Parse sea clutter response
+///
+/// Response: `$N64,{auto},{value},50,0,0,0`
+/// - auto=0: Manual, auto=1: Auto
+/// - value: 0-100
+///
+/// # Returns
+/// ControlValue with auto mode and value
+pub fn parse_sea_response(line: &str) -> Option<ControlValue> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::Sea.as_hex() {
+        return None;
+    }
+    if args.len() >= 2 {
+        Some(ControlValue {
+            auto: args[0] == 1,
+            value: args[1],
+        })
+    } else {
+        None
+    }
+}
+
+/// Parse rain clutter response
+///
+/// Response: `$N65,{auto},{value},0,0,0,0`
+/// - auto=0: Manual, auto=1: Auto
+/// - value: 0-100
+///
+/// # Returns
+/// ControlValue with auto mode and value
+pub fn parse_rain_response(line: &str) -> Option<ControlValue> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::Rain.as_hex() {
+        return None;
+    }
+    if args.len() >= 2 {
+        Some(ControlValue {
+            auto: args[0] == 1,
+            value: args[1],
+        })
+    } else {
+        None
+    }
+}
+
+/// Parse range response
+///
+/// Response: `$N62,{range_index},0,0`
+/// - range_index: Index into range table
+///
+/// # Returns
+/// Range index (use range_index_to_meters to convert)
+pub fn parse_range_response(line: &str) -> Option<i32> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::Range.as_hex() {
+        return None;
+    }
+    args.first().copied()
+}
+
+// =============================================================================
+// Request Command Formatters
+// =============================================================================
+
+/// Format request for current status (power state)
+///
+/// # Returns
+/// Formatted command: `$R69\r\n`
+pub fn format_request_status() -> String {
+    format_command(CommandMode::Request, CommandId::Status, &[])
+}
+
+/// Format request for current gain settings
+///
+/// # Returns
+/// Formatted command: `$R63\r\n`
+pub fn format_request_gain() -> String {
+    format_command(CommandMode::Request, CommandId::Gain, &[])
+}
+
+/// Format request for current sea clutter settings
+///
+/// # Returns
+/// Formatted command: `$R64\r\n`
+pub fn format_request_sea() -> String {
+    format_command(CommandMode::Request, CommandId::Sea, &[])
+}
+
+/// Format request for current rain clutter settings
+///
+/// # Returns
+/// Formatted command: `$R65\r\n`
+pub fn format_request_rain() -> String {
+    format_command(CommandMode::Request, CommandId::Rain, &[])
+}
+
+/// Format request for current range
+///
+/// # Returns
+/// Formatted command: `$R62\r\n`
+pub fn format_request_range() -> String {
+    format_command(CommandMode::Request, CommandId::Range, &[])
 }
 
 // =============================================================================
@@ -674,5 +847,78 @@ mod tests {
 
         let cmd = format_heading_align_command(1800); // 180.0°
         assert_eq!(cmd, "$S81,1800,0\r\n");
+    }
+
+    #[test]
+    fn test_format_antenna_height() {
+        let cmd = format_antenna_height_command(5);
+        assert_eq!(cmd, "$S84,0,5,0\r\n");
+
+        let cmd = format_antenna_height_command(15);
+        assert_eq!(cmd, "$S84,0,15,0\r\n");
+    }
+
+    // Tests for new response parsers and request formatters
+
+    #[test]
+    fn test_parse_gain_response() {
+        // Manual mode, value 50
+        let result = parse_gain_response("$N63,0,50,0,80,0").unwrap();
+        assert!(!result.auto);
+        assert_eq!(result.value, 50);
+
+        // Auto mode, value 75
+        let result = parse_gain_response("$N63,1,75,0,80,0").unwrap();
+        assert!(result.auto);
+        assert_eq!(result.value, 75);
+
+        // Wrong command
+        assert!(parse_gain_response("$N64,0,50,0,0,0,0").is_none());
+    }
+
+    #[test]
+    fn test_parse_sea_response() {
+        // Manual mode, value 60
+        let result = parse_sea_response("$N64,0,60,50,0,0,0").unwrap();
+        assert!(!result.auto);
+        assert_eq!(result.value, 60);
+
+        // Auto mode
+        let result = parse_sea_response("$N64,1,50,50,0,0,0").unwrap();
+        assert!(result.auto);
+        assert_eq!(result.value, 50);
+    }
+
+    #[test]
+    fn test_parse_rain_response() {
+        // Manual mode, value 30
+        let result = parse_rain_response("$N65,0,30,0,0,0,0").unwrap();
+        assert!(!result.auto);
+        assert_eq!(result.value, 30);
+
+        // Auto mode
+        let result = parse_rain_response("$N65,1,25,0,0,0,0").unwrap();
+        assert!(result.auto);
+        assert_eq!(result.value, 25);
+    }
+
+    #[test]
+    fn test_parse_range_response() {
+        // Range index 5 (1.5nm)
+        let result = parse_range_response("$N62,5,0,0").unwrap();
+        assert_eq!(result, 5);
+
+        // Range index 21 (1/16nm)
+        let result = parse_range_response("$N62,21,0,0").unwrap();
+        assert_eq!(result, 21);
+    }
+
+    #[test]
+    fn test_format_request_commands() {
+        assert_eq!(format_request_status(), "$R69\r\n");
+        assert_eq!(format_request_gain(), "$R63\r\n");
+        assert_eq!(format_request_sea(), "$R64\r\n");
+        assert_eq!(format_request_rain(), "$R65\r\n");
+        assert_eq!(format_request_range(), "$R62\r\n");
     }
 }

@@ -214,7 +214,7 @@ offset. In captures, port **10100** was observed (offset = 100).
 | 81 | HeadingAlign | `$S81,{deg*10},0` | Antenna heading alignment (0-3599, neg wraps: -1°=3590) |
 | 82 | Unknown | `$N82,43,0,0,0,0` | Unknown |
 | 83 | MainBangSize | `$S83,{val},0` | Main bang suppression (val=0-255, 0%=0, 100%=255) |
-| 84 | AntennaHeight | `$S84,{cat},{m},0` | Antenna height (0,2=<3m; 1,5=3-10m; 2,15=>10m) |
+| 84 | AntennaHeight | `$S84,0,{meters},0` | Antenna height in meters |
 | 85 | NearSTC | `$N85,2` | Near STC |
 | 86 | MiddleSTC | `$R86,0` | Middle STC |
 | 87 | FarSTC | `$R87,0` | Far STC |
@@ -529,13 +529,9 @@ Analyzes echoes to identify targets or rain patterns. Note: Despite having a scr
 
 ### Antenna Height (0x84)
 ```
-$S84,{category},{meters},0\r\n
+$S84,0,{meters},0\r\n
 ```
-| Category | Meters | Height Range |
-|----------|--------|--------------|
-| 0 | 2 | Under 3m |
-| 1 | 5 | 3-10m |
-| 2 | 15 | Over 10m |
+- `meters`: Antenna height in meters
 
 Antenna height affects sea clutter calculations.
 
@@ -599,7 +595,7 @@ Coordinates for manual target acquisition. The x,y values are screen/spoke coord
 | 77 | BlindSector | Sector blanking (no-transmit zones) |
 | 81 | HeadingAlign | Heading offset (0-359.9°) |
 | 83 | MainBang | Main bang suppression (0-100%) |
-| 84 | AntennaHeight | Height category |
+| 84 | AntennaHeight | Height in meters |
 | 89 | ScanSpeed | Rotation speed |
 | EC | TxChannel | TX channel selection |
 
@@ -718,6 +714,91 @@ $S62,7,0,1
 | Target Analyzer (0xEF) | Universal (has screen param but affects both) |
 | Int. Rejection (0x67) | Universal (affects both screens) |
 | TX Channel (0xEC) | Universal (no screen param, single transmitter) |
+
+## Model Identification
+
+### Via TCP Command ($R96 / $N96)
+
+The radar model can be identified by sending a module request command after establishing a TCP connection.
+
+**Request:**
+```
+$R96\r\n
+```
+
+**Response:**
+```
+$N96,{part1}-{ver1},{part2}-{ver2},{part3}-{ver3},...\r\n
+```
+
+Example from DRS4D-NXT:
+```
+$N96,0359360-01.05,0359358-01.01,0359359-01.01,0359361-01.05,,,
+```
+
+The **first part code** identifies the radar model:
+
+| Part Code | Model |
+|-----------|-------|
+| 0359235 | DRS (generic) |
+| 0359255 | FAR-1417 |
+| 0359204 | FAR-2117 |
+| 0359321 | FAR-1417 |
+| 0359338 | DRS4D |
+| 0359367 | DRS4D |
+| 0359281 | FAR-3000 |
+| 0359286 | FAR-3000 |
+| 0359477 | FAR-3000 |
+| 0359360 | DRS4D-NXT |
+| 0359421 | DRS6A-NXT |
+| 0359355 | DRS6A-X |
+| 0359344 | FAR-1513 |
+| 0359397 | FAR-1416 |
+
+The version string (e.g., `01.05`) is the firmware version.
+
+**Important**: This is the **reliable** method to identify the radar model. The TCP connection must be established first (see [TCP Login Protocol](#tcp-login-protocol)).
+
+### Via UDP Model Report (170 bytes)
+
+The radar also responds to UDP model requests on port 10010, but the response structure varies and may not reliably contain the model name. The TCP method above is preferred.
+
+**Request** (16 bytes):
+```
+01 00 00 01 00 00 00 00 14 01 00 08 01 00 00 00
+```
+
+**Response structure** (170 bytes):
+```
+Offset 0x00-0x2F: Header/filler (48 bytes)
+Offset 0x30-0x4F: Device name/model (32 bytes, null-terminated)
+Offset 0x50-0x6F: Firmware versions (32 bytes)
+Offset 0x70-0x8F: Firmware version (32 bytes)
+Offset 0x90-0xA9: Serial number (26 bytes)
+```
+
+**Note**: In practice, the device name field at offset 0x30 may be empty or contain different data depending on the radar model and firmware. The TCP `$N96` command is more reliable.
+
+### Operating Hours ($R8E / $N8E)
+
+Request the total operating time (transmitter on-time):
+
+**Request:**
+```
+$R8E,0,0\r\n
+```
+
+**Response:**
+```
+$N8E,{seconds}\r\n
+```
+
+Example:
+```
+$N8E,105883920
+```
+
+Convert to hours: `105883920 / 3600 = 29412.2 hours`
 
 ## References
 

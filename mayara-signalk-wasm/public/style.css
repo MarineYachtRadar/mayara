@@ -97,13 +97,16 @@ div.myr_power_buttons {
   gap: 8px;
   margin: 8px 2px;
   padding: 4px;
+  box-sizing: border-box;
+  max-width: 100%;
 }
 
 /* Power buttons styling */
 .myr_power_button {
   flex: 1;
-  padding: 12px 8px;
-  font-size: 14px;
+  min-width: 0;
+  padding: 10px 6px;
+  font-size: 13px;
   font-weight: bold;
   border: 2px solid #444;
   border-radius: 4px;
@@ -111,6 +114,10 @@ div.myr_power_buttons {
   transition: all 0.2s ease;
   background-color: #222;
   color: #888;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .myr_power_button:hover {
@@ -136,13 +143,16 @@ div.myr_range_buttons {
   gap: 8px;
   margin: 8px 2px;
   padding: 4px;
-  align-items: center;
+  box-sizing: border-box;
+  max-width: 100%;
 }
 
 /* Range buttons styling */
 .myr_range_button {
-  padding: 10px 12px;
-  font-size: 14px;
+  flex: 1;
+  min-width: 0;
+  padding: 10px 6px;
+  font-size: 13px;
   font-weight: bold;
   border: 2px solid #446;
   border-radius: 4px;
@@ -150,6 +160,10 @@ div.myr_range_buttons {
   transition: all 0.2s ease;
   background-color: #224;
   color: #8af;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .myr_range_button:hover {
@@ -799,4 +813,293 @@ div.myr_ppi {
 
 .myr_heading_toggle:active {
   transform: scale(0.95);
+}
+
+/* ============================================
+   Capabilities-Driven Control Panel v5
+   ============================================ */
+
+/* Control sections */
+.myr_control_section {
+  margin: 8px 0;
+  padding: 4px;
+}
+
+.myr_section_header {
+  font-size: 13px;
+  font-weight: bold;
+  color: rgb(100, 200, 180);
+  padding: 8px 4px;
+  border-bottom: 1px solid rgba(100, 200, 180, 0.3);
+  margin-bottom: 8px;
+}
+
+.myr_extended_section {
+  margin-top: 16px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(100, 200, 180, 0.2);
+}
+
+.myr_info_section {
+  margin-top: 16px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(100, 200, 180, 0.2);
+}
+
+/* Generic control wrapper */
+.myr_control {
+  margin: 8px 2px;
+  padding: 8px;
+  border: 1px solid #446;
+  border-radius: 4px;
+  background-color: #112;
+}
+
+.myr_control_header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.myr_control_label {
+  font-weight: bold;
+  color: #8cf;
+  font-size: 13px;
+}
+
+.myr_control_value {
+  font-size: 13px;
+  color: #adf;
+  font-weight: bold;
+}
+
+/* Range control with display */
+.myr_range_control {
+  margin: 8px 2px;
+}
+
+/* Generic slider */
+.myr_slider {
+  width: 100%;
+  height: 24px;
+  background-color: #224;
+  border-radius: 4px;
+  cursor: pointer;
+  accent-color: #4a8;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.myr_slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 24px;
+  height: 24px;
+  background: #4a8;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.myr_slider::-moz-range-thumb {
+  width: 24px;
+  height: 24px;
+  background: #4a8;
+  border-radius: 50%;
+  cursor: pointer;
+  border: none;
+}
+
+.myr_slider:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Boolean toggle button */
+.myr_boolean_control {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.myr_toggle_button {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: bold;
+  border: 2px solid #444;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background-color: #222;
+  color: #888;
+  min-width: 60px;
+}
+
+.myr_toggle_button:hover {
+  border-color: #666;
+  background-color: #333;
+}
+
+.myr_toggle_button.myr_toggle_active {
+  background-color: #1a4d1a;
+  border-color: #2d8a2d;
+  color: #4dff4d;
+}
+
+/* Enum control - button group */
+.myr_enum_control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.myr_button_group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.myr_enum_button {
+  flex: 1;
+  min-width: 50px;
+  padding: 8px 6px;
+  font-size: 12px;
+  font-weight: bold;
+  border: 2px solid #446;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background-color: #223;
+  color: #8af;
+}
+
+.myr_enum_button:hover {
+  border-color: #668;
+  background-color: #334;
+}
+
+.myr_enum_button.myr_enum_active {
+  background-color: #246;
+  border-color: #48c;
+  color: #adf;
+}
+
+/* Compound control (e.g., gain with auto/manual) */
+.myr_compound_control {
+  display: flex;
+  flex-direction: column;
+}
+
+.myr_compound_header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.myr_compound_body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.myr_mode_buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.myr_mode_button {
+  flex: 1;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: bold;
+  border: 2px solid #454;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background-color: #232;
+  color: #8a8;
+}
+
+.myr_mode_button:hover {
+  border-color: #676;
+  background-color: #343;
+}
+
+.myr_mode_button.myr_mode_active {
+  background-color: #254;
+  border-color: #4a8;
+  color: #8f8;
+}
+
+.myr_compound_slider {
+  margin-top: 4px;
+}
+
+/* Info control (read-only) */
+.myr_info_control {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background-color: #0a0a12;
+  border-color: #334;
+}
+
+.myr_info_value {
+  font-size: 13px;
+  color: rgb(124, 124, 237);
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+/* Number control */
+.myr_number_control {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Radar info header */
+.myr_radar_info_header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px;
+  margin-bottom: 8px;
+  background-color: #0a0a12;
+  border: 1px solid #334;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.myr_radar_info_item {
+  display: flex;
+  gap: 4px;
+}
+
+.myr_info_label {
+  color: #888;
+}
+
+/* Touch-friendly: larger touch targets */
+@media (pointer: coarse) {
+  .myr_power_button,
+  .myr_range_button,
+  .myr_toggle_button,
+  .myr_enum_button,
+  .myr_mode_button {
+    min-height: 44px;
+    font-size: 14px;
+  }
+
+  .myr_slider {
+    height: 32px;
+  }
+
+  .myr_slider::-webkit-slider-thumb {
+    width: 32px;
+    height: 32px;
+  }
+
+  .myr_slider::-moz-range-thumb {
+    width: 32px;
+    height: 32px;
+  }
 }

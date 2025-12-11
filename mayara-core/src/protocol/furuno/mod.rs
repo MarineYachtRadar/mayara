@@ -166,15 +166,24 @@ pub struct BeaconResponse {
 }
 
 /// Model report structure (170 bytes)
+///
+/// Layout based on Wireshark analysis:
+/// - Offset 0x00: Header/filler (48 bytes)
+/// - Offset 0x30 (48): Device name/model (32 bytes, null-terminated)
+/// - Offset 0x50 (80): Firmware versions (32 bytes)
+/// - Offset 0x70 (96): Firmware version (32 bytes)
+/// - Offset 0x90 (144): Serial number (26 bytes)
+///
+/// Total: 170 bytes
 #[derive(Deserialize, Debug, Clone)]
 #[repr(C, packed)]
 pub struct ModelReport {
-    _filler1: [u8; 24],
+    _filler1a: [u8; 24],
+    _filler1b: [u8; 24],
     pub model: [u8; 32],
     pub firmware_versions: [u8; 32],
     pub firmware_version: [u8; 32],
-    pub serial_no: [u8; 32],
-    _filler2: [u8; 18],
+    pub serial_no: [u8; 26],
 }
 
 // =============================================================================
@@ -245,7 +254,7 @@ pub fn parse_beacon_response(data: &[u8], source_addr: &str) -> Result<RadarDisc
 
     Ok(RadarDiscovery {
         brand: Brand::Furuno,
-        model: None, // Model comes from separate model report
+        model: None, // Model comes from TCP $N96 response
         name,
         address: source_addr.to_string(),
         data_port: DATA_PORT,
@@ -253,6 +262,8 @@ pub fn parse_beacon_response(data: &[u8], source_addr: &str) -> Result<RadarDisc
         spokes_per_revolution: SPOKES_PER_REVOLUTION,
         max_spoke_len: MAX_SPOKE_LEN,
         pixel_values: 64,
+        // Serial number not available - UDP model report returns empty
+        serial_number: None,
     })
 }
 

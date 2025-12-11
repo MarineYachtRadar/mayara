@@ -5,11 +5,19 @@
 
 use crate::signalk_ffi::{debug, TcpSocket};
 use mayara_core::protocol::furuno::command::{
-    format_gain_command, format_keepalive, format_rain_command, format_range_command,
-    format_sea_command, format_status_command, meters_to_range_index, parse_login_response,
-    LOGIN_MESSAGE,
+    format_antenna_height_command, format_auto_acquire_command, format_bird_mode_command,
+    format_gain_command, format_heading_align_command, format_interference_rejection_command,
+    format_keepalive, format_main_bang_command, format_noise_reduction_command,
+    format_rain_command, format_range_command, format_request_modules, format_request_ontime,
+    format_rezboost_command, format_scan_speed_command, format_sea_command,
+    format_status_command, format_target_analyzer_command, format_tx_channel_command,
+    meters_to_range_index, parse_login_response, LOGIN_MESSAGE,
+    // State request functions
+    format_request_gain, format_request_rain, format_request_range,
+    format_request_sea, format_request_status,
 };
 use mayara_core::protocol::furuno::{BASE_PORT, BEACON_PORT};
+use mayara_core::state::RadarState;
 
 /// Controller state machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +65,18 @@ pub struct FurunoController {
     login_port_idx: usize,
     /// Index into fallback command ports to try
     fallback_port_idx: usize,
+    /// Firmware version from $N96 response
+    firmware_version: Option<String>,
+    /// Radar model from $N96 response (e.g., "DRS4D-NXT")
+    model: Option<String>,
+    /// Operating hours from $N8E response
+    operating_hours: Option<f64>,
+    /// Whether info requests have been sent after connection
+    info_requested: bool,
+    /// Whether state requests have been sent after connection
+    state_requested: bool,
+    /// Current radar control state (gain, sea, rain, range, power)
+    radar_state: RadarState,
 }
 
 impl FurunoController {
@@ -71,12 +91,14 @@ impl FurunoController {
     const FALLBACK_PORTS: [u16; 3] = [10100, 10001, 10002];
 
     /// Create a new controller for a Furuno radar
+    ///
+    /// The controller will automatically attempt to connect to get model info.
     pub fn new(radar_id: &str, radar_addr: &str) -> Self {
         debug(&format!(
             "FurunoController::new({}, {})",
             radar_id, radar_addr
         ));
-        Self {
+        let mut controller = Self {
             radar_id: radar_id.to_string(),
             radar_addr: radar_addr.to_string(),
             login_socket: None,
@@ -90,6 +112,30 @@ impl FurunoController {
             last_retry_poll: 0,
             login_port_idx: 0,
             fallback_port_idx: 0,
+            firmware_version: None,
+            model: None,
+            operating_hours: None,
+            info_requested: false,
+            state_requested: false,
+            radar_state: RadarState::default(),
+        };
+        // Start connection immediately to get model/firmware info
+        // Use keepalive as the "command" to trigger connection without changing radar state
+        controller.request_info();
+        controller
+    }
+
+    /// Request radar info by initiating a connection
+    ///
+    /// This queues a keepalive command to trigger the login sequence,
+    /// which will then send info requests ($R96, $R8E) once connected.
+    pub fn request_info(&mut self) {
+        if self.state == ControllerState::Disconnected && self.pending_command.is_none() {
+            debug(&format!("[{}] Initiating connection to get radar info", self.radar_id));
+            // Queue a keepalive as the trigger command - harmless but establishes connection
+            let cmd = format_keepalive();
+            let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+            self.pending_command = Some(cmd.to_string());
         }
     }
 
@@ -206,6 +252,176 @@ impl FurunoController {
             self.radar_id, cmd, value, auto
         ));
 
+        if self.is_connected() {
+            self.send_command(cmd);
+        } else {
+            self.pending_command = Some(cmd.to_string());
+            if self.state == ControllerState::Disconnected {
+                self.start_login();
+            }
+        }
+    }
+
+    /// Set RezBoost (beam sharpening) level
+    ///
+    /// # Arguments
+    /// * `level` - 0=Off, 1=On, 2=High (model dependent)
+    pub fn set_rezboost(&mut self, level: u8) {
+        let cmd = format_rezboost_command(level as i32, 0);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing rezboost command: {} (level={})",
+            self.radar_id, cmd, level
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Set interference rejection
+    ///
+    /// # Arguments
+    /// * `level` - 0=Off, 1=On
+    pub fn set_interference_rejection(&mut self, level: u8) {
+        let cmd = format_interference_rejection_command(level > 0);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing IR command: {} (level={})",
+            self.radar_id, cmd, level
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Set scan speed
+    ///
+    /// # Arguments
+    /// * `speed` - 0=Normal, 1=Fast
+    pub fn set_scan_speed(&mut self, speed: u8) {
+        let cmd = format_scan_speed_command(speed as i32);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing scan speed command: {} (speed={})",
+            self.radar_id, cmd, speed
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Set bird mode
+    ///
+    /// # Arguments
+    /// * `enabled` - true to enable bird mode
+    pub fn set_bird_mode(&mut self, enabled: bool) {
+        let level = if enabled { 1 } else { 0 };
+        let cmd = format_bird_mode_command(level, 0);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing bird mode command: {} (enabled={})",
+            self.radar_id, cmd, enabled
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Set target analyzer (Doppler mode)
+    ///
+    /// # Arguments
+    /// * `enabled` - true to enable target analyzer
+    /// * `speed` - speed threshold in knots (typically 5-20)
+    pub fn set_target_analyzer(&mut self, enabled: bool, speed: u8) {
+        let cmd = format_target_analyzer_command(enabled, speed as i32, 0);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing target analyzer command: {} (enabled={}, speed={})",
+            self.radar_id, cmd, enabled, speed
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Set bearing alignment (heading offset)
+    ///
+    /// # Arguments
+    /// * `degrees` - Offset in degrees (-180 to 180)
+    pub fn set_bearing_alignment(&mut self, degrees: f64) {
+        // Convert to tenths of a degree for the protocol
+        let degrees_x10 = (degrees * 10.0) as i32;
+        let cmd = format_heading_align_command(degrees_x10);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing bearing alignment command: {} (degrees={})",
+            self.radar_id, cmd, degrees
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Set noise reduction
+    ///
+    /// # Arguments
+    /// * `enabled` - true to enable noise reduction
+    pub fn set_noise_reduction(&mut self, enabled: bool) {
+        let cmd = format_noise_reduction_command(enabled);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing noise reduction command: {} (enabled={})",
+            self.radar_id, cmd, enabled
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Set main bang suppression
+    ///
+    /// # Arguments
+    /// * `percent` - Suppression level (0-100%)
+    pub fn set_main_bang_suppression(&mut self, percent: u8) {
+        let cmd = format_main_bang_command(percent as i32);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing main bang suppression command: {} (percent={})",
+            self.radar_id, cmd, percent
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Set TX channel
+    ///
+    /// # Arguments
+    /// * `channel` - 0=Auto, 1-3=Channel 1-3
+    pub fn set_tx_channel(&mut self, channel: u8) {
+        let cmd = format_tx_channel_command(channel as i32);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing TX channel command: {} (channel={})",
+            self.radar_id, cmd, channel
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Set auto acquire (ARPA by Doppler)
+    ///
+    /// # Arguments
+    /// * `enabled` - true to enable auto acquire
+    pub fn set_auto_acquire(&mut self, enabled: bool) {
+        let cmd = format_auto_acquire_command(enabled);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing auto acquire command: {} (enabled={})",
+            self.radar_id, cmd, enabled
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Set antenna height
+    ///
+    /// # Arguments
+    /// * `meters` - Antenna height in meters (0-100)
+    pub fn set_antenna_height(&mut self, meters: i32) {
+        let cmd = format_antenna_height_command(meters);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing antenna height command: {} (meters={})",
+            self.radar_id, cmd, meters
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Helper to queue a command and start connection if needed
+    fn queue_command(&mut self, cmd: &str) {
         if self.is_connected() {
             self.send_command(cmd);
         } else {
@@ -456,10 +672,28 @@ impl FurunoController {
             return false;
         }
 
-        // Process any responses
+        // Send info requests once after connecting
+        if !self.info_requested {
+            self.info_requested = true;
+            self.send_info_requests();
+        }
+
+        // Send state requests once after connecting
+        if !self.state_requested {
+            self.state_requested = true;
+            self.send_state_requests();
+        }
+
+        // Collect responses first to avoid borrow conflicts
+        let mut responses = Vec::new();
         while let Some(line) = socket.recv_line_string() {
             debug(&format!("[{}] Response: {}", self.radar_id, line));
-            // We could parse responses here if needed
+            responses.push(line);
+        }
+
+        // Process collected responses
+        for line in responses {
+            self.parse_response(&line);
         }
 
         // Send keep-alive every ~5 seconds (assuming 10 polls/sec = 50 polls)
@@ -488,6 +722,153 @@ impl FurunoController {
         let cmd = format_keepalive();
         let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
         self.send_command(cmd);
+    }
+
+    /// Send info requests (firmware version, operating hours)
+    fn send_info_requests(&self) {
+        // Request module/firmware info ($R96)
+        let cmd = format_request_modules();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Request operating hours ($R8E,0,0)
+        let cmd = format_request_ontime();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        debug(&format!("[{}] Sent info requests", self.radar_id));
+    }
+
+    /// Send state requests (gain, sea, rain, range, power)
+    fn send_state_requests(&self) {
+        // Request status ($R69)
+        let cmd = format_request_status();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Request range ($R62)
+        let cmd = format_request_range();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Request gain ($R63)
+        let cmd = format_request_gain();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Request sea ($R64)
+        let cmd = format_request_sea();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Request rain ($R65)
+        let cmd = format_request_rain();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        debug(&format!("[{}] Sent state requests", self.radar_id));
+    }
+
+    /// Parse a response line from the radar
+    fn parse_response(&mut self, line: &str) {
+        // Try to update radar state from control responses ($N62-$N69)
+        if self.radar_state.update_from_response(line) {
+            debug(&format!(
+                "[{}] State updated: power={:?}, range={}, gain={}/{}, sea={}/{}, rain={}/{}",
+                self.radar_id,
+                self.radar_state.power,
+                self.radar_state.range,
+                self.radar_state.gain.mode,
+                self.radar_state.gain.value,
+                self.radar_state.sea.mode,
+                self.radar_state.sea.value,
+                self.radar_state.rain.mode,
+                self.radar_state.rain.value
+            ));
+            return;
+        }
+
+        // Parse $N96 - Module/firmware response
+        // Format: $N96,part-version,part-version,...
+        // Example: $N96,0359360-01.05,0330920-02.01,...
+        // The first part number (0359360) identifies the radar model
+        if line.starts_with("$N96,") {
+            // Extract first part-version pair
+            let parts: Vec<&str> = line[5..].split(',').collect();
+            if let Some(first) = parts.first() {
+                // Extract part code and version
+                if let Some(idx) = first.find('-') {
+                    let part_code = &first[..idx];
+                    let version = &first[idx + 1..];
+                    debug(&format!("[{}] Firmware version: {}", self.radar_id, version));
+                    self.firmware_version = Some(version.to_string());
+
+                    // Map part code to model name
+                    // Based on TimeZero Fec.Wrapper.SensorProperty.GetRadarSensorType
+                    let model = match part_code {
+                        "0359235" => Some("DRS"),
+                        "0359255" => Some("FAR-1417"),
+                        "0359204" => Some("FAR-2117"),
+                        "0359321" => Some("FAR-1417"),
+                        "0359338" => Some("DRS4D"),
+                        "0359367" => Some("DRS4D"),
+                        "0359281" => Some("FAR-3000"),
+                        "0359286" => Some("FAR-3000"),
+                        "0359477" => Some("FAR-3000"),
+                        "0359360" => Some("DRS4D-NXT"),
+                        "0359421" => Some("DRS6A-NXT"),
+                        "0359355" => Some("DRS6A-X"),
+                        "0359344" => Some("FAR-1513"),
+                        "0359397" => Some("FAR-1416"),
+                        _ => None,
+                    };
+
+                    if let Some(m) = model {
+                        debug(&format!("[{}] Model identified: {} (part code {})", self.radar_id, m, part_code));
+                        self.model = Some(m.to_string());
+                    } else {
+                        debug(&format!("[{}] Unknown part code: {}", self.radar_id, part_code));
+                    }
+                }
+            }
+        }
+        // Parse $N8E - Operating hours response
+        // Format: $N8E,seconds
+        // Example: $N8E,4442123
+        else if line.starts_with("$N8E,") {
+            if let Ok(seconds) = line[5..].trim().parse::<u64>() {
+                let hours = seconds as f64 / 3600.0;
+                debug(&format!(
+                    "[{}] Operating hours: {:.1} ({} seconds)",
+                    self.radar_id, hours, seconds
+                ));
+                self.operating_hours = Some(hours);
+            }
+        }
+    }
+
+    /// Get firmware version (if available)
+    pub fn firmware_version(&self) -> Option<&str> {
+        self.firmware_version.as_deref()
+    }
+
+    /// Get radar model (if available)
+    /// Returns the model string (e.g., "DRS4D-NXT") identified from the TCP $N96 response
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Get operating hours (if available)
+    pub fn operating_hours(&self) -> Option<f64> {
+        self.operating_hours
+    }
+
+    /// Get current radar state (gain, sea, rain, range, power)
+    ///
+    /// Returns the cached state that was populated from $N responses.
+    /// State is automatically queried when the controller connects.
+    pub fn radar_state(&self) -> &RadarState {
+        &self.radar_state
     }
 
     /// Start trying fallback command ports directly (skip login)
@@ -591,6 +972,8 @@ impl FurunoController {
         self.command_socket = None;
         self.state = ControllerState::Disconnected;
         self.command_port = 0;
+        self.info_requested = false; // Re-request info on next connection
+        self.state_requested = false; // Re-request state on next connection
     }
 }
 

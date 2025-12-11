@@ -28,6 +28,9 @@ pub struct RadarDiscovery {
     pub max_spoke_len: u16,
     /// Pixel depth (e.g., 16, 64, 128)
     pub pixel_values: u8,
+    /// Serial number (from model report)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
 }
 
 /// Legend entry for mapping pixel values to colors

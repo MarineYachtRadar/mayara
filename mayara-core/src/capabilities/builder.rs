@@ -1,0 +1,195 @@
+//! Capability Manifest Builder
+//!
+//! Builds CapabilityManifest from radar discovery information and model database.
+
+use crate::models::{self, ModelInfo};
+use crate::radar::RadarDiscovery;
+
+use super::controls::*;
+use super::{
+    CapabilityManifest, Characteristics, ConstraintCondition, ConstraintEffect, ConstraintType,
+    ControlConstraint, ControlDefinition,
+};
+
+/// Build a capability manifest for a discovered radar
+///
+/// Uses the model database to look up capabilities, falling back to
+/// a generic configuration for unknown models.
+pub fn build_capabilities(discovery: &RadarDiscovery, radar_id: &str) -> CapabilityManifest {
+    // Try to find model in database
+    let model_info = discovery
+        .model
+        .as_deref()
+        .and_then(|m| models::get_model(discovery.brand, m))
+        .unwrap_or(&models::UNKNOWN_MODEL);
+
+    CapabilityManifest {
+        id: radar_id.to_string(),
+        make: discovery.brand.as_str().to_string(),
+        model: model_info.model.to_string(),
+        model_family: Some(model_info.family.to_string()),
+        serial_number: discovery.serial_number.clone(),
+        firmware_version: None, // Set dynamically via state
+
+        characteristics: Characteristics {
+            max_range: model_info.max_range,
+            min_range: model_info.min_range,
+            supported_ranges: model_info.range_table.to_vec(),
+            spokes_per_revolution: model_info.spokes_per_revolution,
+            max_spoke_length: model_info.max_spoke_length,
+            has_doppler: model_info.has_doppler,
+            has_dual_range: model_info.has_dual_range,
+            max_dual_range: model_info.max_dual_range,
+            no_transmit_zone_count: model_info.no_transmit_zone_count,
+        },
+
+        controls: build_controls(model_info, discovery.serial_number.is_some()),
+        constraints: build_constraints(model_info),
+    }
+}
+
+/// Build a capability manifest directly from model info
+///
+/// Useful when you don't have a RadarDiscovery but know the model.
+pub fn build_capabilities_from_model(model_info: &ModelInfo, radar_id: &str) -> CapabilityManifest {
+    CapabilityManifest {
+        id: radar_id.to_string(),
+        make: model_info.brand.as_str().to_string(),
+        model: model_info.model.to_string(),
+        model_family: Some(model_info.family.to_string()),
+        serial_number: None,
+        firmware_version: None,
+
+        characteristics: Characteristics {
+            max_range: model_info.max_range,
+            min_range: model_info.min_range,
+            supported_ranges: model_info.range_table.to_vec(),
+            spokes_per_revolution: model_info.spokes_per_revolution,
+            max_spoke_length: model_info.max_spoke_length,
+            has_doppler: model_info.has_doppler,
+            has_dual_range: model_info.has_dual_range,
+            max_dual_range: model_info.max_dual_range,
+            no_transmit_zone_count: model_info.no_transmit_zone_count,
+        },
+
+        controls: build_controls(model_info, false), // No serial number available
+        constraints: build_constraints(model_info),
+    }
+}
+
+/// Build the list of controls for a radar model
+fn build_controls(model: &ModelInfo, has_serial_number: bool) -> Vec<ControlDefinition> {
+    let mut controls = vec![
+        // Base controls (all radars)
+        control_power(),
+        control_range(model.range_table),
+        control_gain(),
+        control_sea(),
+        control_rain(),
+        // Info controls (read-only)
+        control_firmware_version(),
+        control_operating_hours(),
+    ];
+
+    // Only include serial number control if we have the data
+    if has_serial_number {
+        controls.push(control_serial_number());
+    }
+
+    // Extended controls based on model capabilities
+    // Note: Installation category controls (bearingAlignment, antennaHeight) ARE included
+    // in capabilities so clients can see the schema, but they won't appear in /state
+    // since they're configuration values stored locally, not queried from the radar.
+    for control_id in model.controls {
+        if *control_id == "noTransmitZones" {
+            if let Some(def) =
+                get_extended_control_with_zones(control_id, model.no_transmit_zone_count)
+            {
+                controls.push(def);
+            }
+        } else if let Some(def) = get_extended_control(control_id) {
+            controls.push(def);
+        }
+    }
+
+    controls
+}
+
+/// Build constraints for a radar model
+fn build_constraints(model: &ModelInfo) -> Vec<ControlConstraint> {
+    let mut constraints = vec![];
+
+    // If preset mode is available, add constraints for controls it locks
+    if model.controls.contains(&"presetMode") {
+        let locked_controls = ["gain", "sea", "rain", "interferenceRejection"];
+
+        for control_id in locked_controls {
+            // Only add constraint if the control exists on this model
+            if control_id == "interferenceRejection"
+                && !model.controls.contains(&"interferenceRejection")
+            {
+                continue;
+            }
+
+            constraints.push(ControlConstraint {
+                control_id: control_id.to_string(),
+                condition: ConstraintCondition {
+                    condition_type: ConstraintType::ReadOnlyWhen,
+                    depends_on: "presetMode".into(),
+                    operator: "!=".into(),
+                    value: "custom".into(),
+                },
+                effect: ConstraintEffect {
+                    disabled: None,
+                    read_only: Some(true),
+                    allowed_values: None,
+                    reason: Some("Controlled by preset mode".into()),
+                },
+            });
+        }
+    }
+
+    // Doppler mode constraint: only available when radar has Doppler
+    if model.has_doppler && model.controls.contains(&"dopplerMode") {
+        // No additional constraint needed - presence in controls indicates availability
+    }
+
+    // Dual range constraint: range limited in dual-range mode for Furuno
+    if model.has_dual_range && model.max_dual_range > 0 {
+        // Could add constraint that secondary screen range is limited
+        // This would be a "restricted_when" constraint
+    }
+
+    constraints
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Brand;
+
+    #[test]
+    fn test_build_capabilities_furuno() {
+        let discovery = RadarDiscovery {
+            brand: Brand::Furuno,
+            model: Some("DRS4D-NXT".into()),
+            name: "Test Radar".into(),
+            address: "192.168.1.100:10010".into(),
+            data_port: 10024,
+            command_port: 10025,
+            spokes_per_revolution: 2048,
+            max_spoke_len: 512,
+            pixel_values: 64,
+            serial_number: Some("12345".into()),
+        };
+
+        let caps = build_capabilities(&discovery, "1");
+
+        assert_eq!(caps.id, "1");
+        assert_eq!(caps.make, "Furuno");
+        assert_eq!(caps.model, "DRS4D-NXT");
+        assert!(caps.characteristics.has_doppler);
+        assert!(caps.characteristics.has_dual_range);
+        assert!(caps.controls.len() >= 5); // At least base controls
+    }
+}

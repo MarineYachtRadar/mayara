@@ -517,3 +517,191 @@ pub extern "C" fn radar_set_controls(
         }
     }
 }
+
+// =============================================================================
+// Radar Provider API v5 Exports
+// =============================================================================
+
+/// Return CapabilityManifest JSON for a radar (v5 API)
+/// Request: {"radarId": "..."}
+/// Response: CapabilityManifest JSON or {"error": "..."}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn radar_get_capabilities(
+    request_ptr: *const u8,
+    request_len: usize,
+    out_ptr: *mut u8,
+    out_max_len: usize,
+) -> i32 {
+    let request_str = match parse_request(request_ptr, request_len) {
+        Ok(s) => s,
+        Err(_) => return write_string(r#"{"error":"invalid utf8"}"#, out_ptr, out_max_len),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "radarId")]
+        radar_id: String,
+    }
+
+    let req: Request = match serde_json::from_str(&request_str) {
+        Ok(r) => r,
+        Err(_) => return write_string(r#"{"error":"invalid request"}"#, out_ptr, out_max_len),
+    };
+
+    debug(&format!("radar_get_capabilities: {}", req.radar_id));
+
+    unsafe {
+        if let Some(ref provider) = PROVIDER {
+            if let Some(caps) = provider.get_capabilities(&req.radar_id) {
+                match serde_json::to_string(&caps) {
+                    Ok(json) => write_string(&json, out_ptr, out_max_len),
+                    Err(_) => write_string(r#"{"error":"serialize failed"}"#, out_ptr, out_max_len),
+                }
+            } else {
+                write_string(r#"{"error":"radar not found"}"#, out_ptr, out_max_len)
+            }
+        } else {
+            write_string(r#"{"error":"provider not initialized"}"#, out_ptr, out_max_len)
+        }
+    }
+}
+
+/// Return RadarState JSON (v5 format with controls map)
+/// Request: {"radarId": "..."}
+/// Response: RadarStateV5 JSON or {"error": "..."}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn radar_get_state(
+    request_ptr: *const u8,
+    request_len: usize,
+    out_ptr: *mut u8,
+    out_max_len: usize,
+) -> i32 {
+    let request_str = match parse_request(request_ptr, request_len) {
+        Ok(s) => s,
+        Err(_) => return write_string(r#"{"error":"invalid utf8"}"#, out_ptr, out_max_len),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "radarId")]
+        radar_id: String,
+    }
+
+    let req: Request = match serde_json::from_str(&request_str) {
+        Ok(r) => r,
+        Err(_) => return write_string(r#"{"error":"invalid request"}"#, out_ptr, out_max_len),
+    };
+
+    debug(&format!("radar_get_state: {}", req.radar_id));
+
+    unsafe {
+        if let Some(ref provider) = PROVIDER {
+            if let Some(state) = provider.get_state_v5(&req.radar_id) {
+                match serde_json::to_string(&state) {
+                    Ok(json) => write_string(&json, out_ptr, out_max_len),
+                    Err(_) => write_string(r#"{"error":"serialize failed"}"#, out_ptr, out_max_len),
+                }
+            } else {
+                write_string(r#"{"error":"radar not found"}"#, out_ptr, out_max_len)
+            }
+        } else {
+            write_string(r#"{"error":"provider not initialized"}"#, out_ptr, out_max_len)
+        }
+    }
+}
+
+/// Get a single control value (v5 API)
+/// Request: {"radarId": "...", "controlId": "gain"}
+/// Response: ControlValue JSON or {"error": "..."}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn radar_get_control(
+    request_ptr: *const u8,
+    request_len: usize,
+    out_ptr: *mut u8,
+    out_max_len: usize,
+) -> i32 {
+    let request_str = match parse_request(request_ptr, request_len) {
+        Ok(s) => s,
+        Err(_) => return write_string(r#"{"error":"invalid utf8"}"#, out_ptr, out_max_len),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "radarId")]
+        radar_id: String,
+        #[serde(rename = "controlId")]
+        control_id: String,
+    }
+
+    let req: Request = match serde_json::from_str(&request_str) {
+        Ok(r) => r,
+        Err(_) => return write_string(r#"{"error":"invalid request"}"#, out_ptr, out_max_len),
+    };
+
+    debug(&format!("radar_get_control: {} {}", req.radar_id, req.control_id));
+
+    unsafe {
+        if let Some(ref provider) = PROVIDER {
+            if let Some(value) = provider.get_control(&req.radar_id, &req.control_id) {
+                match serde_json::to_string(&value) {
+                    Ok(json) => write_string(&json, out_ptr, out_max_len),
+                    Err(_) => write_string(r#"{"error":"serialize failed"}"#, out_ptr, out_max_len),
+                }
+            } else {
+                write_string(r#"{"error":"control not found"}"#, out_ptr, out_max_len)
+            }
+        } else {
+            write_string(r#"{"error":"provider not initialized"}"#, out_ptr, out_max_len)
+        }
+    }
+}
+
+/// Set a single control value (v5 generic interface)
+/// Request: {"radarId": "...", "controlId": "gain", "value": {...}}
+/// Response: {"success": true} or {"success": false, "error": "..."}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn radar_set_control(
+    request_ptr: *const u8,
+    request_len: usize,
+    out_ptr: *mut u8,
+    out_max_len: usize,
+) -> i32 {
+    let request_str = match parse_request(request_ptr, request_len) {
+        Ok(s) => s,
+        Err(_) => return write_string(r#"{"success":false,"error":"invalid utf8"}"#, out_ptr, out_max_len),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "radarId")]
+        radar_id: String,
+        #[serde(rename = "controlId")]
+        control_id: String,
+        value: serde_json::Value,
+    }
+
+    let req: Request = match serde_json::from_str(&request_str) {
+        Ok(r) => r,
+        Err(_) => return write_string(r#"{"success":false,"error":"invalid request"}"#, out_ptr, out_max_len),
+    };
+
+    debug(&format!("radar_set_control: {} {} {:?}", req.radar_id, req.control_id, req.value));
+
+    unsafe {
+        if let Some(ref mut provider) = PROVIDER {
+            match provider.set_control_v5(&req.radar_id, &req.control_id, &req.value) {
+                Ok(()) => write_string(r#"{"success":true}"#, out_ptr, out_max_len),
+                Err(e) => {
+                    let error = format!(r#"{{"success":false,"error":"{}"}}"#, e);
+                    write_string(&error, out_ptr, out_max_len)
+                }
+            }
+        } else {
+            write_string(r#"{"success":false,"error":"provider not initialized"}"#, out_ptr, out_max_len)
+        }
+    }
+}

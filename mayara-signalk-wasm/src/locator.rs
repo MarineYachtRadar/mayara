@@ -247,22 +247,17 @@ impl RadarLocator {
         let mut discoveries = Vec::new();
         let mut buf = [0u8; 2048];
 
-        // Poll Furuno - collect discoveries first
-        self.poll_socket(&self.furuno_socket.as_ref(), &mut buf, &mut discoveries, |data, addr| {
-            if !furuno::is_beacon_response(data) {
-                return None;
-            }
-            match furuno::parse_beacon_response(data, addr) {
-                Ok(discovery) => {
-                    debug(&format!("Furuno beacon from {}: {:?}", addr, discovery.model));
-                    Some(discovery)
-                }
-                Err(e) => {
-                    debug(&format!("Furuno parse error: {}", e));
-                    None
-                }
-            }
-        });
+        // Poll Furuno - collect discoveries and model reports
+        // Model reports are 170 bytes and come separately from beacons
+        // Tuple: (source_addr, model, serial)
+        let mut model_reports: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+
+        self.poll_socket_furuno(&mut buf, &mut discoveries, &mut model_reports);
+
+        // Apply model reports to existing radars
+        for (addr, model, serial) in model_reports {
+            self.update_radar_model_info(&addr, model.as_deref(), serial.as_deref());
+        }
 
         // Poll Navico BR24
         self.poll_socket(&self.navico_br24_socket.as_ref(), &mut buf, &mut discoveries, |data, addr| {
@@ -350,6 +345,88 @@ impl RadarLocator {
                 }
             }
         }
+    }
+
+    /// Poll Furuno socket for beacons AND model reports
+    fn poll_socket_furuno(
+        &self,
+        buf: &mut [u8],
+        discoveries: &mut Vec<RadarDiscovery>,
+        model_reports: &mut Vec<(String, Option<String>, Option<String>)>,
+    ) {
+        if let Some(socket) = &self.furuno_socket {
+            while let Some((len, addr, _port)) = socket.recv_from(buf) {
+                let data = &buf[..len];
+
+                // Check for beacon response first
+                if furuno::is_beacon_response(data) {
+                    match furuno::parse_beacon_response(data, &addr) {
+                        Ok(discovery) => {
+                            debug(&format!("Furuno beacon from {}: {:?}", addr, discovery.model));
+                            discoveries.push(discovery);
+                        }
+                        Err(e) => {
+                            debug(&format!("Furuno beacon parse error: {}", e));
+                        }
+                    }
+                }
+                // Check for model report (170 bytes)
+                else if furuno::is_model_report(data) {
+                    match furuno::parse_model_report(data) {
+                        Ok((model, serial)) => {
+                            debug(&format!(
+                                "Furuno model report from {}: model={:?}, serial={:?}",
+                                addr, model, serial
+                            ));
+                            // Store both model and serial
+                            if model.is_some() || serial.is_some() {
+                                model_reports.push((addr.clone(), model, serial));
+                            }
+                        }
+                        Err(e) => {
+                            debug(&format!("Furuno model report parse error: {}", e));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update a radar's model and serial number based on source address
+    fn update_radar_model_info(&mut self, source_addr: &str, model: Option<&str>, serial: Option<&str>) {
+        // Find radar by address (IP part only, without port)
+        let source_ip = source_addr.split(':').next().unwrap_or(source_addr);
+
+        for (_id, radar) in self.radars.iter_mut() {
+            let radar_ip = radar.discovery.address.split(':').next().unwrap_or(&radar.discovery.address);
+
+            if radar_ip == source_ip {
+                // Update model if provided and different
+                if let Some(m) = model {
+                    if radar.discovery.model.is_none() || radar.discovery.model.as_deref() != Some(m) {
+                        debug(&format!(
+                            "Updating radar {} model: {:?} -> {}",
+                            radar.discovery.name, radar.discovery.model, m
+                        ));
+                        radar.discovery.model = Some(m.to_string());
+                    }
+                }
+                // Update serial number if provided and different
+                if let Some(s) = serial {
+                    if radar.discovery.serial_number.is_none() || radar.discovery.serial_number.as_deref() != Some(s) {
+                        debug(&format!(
+                            "Updating radar {} serial: {:?} -> {}",
+                            radar.discovery.name, radar.discovery.serial_number, s
+                        ));
+                        radar.discovery.serial_number = Some(s.to_string());
+                    }
+                }
+                return;
+            }
+        }
+
+        // No radar found for this address - that's ok, model report may arrive before beacon
+        debug(&format!("Model report for unknown radar at {}: model={:?}, serial={:?}", source_addr, model, serial));
     }
 
     /// Add a radar to the discovered list

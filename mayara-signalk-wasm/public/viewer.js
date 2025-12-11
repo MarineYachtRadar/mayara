@@ -102,7 +102,18 @@ window.onload = async function () {
     drawBackground
   );
 
-  loadRadar(id);
+  // Wait for WebGPU initialization before loading radar
+  // (radarLoaded callback needs renderer to be ready)
+  await renderer.initPromise;
+
+  // Process any pending radar data that arrived before renderer was ready
+  if (pendingRadarData) {
+    console.log("Processing deferred radar data");
+    radarLoaded(pendingRadarData);
+    pendingRadarData = null;
+  } else {
+    loadRadar(id);
+  }
 
   // Subscribe to SignalK heading delta
   subscribeToHeading();
@@ -535,6 +546,9 @@ function restart(id) {
   setTimeout(loadRadar, 15000, id);
 }
 
+// Pending radar data if callback arrives before renderer is ready
+var pendingRadarData = null;
+
 function radarLoaded(r) {
   let maxSpokeLen = r.maxSpokeLen;
   let spokesPerRevolution = r.spokesPerRevolution;
@@ -543,7 +557,16 @@ function radarLoaded(r) {
   if (r === undefined || r.controls === undefined) {
     return;
   }
-  renderer.setLegend(expandLegend(r.legend));
+
+  // If renderer isn't ready yet, store data and return
+  // It will be processed when renderer.initPromise resolves
+  if (!renderer) {
+    console.log("radarLoaded: renderer not ready, deferring...");
+    pendingRadarData = r;
+    return;
+  }
+
+  renderer.setLegend(buildMayaraLegend());
   renderer.setSpokes(spokesPerRevolution, maxSpokeLen);
 
   // Use provided streamUrl or construct SignalK stream URL
@@ -590,15 +613,51 @@ function radarLoaded(r) {
   };
 }
 
-function expandLegend(legend) {
-  let a = Array();
-  for (let i = 0; i < Object.keys(legend).length; i++) {
-    let color = legend[i].color;
-    a.push(hexToRGBA(color));
+// Build 256-color MaYaRa palette for radar PPI display
+// Smooth color gradient: Dark Green → Green → Yellow → Red
+// Designed for 6-bit radar data (0-63 intensity values)
+// This is a client-side rendering concern - not part of the radar API
+function buildMayaraLegend() {
+  const legend = [];
+  for (let i = 0; i < 256; i++) {
+    let r, g, b;
+    if (i === 0) {
+      // Index 0: transparent/black (noise floor)
+      r = g = b = 0;
+    } else if (i <= 15) {
+      // 1-15: dark green → brighter green (weak returns)
+      const t = (i - 1) / 14;
+      r = 0;
+      g = Math.floor(50 + t * 100);
+      b = 0;
+    } else if (i <= 31) {
+      // 16-31: green → yellow-green (moderate returns)
+      const t = (i - 16) / 15;
+      r = Math.floor(t * 200);
+      g = Math.floor(150 + t * 55);
+      b = 0;
+    } else if (i <= 47) {
+      // 32-47: yellow → yellow-red (stronger returns)
+      const t = (i - 32) / 15;
+      r = Math.floor(200 + t * 55);
+      g = Math.floor(205 - t * 125);
+      b = 0;
+    } else if (i <= 63) {
+      // 48-63: red (strong returns / land)
+      const t = (i - 48) / 15;
+      r = 255;
+      g = Math.max(0, Math.floor(80 - t * 80));
+      b = 0;
+    } else {
+      // >63: saturated red (overflow)
+      r = 255;
+      g = 0;
+      b = 0;
+    }
+    // RGBA: alpha is 0 for index 0 (transparent), 255 for others
+    legend.push([r, g, b, i === 0 ? 0 : 255]);
   }
-  a[0][3] = 255;
-
-  return a;
+  return legend;
 }
 
 function hexToRGBA(hex) {
@@ -619,7 +678,9 @@ function hexToRGBA(hex) {
 function controlUpdate(control, controlValue) {
   if (control.name == "Range") {
     let range = parseFloat(controlValue.value);
-    renderer.setRange(range);
+    if (renderer && renderer.setRange) {
+      renderer.setRange(range);
+    }
   }
   if (control.name.startsWith("No Transmit")) {
     let value = parseFloat(controlValue.value);

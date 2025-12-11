@@ -2,16 +2,85 @@
 //!
 //! Implements the SignalK Radar Provider interface.
 
-use serde::Serialize;
-use std::collections::BTreeMap;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::{BTreeMap, HashMap};
 
+use mayara_core::capabilities::{
+    builder::build_capabilities, CapabilityManifest, ControlError, RadarStateV5,
+};
 use mayara_core::radar::RadarDiscovery;
 use mayara_core::Brand;
 
 use crate::furuno_controller::FurunoController;
 use crate::locator::RadarLocator;
-use crate::signalk_ffi::{debug, emit_json};
+use crate::signalk_ffi::{debug, emit_json, read_config, save_config};
 use crate::spoke_receiver::{SpokeReceiver, FURUNO_OUTPUT_SPOKES};
+
+/// Custom deserializer for antenna height that accepts both float and int
+/// Old configs stored float values (e.g., 23.0), new configs use integers (0, 1, 2)
+fn deserialize_antenna_height<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    // Try to deserialize as any JSON value
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+
+    match value {
+        None => Ok(None),
+        Some(serde_json::Value::Number(n)) => {
+            // Accept both integer and float, convert to i32
+            if let Some(i) = n.as_i64() {
+                // Validate range 0-2
+                if (0..=2).contains(&i) {
+                    Ok(Some(i as i32))
+                } else {
+                    // Old float value out of range, default to category 0
+                    Ok(Some(0))
+                }
+            } else if let Some(f) = n.as_f64() {
+                // Old float config - convert to category based on value
+                // Old values were arbitrary heights, map to categories
+                let category = if f < 3.0 {
+                    0  // Under 3m
+                } else if f <= 10.0 {
+                    1  // 3-10m
+                } else {
+                    2  // Over 10m
+                };
+                Ok(Some(category))
+            } else {
+                Err(D::Error::custom("invalid antenna height value"))
+            }
+        }
+        Some(_) => Err(D::Error::custom("antenna height must be a number")),
+    }
+}
+
+/// Installation configuration for a radar
+///
+/// These are configuration values stored locally, not queried from the radar.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RadarInstallationConfig {
+    /// Bearing alignment offset in degrees (-180 to 180)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bearing_alignment: Option<f64>,
+    /// Antenna height category (0=<3m, 1=3-10m, 2=>10m)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_antenna_height")]
+    pub antenna_height: Option<i32>,
+}
+
+/// Plugin configuration stored via SignalK
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginConfig {
+    /// Installation configs per radar ID
+    #[serde(default)]
+    pub radars: HashMap<String, RadarInstallationConfig>,
+}
 
 /// Sanitize a string to be safe for JSON and SignalK paths
 fn sanitize_string(s: &str) -> String {
@@ -154,6 +223,8 @@ pub struct RadarProvider {
     /// TCP controllers for Furuno radars (keyed by radar ID)
     furuno_controllers: BTreeMap<String, FurunoController>,
     poll_count: u64,
+    /// Plugin configuration (installation settings per radar)
+    config: PluginConfig,
 }
 
 impl RadarProvider {
@@ -162,12 +233,60 @@ impl RadarProvider {
         let mut locator = RadarLocator::new();
         locator.start();
 
+        // Load saved configuration
+        let config = Self::load_config();
+        debug(&format!("Loaded config: {} radars configured", config.radars.len()));
+
         Self {
             locator,
             spoke_receiver: SpokeReceiver::new(),
             furuno_controllers: BTreeMap::new(),
             poll_count: 0,
+            config,
         }
+    }
+
+    /// Load configuration from SignalK
+    fn load_config() -> PluginConfig {
+        if let Some(json) = read_config() {
+            match serde_json::from_str::<PluginConfig>(&json) {
+                Ok(config) => {
+                    debug(&format!("Loaded config from SignalK: {:?}", config));
+                    return config;
+                }
+                Err(e) => {
+                    debug(&format!("Failed to parse config, using defaults: {}", e));
+                }
+            }
+        }
+        PluginConfig::default()
+    }
+
+    /// Save configuration to SignalK
+    fn save_config(&self) {
+        match serde_json::to_string(&self.config) {
+            Ok(json) => {
+                if save_config(&json) {
+                    debug(&format!("Saved config to SignalK: {} radars", self.config.radars.len()));
+                } else {
+                    debug("Failed to save config to SignalK");
+                }
+            }
+            Err(e) => {
+                debug(&format!("Failed to serialize config: {}", e));
+            }
+        }
+    }
+
+    /// Get installation config for a radar
+    pub fn get_installation_config(&self, radar_id: &str) -> Option<&RadarInstallationConfig> {
+        self.config.radars.get(radar_id)
+    }
+
+    /// Set installation config for a radar and save
+    pub fn set_installation_config(&mut self, radar_id: &str, config: RadarInstallationConfig) {
+        self.config.radars.insert(radar_id.to_string(), config);
+        self.save_config();
     }
 
     /// Poll for radar events
@@ -217,9 +336,24 @@ impl RadarProvider {
             }
         }
 
-        // Poll all Furuno controllers
-        for controller in self.furuno_controllers.values_mut() {
+        // Poll all Furuno controllers and update model info
+        for (radar_id, controller) in self.furuno_controllers.iter_mut() {
             controller.poll();
+
+            // Update radar discovery with model from controller (if available)
+            if let Some(model) = controller.model() {
+                // Find the radar in locator and update its model
+                for radar_info in self.locator.radars.values_mut() {
+                    let state = RadarState::from(&radar_info.discovery);
+                    if state.id == *radar_id && radar_info.discovery.model.as_deref() != Some(model) {
+                        debug(&format!(
+                            "Updating radar {} model from controller: {:?} -> {}",
+                            radar_id, radar_info.discovery.model, model
+                        ));
+                        radar_info.discovery.model = Some(model.to_string());
+                    }
+                }
+            }
         }
 
         // Poll for spoke data and emit to SignalK stream
@@ -549,6 +683,461 @@ impl RadarProvider {
             }
         }
     }
+
+    // =========================================================================
+    // v5 API Methods
+    // =========================================================================
+
+    /// Get capability manifest for a radar (v5 API)
+    pub fn get_capabilities(&self, radar_id: &str) -> Option<CapabilityManifest> {
+        let radar = self.find_radar(radar_id)?;
+
+        // Check if controller has model info (more up-to-date than discovery)
+        let mut discovery = radar.discovery.clone();
+        if let Some(controller) = self.furuno_controllers.get(radar_id) {
+            if let Some(model) = controller.model() {
+                discovery.model = Some(model.to_string());
+            }
+        }
+
+        Some(build_capabilities(&discovery, radar_id))
+    }
+
+    /// Get current state in v5 format
+    pub fn get_state_v5(&self, radar_id: &str) -> Option<RadarStateV5> {
+        let radar = self.find_radar(radar_id)?;
+        let state = RadarState::from(&radar.discovery);
+
+        // Build controls map with current values from the controller
+        let mut controls = HashMap::new();
+
+        // Get live state from controller if available
+        if let Some(controller) = self.furuno_controllers.get(radar_id) {
+            let live_state = controller.radar_state();
+
+            // Power state from live radar state
+            let power_str = match live_state.power {
+                mayara_core::state::PowerState::Off => "off",
+                mayara_core::state::PowerState::Standby => "standby",
+                mayara_core::state::PowerState::Transmit => "transmit",
+                mayara_core::state::PowerState::Warming => "warming",
+            };
+            controls.insert("power".to_string(), serde_json::json!(power_str));
+
+            // Range from live state
+            controls.insert("range".to_string(), serde_json::json!(live_state.range));
+
+            // Gain, sea, rain from live state
+            controls.insert(
+                "gain".to_string(),
+                serde_json::json!({"mode": live_state.gain.mode, "value": live_state.gain.value}),
+            );
+            controls.insert(
+                "sea".to_string(),
+                serde_json::json!({"mode": live_state.sea.mode, "value": live_state.sea.value}),
+            );
+            controls.insert(
+                "rain".to_string(),
+                serde_json::json!({"mode": live_state.rain.mode, "value": live_state.rain.value}),
+            );
+
+            // Firmware version and operating hours
+            if let Some(firmware) = controller.firmware_version() {
+                controls.insert("firmwareVersion".to_string(), serde_json::json!(firmware));
+            }
+            if let Some(hours) = controller.operating_hours() {
+                controls.insert("operatingHours".to_string(), serde_json::json!(hours));
+            }
+        } else {
+            // Fallback to defaults if no controller
+            controls.insert("power".to_string(), serde_json::json!(state.status));
+            controls.insert("range".to_string(), serde_json::json!(1852));
+            controls.insert(
+                "gain".to_string(),
+                serde_json::json!({"mode": "auto", "value": 50}),
+            );
+            controls.insert(
+                "sea".to_string(),
+                serde_json::json!({"mode": "auto", "value": 50}),
+            );
+            controls.insert(
+                "rain".to_string(),
+                serde_json::json!({"mode": "manual", "value": 0}),
+            );
+        }
+
+        // Serial number from discovery (UDP model report)
+        if let Some(serial) = &radar.discovery.serial_number {
+            controls.insert("serialNumber".to_string(), serde_json::json!(serial));
+        }
+
+        // Installation config values from stored config
+        if let Some(install_config) = self.config.radars.get(radar_id) {
+            if let Some(bearing) = install_config.bearing_alignment {
+                controls.insert("bearingAlignment".to_string(), serde_json::json!(bearing));
+            }
+            if let Some(height) = install_config.antenna_height {
+                controls.insert("antennaHeight".to_string(), serde_json::json!(height));
+            }
+        }
+
+        // Get ISO timestamp (placeholder - WASM doesn't have system time)
+        let timestamp = "2025-01-01T00:00:00Z".to_string();
+
+        // Use live power state for status field
+        let status = controls.get("power")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&state.status)
+            .to_string();
+
+        Some(RadarStateV5 {
+            id: state.id,
+            timestamp,
+            status,
+            controls,
+            disabled_controls: vec![],
+        })
+    }
+
+    /// Get a single control value (v5 API)
+    pub fn get_control(&self, radar_id: &str, control_id: &str) -> Option<serde_json::Value> {
+        let radar = self.find_radar(radar_id)?;
+
+        // Try to get live state from controller
+        let controller = self.furuno_controllers.get(radar_id);
+        let live_state = controller.map(|c| c.radar_state());
+
+        match control_id {
+            "power" => {
+                if let Some(state) = live_state {
+                    let power_str = match state.power {
+                        mayara_core::state::PowerState::Off => "off",
+                        mayara_core::state::PowerState::Standby => "standby",
+                        mayara_core::state::PowerState::Transmit => "transmit",
+                        mayara_core::state::PowerState::Warming => "warming",
+                    };
+                    Some(serde_json::json!(power_str))
+                } else {
+                    Some(serde_json::json!("standby"))
+                }
+            }
+            "range" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!(state.range))
+                } else {
+                    Some(serde_json::json!(1852))
+                }
+            }
+            "gain" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!({"mode": state.gain.mode, "value": state.gain.value}))
+                } else {
+                    Some(serde_json::json!({"mode": "auto", "value": 50}))
+                }
+            }
+            "sea" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!({"mode": state.sea.mode, "value": state.sea.value}))
+                } else {
+                    Some(serde_json::json!({"mode": "auto", "value": 50}))
+                }
+            }
+            "rain" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!({"mode": state.rain.mode, "value": state.rain.value}))
+                } else {
+                    Some(serde_json::json!({"mode": "manual", "value": 0}))
+                }
+            }
+            // Info controls (read-only)
+            "serialNumber" => radar.discovery.serial_number.as_ref().map(|s| serde_json::json!(s)),
+            "firmwareVersion" => controller
+                .and_then(|c| c.firmware_version())
+                .map(|v| serde_json::json!(v)),
+            "operatingHours" => controller
+                .and_then(|c| c.operating_hours())
+                .map(|h| serde_json::json!(h)),
+            // Installation config values (stored locally)
+            "bearingAlignment" => self.config.radars.get(radar_id)
+                .and_then(|c| c.bearing_alignment)
+                .map(|v| serde_json::json!(v)),
+            "antennaHeight" => self.config.radars.get(radar_id)
+                .and_then(|c| c.antenna_height)
+                .map(|v| serde_json::json!(v)),
+            _ => {
+                debug(&format!("Unknown control: {}", control_id));
+                None
+            }
+        }
+    }
+
+    /// Set a single control value (v5 generic interface)
+    pub fn set_control_v5(
+        &mut self,
+        radar_id: &str,
+        control_id: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), ControlError> {
+        debug(&format!(
+            "set_control_v5({}, {}, {:?})",
+            radar_id, control_id, value
+        ));
+
+        // Check if radar exists
+        if self.find_radar(radar_id).is_none() {
+            return Err(ControlError::RadarNotFound);
+        }
+
+        // Dispatch based on control ID
+        match control_id {
+            "power" => {
+                let state = value.as_str().ok_or_else(|| {
+                    ControlError::InvalidValue("power must be a string".to_string())
+                })?;
+                if self.set_power(radar_id, state) {
+                    Ok(())
+                } else {
+                    Err(ControlError::ControllerNotAvailable)
+                }
+            }
+            "range" => {
+                let range = value.as_u64().ok_or_else(|| {
+                    ControlError::InvalidValue("range must be a number".to_string())
+                })? as u32;
+                if self.set_range(radar_id, range) {
+                    Ok(())
+                } else {
+                    Err(ControlError::ControllerNotAvailable)
+                }
+            }
+            "gain" => {
+                let (auto, val) = parse_compound_control(value)?;
+                if self.set_gain(radar_id, auto, val) {
+                    Ok(())
+                } else {
+                    Err(ControlError::ControllerNotAvailable)
+                }
+            }
+            "sea" => {
+                let (auto, val) = parse_compound_control(value)?;
+                if self.set_sea(radar_id, auto, val) {
+                    Ok(())
+                } else {
+                    Err(ControlError::ControllerNotAvailable)
+                }
+            }
+            "rain" => {
+                let (auto, val) = parse_compound_control(value)?;
+                if self.set_rain(radar_id, auto, val) {
+                    Ok(())
+                } else {
+                    Err(ControlError::ControllerNotAvailable)
+                }
+            }
+            _ => {
+                // Extended controls - dispatch by brand
+                self.set_extended_control(radar_id, control_id, value)
+            }
+        }
+    }
+
+    /// Set an extended control (brand-specific)
+    fn set_extended_control(
+        &mut self,
+        radar_id: &str,
+        control_id: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), ControlError> {
+        // Get radar brand
+        let radar = self
+            .find_radar(radar_id)
+            .ok_or(ControlError::RadarNotFound)?;
+        let brand = radar.discovery.brand;
+
+        match brand {
+            Brand::Furuno => self.furuno_set_extended_control(radar_id, control_id, value),
+            Brand::Navico => {
+                debug(&format!(
+                    "Navico extended control {} not yet implemented",
+                    control_id
+                ));
+                Err(ControlError::ControlNotFound(control_id.to_string()))
+            }
+            Brand::Raymarine => {
+                debug(&format!(
+                    "Raymarine extended control {} not yet implemented",
+                    control_id
+                ));
+                Err(ControlError::ControlNotFound(control_id.to_string()))
+            }
+            Brand::Garmin => {
+                debug(&format!(
+                    "Garmin extended control {} not yet implemented",
+                    control_id
+                ));
+                Err(ControlError::ControlNotFound(control_id.to_string()))
+            }
+        }
+    }
+
+    /// Furuno extended control dispatch
+    fn furuno_set_extended_control(
+        &mut self,
+        radar_id: &str,
+        control_id: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), ControlError> {
+        // Send announce packets before control attempt
+        self.locator.send_furuno_announce();
+
+        if let Some(controller) = self.furuno_controllers.get_mut(radar_id) {
+            match control_id {
+                "beamSharpening" => {
+                    let level = value.as_u64().ok_or_else(|| {
+                        ControlError::InvalidValue("beamSharpening must be a number".to_string())
+                    })? as u8;
+                    controller.set_rezboost(level);
+                    Ok(())
+                }
+                "interferenceRejection" => {
+                    let level = value.as_u64().ok_or_else(|| {
+                        ControlError::InvalidValue(
+                            "interferenceRejection must be a number".to_string(),
+                        )
+                    })? as u8;
+                    controller.set_interference_rejection(level);
+                    Ok(())
+                }
+                "scanSpeed" => {
+                    let speed = value.as_u64().ok_or_else(|| {
+                        ControlError::InvalidValue("scanSpeed must be a number".to_string())
+                    })? as u8;
+                    controller.set_scan_speed(speed);
+                    Ok(())
+                }
+                "birdMode" => {
+                    let enabled = value.as_bool().ok_or_else(|| {
+                        ControlError::InvalidValue("birdMode must be a boolean".to_string())
+                    })?;
+                    controller.set_bird_mode(enabled);
+                    Ok(())
+                }
+                "dopplerMode" => {
+                    // Doppler mode is a compound control: {mode, speed}
+                    let mode = value
+                        .get("mode")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("off");
+                    let speed = value.get("speed").and_then(|v| v.as_u64()).unwrap_or(10) as u8;
+                    controller.set_target_analyzer(mode != "off", speed);
+                    Ok(())
+                }
+                "bearingAlignment" => {
+                    let degrees = value.as_f64().ok_or_else(|| {
+                        ControlError::InvalidValue("bearingAlignment must be a number".to_string())
+                    })?;
+                    // Send to radar hardware
+                    controller.set_bearing_alignment(degrees);
+                    // Also persist to local config
+                    let mut install_config = self.config.radars.get(radar_id).cloned().unwrap_or_default();
+                    install_config.bearing_alignment = Some(degrees);
+                    self.set_installation_config(radar_id, install_config);
+                    Ok(())
+                }
+                "noiseReduction" => {
+                    let enabled = value.as_bool().ok_or_else(|| {
+                        ControlError::InvalidValue("noiseReduction must be a boolean".to_string())
+                    })?;
+                    controller.set_noise_reduction(enabled);
+                    Ok(())
+                }
+                "mainBangSuppression" => {
+                    let percent = value.as_u64().ok_or_else(|| {
+                        ControlError::InvalidValue(
+                            "mainBangSuppression must be a number".to_string(),
+                        )
+                    })? as u8;
+                    controller.set_main_bang_suppression(percent);
+                    Ok(())
+                }
+                "txChannel" => {
+                    let channel = value.as_u64().ok_or_else(|| {
+                        ControlError::InvalidValue("txChannel must be a number".to_string())
+                    })? as u8;
+                    controller.set_tx_channel(channel);
+                    Ok(())
+                }
+                "autoAcquire" => {
+                    let enabled = value.as_bool().ok_or_else(|| {
+                        ControlError::InvalidValue("autoAcquire must be a boolean".to_string())
+                    })?;
+                    controller.set_auto_acquire(enabled);
+                    Ok(())
+                }
+                "dopplerSpeed" => {
+                    // dopplerSpeed is the threshold for target analyzer
+                    // It's part of the dopplerMode compound control but can be set separately
+                    let speed = value.as_f64().ok_or_else(|| {
+                        ControlError::InvalidValue("dopplerSpeed must be a number".to_string())
+                    })? as u8;
+                    // Need to enable target analyzer with the new speed
+                    controller.set_target_analyzer(true, speed);
+                    Ok(())
+                }
+                "antennaHeight" => {
+                    // antennaHeight in meters (0-100)
+                    let meters = value.as_i64().ok_or_else(|| {
+                        ControlError::InvalidValue("antennaHeight must be a number (meters)".to_string())
+                    })? as i32;
+                    if !(0..=100).contains(&meters) {
+                        return Err(ControlError::InvalidValue(
+                            "antennaHeight must be 0-100 meters".to_string()
+                        ));
+                    }
+                    // Send to radar first (while we have the mutable borrow)
+                    controller.set_antenna_height(meters);
+                    // Then persist to local config
+                    let mut install_config = self.config.radars.get(radar_id).cloned().unwrap_or_default();
+                    install_config.antenna_height = Some(meters);
+                    self.set_installation_config(radar_id, install_config);
+                    Ok(())
+                }
+                _ => {
+                    debug(&format!(
+                        "Unknown Furuno extended control: {}",
+                        control_id
+                    ));
+                    Err(ControlError::ControlNotFound(control_id.to_string()))
+                }
+            }
+        } else {
+            debug(&format!(
+                "No FurunoController for {} to set {}",
+                radar_id, control_id
+            ));
+            Err(ControlError::ControllerNotAvailable)
+        }
+    }
+}
+
+/// Parse a compound control value (mode + value)
+fn parse_compound_control(value: &serde_json::Value) -> Result<(bool, Option<u8>), ControlError> {
+    // Can be either a simple number or {mode: "auto"|"manual", value: N}
+    if let Some(n) = value.as_u64() {
+        // Simple number = manual mode
+        return Ok((false, Some(n as u8)));
+    }
+
+    if let Some(obj) = value.as_object() {
+        let mode = obj.get("mode").and_then(|v| v.as_str()).unwrap_or("manual");
+        let auto = mode == "auto";
+        let val = obj.get("value").and_then(|v| v.as_u64()).map(|v| v as u8);
+        return Ok((auto, val));
+    }
+
+    Err(ControlError::InvalidValue(
+        "Expected number or {mode, value} object".to_string(),
+    ))
 }
 
 impl Default for RadarProvider {

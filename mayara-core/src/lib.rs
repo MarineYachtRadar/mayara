@@ -24,10 +24,14 @@
 //! ```
 
 pub mod brand;
+pub mod capabilities;
 pub mod error;
+pub mod models;
 pub mod protocol;
 pub mod radar;
+pub mod state;
 
 // Re-export commonly used types
 pub use brand::Brand;
 pub use error::ParseError;
+pub use state::{ControlValueState, PowerState, RadarState};
