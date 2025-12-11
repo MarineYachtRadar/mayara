@@ -1,6 +1,6 @@
 "use strict";
 
-export { RANGE_SCALE, formatRangeValue, is_metric };
+export { RANGE_SCALE, formatRangeValue, is_metric, getHeadingMode, getTrueHeading };
 
 import {
   loadRadar,
@@ -13,9 +13,14 @@ import "./protobuf/protobuf.min.js";
 import { render_webgpu } from "./render_webgpu.js";
 
 var webSocket;
+var headingSocket;
 var RadarMessage;
 var renderer;
 var noTransmitAngles = Array();
+
+// Heading mode: "headingUp" or "northUp"
+var headingMode = "headingUp";
+var trueHeading = 0; // in radians
 
 function divides_near(a, b) {
   let remainder = a % b;
@@ -99,10 +104,116 @@ window.onload = async function () {
 
   loadRadar(id);
 
+  // Subscribe to SignalK heading delta
+  subscribeToHeading();
+
+  // Create heading mode toggle button
+  createHeadingModeToggle();
+
   window.onresize = function () {
     renderer.redrawCanvas();
   };
 };
+
+// Subscribe to navigation.headingTrue via SignalK WebSocket
+function subscribeToHeading() {
+  const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const streamUrl = `${wsProtocol}//${window.location.host}/signalk/v1/stream?subscribe=none`;
+
+  headingSocket = new WebSocket(streamUrl);
+
+  headingSocket.onopen = () => {
+    console.log("Heading WebSocket connected");
+    // Subscribe to headingTrue
+    const subscription = {
+      context: "vessels.self",
+      subscribe: [
+        {
+          path: "navigation.headingTrue",
+          period: 200,
+        },
+      ],
+    };
+    headingSocket.send(JSON.stringify(subscription));
+  };
+
+  headingSocket.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.updates) {
+        for (const update of data.updates) {
+          if (update.values) {
+            for (const value of update.values) {
+              if (value.path === "navigation.headingTrue") {
+                trueHeading = value.value; // Already in radians
+                updateHeadingDisplay();
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Ignore parse errors (e.g., hello message)
+    }
+  };
+
+  headingSocket.onerror = (e) => {
+    console.log("Heading WebSocket error:", e);
+  };
+
+  headingSocket.onclose = () => {
+    console.log("Heading WebSocket closed, reconnecting in 5s...");
+    setTimeout(subscribeToHeading, 5000);
+  };
+}
+
+// Update renderer with current heading based on mode
+function updateHeadingDisplay() {
+  if (renderer) {
+    if (headingMode === "northUp") {
+      // North Up: rotate radar by -heading so north is at top
+      renderer.setHeadingRotation(-trueHeading);
+    } else {
+      // Heading Up: no rotation, heading is always at top
+      renderer.setHeadingRotation(0);
+    }
+  }
+}
+
+// Getters for heading state (used by renderer)
+function getHeadingMode() {
+  return headingMode;
+}
+
+function getTrueHeading() {
+  return trueHeading;
+}
+
+// Create the heading mode toggle button
+function createHeadingModeToggle() {
+  const container = document.querySelector(".myr_ppi");
+  if (!container) return;
+
+  const toggleBtn = document.createElement("div");
+  toggleBtn.id = "myr_heading_toggle";
+  toggleBtn.className = "myr_heading_toggle";
+  toggleBtn.innerHTML = "H Up";
+  toggleBtn.title = "Click to toggle: Heading Up / North Up";
+
+  toggleBtn.addEventListener("click", () => {
+    if (headingMode === "headingUp") {
+      headingMode = "northUp";
+      toggleBtn.innerHTML = "N Up";
+    } else {
+      headingMode = "headingUp";
+      toggleBtn.innerHTML = "H Up";
+    }
+    updateHeadingDisplay();
+    renderer.redrawCanvas();
+  });
+
+  container.appendChild(toggleBtn);
+}
 
 // Check WebGPU and show error if not available
 async function checkWebGPU() {

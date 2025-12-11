@@ -771,3 +771,32 @@ div.myr_ppi {
 .myr_retry_button:hover {
   background: rgb(130, 230, 210);
 }
+
+/* Heading mode toggle button */
+.myr_heading_toggle {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  padding: 8px 12px;
+  background: rgba(0, 50, 0, 0.8);
+  color: #00ff00;
+  border: 2px solid #00ff00;
+  border-radius: 6px;
+  font-family: Verdana, Geneva, sans-serif;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  user-select: none;
+  z-index: 100;
+  transition: all 0.2s ease;
+}
+
+.myr_heading_toggle:hover {
+  background: rgba(0, 100, 0, 0.9);
+  border-color: #00ff80;
+  color: #00ff80;
+}
+
+.myr_heading_toggle:active {
+  transform: scale(0.95);
+}
