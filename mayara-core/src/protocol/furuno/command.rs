@@ -36,6 +36,7 @@ impl CommandMode {
 // =============================================================================
 
 /// Furuno command IDs (hex values used in protocol)
+/// See docs/furuno/protocol.md for complete reference
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CommandId {
@@ -45,10 +46,20 @@ pub enum CommandId {
     Sea = 0x64,
     Rain = 0x65,
     CustomPictureAll = 0x66,
+    /// Multi-purpose signal processing (feature=0: IntReject, feature=3: NoiseReduction)
+    SignalProcessing = 0x67,
     Status = 0x69,
     BlindSector = 0x77,
+    HeadingAlign = 0x81,
+    MainBangSize = 0x83,
     AntennaHeight = 0x84,
+    ScanSpeed = 0x89,
     AliveCheck = 0xE3,
+    TxChannel = 0xEC,
+    BirdMode = 0xED,
+    RezBoost = 0xEE,
+    TargetAnalyzer = 0xEF,
+    AutoAcquire = 0xF0,
 }
 
 impl CommandId {
@@ -253,6 +264,155 @@ pub fn format_request_picture_all() -> String {
     format_command(CommandMode::Request, CommandId::CustomPictureAll, &[])
 }
 
+/// Format blind sector (no-transmit zone) command
+///
+/// # Arguments
+/// * `s2_enable` - true to enable sector 2
+/// * `s1_start` - Sector 1 start angle in degrees (0-359)
+/// * `s1_width` - Sector 1 width in degrees (0 to disable)
+/// * `s2_start` - Sector 2 start angle in degrees (0-359)
+/// * `s2_width` - Sector 2 width in degrees
+///
+/// # Returns
+/// Formatted command: `$S77,{s2_enable},{s1_start},{s1_width},{s2_start},{s2_width}\r\n`
+pub fn format_blind_sector_command(
+    s2_enable: bool,
+    s1_start: i32,
+    s1_width: i32,
+    s2_start: i32,
+    s2_width: i32,
+) -> String {
+    let s2_val = if s2_enable { 1 } else { 0 };
+    format_command(
+        CommandMode::Set,
+        CommandId::BlindSector,
+        &[s2_val, s1_start, s1_width, s2_start, s2_width],
+    )
+}
+
+/// Format scan speed (antenna revolution) command
+///
+/// # Arguments
+/// * `mode` - 0 for 24 RPM, 2 for Auto
+///
+/// # Returns
+/// Formatted command: `$S89,{mode},0\r\n`
+pub fn format_scan_speed_command(mode: i32) -> String {
+    format_command(CommandMode::Set, CommandId::ScanSpeed, &[mode, 0])
+}
+
+/// Format noise reduction command
+///
+/// # Arguments
+/// * `enabled` - true to enable noise reduction
+///
+/// # Returns
+/// Formatted command: `$S67,0,3,{enabled},0\r\n`
+pub fn format_noise_reduction_command(enabled: bool) -> String {
+    let val = if enabled { 1 } else { 0 };
+    // Feature 3 = Noise Reduction
+    format_command(CommandMode::Set, CommandId::SignalProcessing, &[0, 3, val, 0])
+}
+
+/// Format interference rejection command
+///
+/// # Arguments
+/// * `enabled` - true to enable interference rejection
+///
+/// # Returns
+/// Formatted command: `$S67,0,0,{enabled},0\r\n`
+/// Note: enabled maps to 2 (not 1) per protocol spec
+pub fn format_interference_rejection_command(enabled: bool) -> String {
+    let val = if enabled { 2 } else { 0 };
+    // Feature 0 = Interference Rejection
+    format_command(CommandMode::Set, CommandId::SignalProcessing, &[0, 0, val, 0])
+}
+
+/// Format RezBoost command
+///
+/// # Arguments
+/// * `level` - 0=OFF, 1=Low, 2=Medium, 3=High
+/// * `screen` - 0=Primary, 1=Secondary (dual scan)
+///
+/// # Returns
+/// Formatted command: `$SEE,{level},{screen}\r\n`
+pub fn format_rezboost_command(level: i32, screen: i32) -> String {
+    format_command(CommandMode::Set, CommandId::RezBoost, &[level, screen])
+}
+
+/// Format Bird Mode command
+///
+/// # Arguments
+/// * `level` - 0=OFF, 1=Low, 2=Medium, 3=High
+/// * `screen` - 0=Primary, 1=Secondary (dual scan)
+///
+/// # Returns
+/// Formatted command: `$SED,{level},{screen}\r\n`
+pub fn format_bird_mode_command(level: i32, screen: i32) -> String {
+    format_command(CommandMode::Set, CommandId::BirdMode, &[level, screen])
+}
+
+/// Format Target Analyzer command
+///
+/// # Arguments
+/// * `enabled` - true to enable target analyzer
+/// * `mode` - 0=Target, 1=Rain
+/// * `screen` - 0=Primary, 1=Secondary (dual scan)
+///
+/// # Returns
+/// Formatted command: `$SEF,{enabled},{mode},{screen}\r\n`
+pub fn format_target_analyzer_command(enabled: bool, mode: i32, screen: i32) -> String {
+    let val = if enabled { 1 } else { 0 };
+    format_command(CommandMode::Set, CommandId::TargetAnalyzer, &[val, mode, screen])
+}
+
+/// Format TX Channel command
+///
+/// # Arguments
+/// * `channel` - 0=Auto, 1-3=Channel 1-3
+///
+/// # Returns
+/// Formatted command: `$SEC,{channel}\r\n`
+pub fn format_tx_channel_command(channel: i32) -> String {
+    format_command(CommandMode::Set, CommandId::TxChannel, &[channel])
+}
+
+/// Format Auto Acquire (ARPA) command
+///
+/// # Arguments
+/// * `enabled` - true to enable auto acquire by Doppler
+///
+/// # Returns
+/// Formatted command: `$SF0,{enabled}\r\n`
+pub fn format_auto_acquire_command(enabled: bool) -> String {
+    let val = if enabled { 1 } else { 0 };
+    format_command(CommandMode::Set, CommandId::AutoAcquire, &[val])
+}
+
+/// Format main bang suppression command
+///
+/// # Arguments
+/// * `value` - 0-100 percentage (will be mapped to 0-255)
+///
+/// # Returns
+/// Formatted command: `$S83,{value_255},0\r\n`
+pub fn format_main_bang_command(percent: i32) -> String {
+    // Map 0-100% to 0-255
+    let value = (percent * 255) / 100;
+    format_command(CommandMode::Set, CommandId::MainBangSize, &[value, 0])
+}
+
+/// Format heading alignment command
+///
+/// # Arguments
+/// * `degrees_x10` - Heading offset in tenths of degrees (0-3599 for 0.0°-359.9°)
+///
+/// # Returns
+/// Formatted command: `$S81,{degrees_x10},0\r\n`
+pub fn format_heading_align_command(degrees_x10: i32) -> String {
+    format_command(CommandMode::Set, CommandId::HeadingAlign, &[degrees_x10, 0])
+}
+
 // =============================================================================
 // Response Parsing
 // =============================================================================
@@ -403,5 +563,116 @@ mod tests {
     fn test_format_rain_auto() {
         let cmd = format_rain_command(25, true);
         assert_eq!(cmd, "$S65,1,25,0,0,0,0\r\n");
+    }
+
+    #[test]
+    fn test_format_blind_sector() {
+        // Sector 1 only (200°-300° = width 100°)
+        let cmd = format_blind_sector_command(false, 200, 100, 0, 0);
+        assert_eq!(cmd, "$S77,0,200,100,0,0\r\n");
+
+        // Both sectors
+        let cmd = format_blind_sector_command(true, 200, 100, 320, 60);
+        assert_eq!(cmd, "$S77,1,200,100,320,60\r\n");
+
+        // Disable all
+        let cmd = format_blind_sector_command(false, 0, 0, 0, 0);
+        assert_eq!(cmd, "$S77,0,0,0,0,0\r\n");
+    }
+
+    #[test]
+    fn test_format_scan_speed() {
+        let cmd = format_scan_speed_command(0); // 24 RPM
+        assert_eq!(cmd, "$S89,0,0\r\n");
+
+        let cmd = format_scan_speed_command(2); // Auto
+        assert_eq!(cmd, "$S89,2,0\r\n");
+    }
+
+    #[test]
+    fn test_format_noise_reduction() {
+        let cmd = format_noise_reduction_command(true);
+        assert_eq!(cmd, "$S67,0,3,1,0\r\n");
+
+        let cmd = format_noise_reduction_command(false);
+        assert_eq!(cmd, "$S67,0,3,0,0\r\n");
+    }
+
+    #[test]
+    fn test_format_interference_rejection() {
+        let cmd = format_interference_rejection_command(true);
+        assert_eq!(cmd, "$S67,0,0,2,0\r\n"); // Note: enabled=2, not 1
+
+        let cmd = format_interference_rejection_command(false);
+        assert_eq!(cmd, "$S67,0,0,0,0\r\n");
+    }
+
+    #[test]
+    fn test_format_rezboost() {
+        let cmd = format_rezboost_command(0, 0); // OFF, primary
+        assert_eq!(cmd, "$SEE,0,0\r\n");
+
+        let cmd = format_rezboost_command(3, 1); // High, secondary
+        assert_eq!(cmd, "$SEE,3,1\r\n");
+    }
+
+    #[test]
+    fn test_format_bird_mode() {
+        let cmd = format_bird_mode_command(0, 0); // OFF
+        assert_eq!(cmd, "$SED,0,0\r\n");
+
+        let cmd = format_bird_mode_command(2, 0); // Medium
+        assert_eq!(cmd, "$SED,2,0\r\n");
+    }
+
+    #[test]
+    fn test_format_target_analyzer() {
+        let cmd = format_target_analyzer_command(false, 0, 0); // OFF
+        assert_eq!(cmd, "$SEF,0,0,0\r\n");
+
+        let cmd = format_target_analyzer_command(true, 0, 0); // Target mode
+        assert_eq!(cmd, "$SEF,1,0,0\r\n");
+
+        let cmd = format_target_analyzer_command(true, 1, 0); // Rain mode
+        assert_eq!(cmd, "$SEF,1,1,0\r\n");
+    }
+
+    #[test]
+    fn test_format_tx_channel() {
+        let cmd = format_tx_channel_command(0); // Auto
+        assert_eq!(cmd, "$SEC,0\r\n");
+
+        let cmd = format_tx_channel_command(2); // Channel 2
+        assert_eq!(cmd, "$SEC,2\r\n");
+    }
+
+    #[test]
+    fn test_format_auto_acquire() {
+        let cmd = format_auto_acquire_command(true);
+        assert_eq!(cmd, "$SF0,1\r\n");
+
+        let cmd = format_auto_acquire_command(false);
+        assert_eq!(cmd, "$SF0,0\r\n");
+    }
+
+    #[test]
+    fn test_format_main_bang() {
+        let cmd = format_main_bang_command(0); // 0%
+        assert_eq!(cmd, "$S83,0,0\r\n");
+
+        let cmd = format_main_bang_command(50); // 50% = 127
+        assert_eq!(cmd, "$S83,127,0\r\n");
+
+        let cmd = format_main_bang_command(100); // 100% = 255
+        assert_eq!(cmd, "$S83,255,0\r\n");
+    }
+
+    #[test]
+    fn test_format_heading_align() {
+        let cmd = format_heading_align_command(0); // 0.0°
+        assert_eq!(cmd, "$S81,0,0\r\n");
+
+        let cmd = format_heading_align_command(1800); // 180.0°
+        assert_eq!(cmd, "$S81,1800,0\r\n");
     }
 }

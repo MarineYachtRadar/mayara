@@ -14,6 +14,9 @@ use crate::radar::{RadarInfo, SharedRadars};
 use crate::util::{c_string, PrintableSlice};
 use crate::{Brand, Session};
 
+// Re-export CommandMode from mayara-core
+pub(crate) use mayara_core::protocol::furuno::command::CommandMode;
+
 mod command;
 mod data;
 mod report;
@@ -46,42 +49,7 @@ const FURUNO_REQUEST_MODEL_PACKET: [u8; 16] = [
     0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x14, 0x01, 0x00, 0x08, 0x01, 0x00, 0x00, 0x00,
 ];
 
-enum CommandMode {
-    Set,
-    Request,
-    New,
-    X,
-    E,
-    O,
-}
-
-impl CommandMode {
-    fn to_char(&self) -> char {
-        match self {
-            CommandMode::Set => 'S',
-            CommandMode::Request => 'R',
-            CommandMode::New => 'N',
-            CommandMode::X => 'X',
-            CommandMode::E => 'E',
-            CommandMode::O => 'O',
-            // Add more cases as needed
-        }
-    }
-}
-
-impl From<u8> for CommandMode {
-    fn from(item: u8) -> Self {
-        match item {
-            b'S' => CommandMode::Set,
-            b'R' => CommandMode::Request,
-            b'N' => CommandMode::New,
-            b'X' => CommandMode::X,
-            b'E' => CommandMode::E,
-            b'O' => CommandMode::O,
-            _ => CommandMode::New,
-        }
-    }
-}
+// CommandMode is now imported from mayara_core::protocol::furuno::command
 
 #[allow(dead_code)]
 enum RadarModel {

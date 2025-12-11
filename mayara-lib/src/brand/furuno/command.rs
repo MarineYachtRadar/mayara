@@ -9,7 +9,11 @@ use crate::radar::range::Ranges;
 use crate::radar::{RadarError, RadarInfo, Status};
 use crate::settings::{ControlType, ControlValue, SharedControls};
 
-const RADAR_A: i32 = 0;
+// Import mayara-core format functions for consistent command formatting
+use mayara_core::protocol::furuno::command::{
+    format_gain_command, format_keepalive, format_rain_command, format_range_command,
+    format_request_picture_all, format_sea_command, format_status_command,
+};
 
 #[derive(Primitive, PartialEq, Eq, Debug, Clone)]
 pub(crate) enum CommandId {
@@ -93,7 +97,7 @@ impl Command {
         args: &[i32],
         commas: u32,
     ) -> Result<(), RadarError> {
-        let mut message = format!("${}{:X}", cm.to_char(), id as u32);
+        let mut message = format!("${}{:X}", cm.as_char(), id as u32);
         for arg in args {
             let _ = write!(&mut message, ",{}", arg);
         }
@@ -112,6 +116,20 @@ impl Command {
 
         writer.write_all(&bytes).await.map_err(RadarError::Io)?;
 
+        Ok(())
+    }
+
+    /// Send a pre-formatted command string (from mayara-core format functions)
+    pub async fn send_formatted(
+        &self,
+        writer: &mut WriteHalf<TcpStream>,
+        message: &str,
+    ) -> Result<(), RadarError> {
+        log::trace!("{}: sending {}", self.key, message.trim());
+        writer
+            .write_all(message.as_bytes())
+            .await
+            .map_err(RadarError::Io)?;
         Ok(())
     }
 
@@ -154,108 +172,79 @@ impl Command {
             .value
             .parse::<f32>()
             .map_err(|_| RadarError::MissingValue(cv.id))? as i32;
-        let auto: i32 = if cv.auto.unwrap_or(false) { 1 } else { 0 };
-        let _enabled: i32 = if cv.enabled.unwrap_or(false) { 1 } else { 0 };
+        let auto = cv.auto.unwrap_or(false);
 
         log::trace!("set_control: {:?} = {} => {:.1}", cv.id, cv.value, value);
 
-        let mut cmd = Vec::with_capacity(6);
-
-        let id: CommandId = match cv.id {
+        // Use mayara-core format functions for supported control types
+        let formatted_cmd: Option<String> = match cv.id {
             ControlType::Status => {
-                let value = match Status::from_str(&cv.value).unwrap_or(Status::Standby) {
-                    Status::Transmit => 2,
-                    _ => 1,
-                };
-
-                cmd.push(value); // status
-                cmd.push(0);
-                cmd.push(0); // WatchMan on/off
-                cmd.push(60); // Watchman On time?
-                cmd.push(300); // Watchman Off time?
-                cmd.push(0); // Always 0
-
-                CommandId::Status
+                let transmit =
+                    Status::from_str(&cv.value).unwrap_or(Status::Standby) == Status::Transmit;
+                Some(format_status_command(transmit))
             }
-
+            ControlType::Gain => Some(format_gain_command(value, auto)),
+            ControlType::Sea => Some(format_sea_command(value, auto)),
+            ControlType::Rain => Some(format_rain_command(value, auto)),
             ControlType::Range => {
-                let ranges = &self.ranges;
-                cmd.push(if value < ranges.len() as i32 {
+                // Range needs special handling - convert from value to range index
+                let range_index = if value < self.ranges.len() as i32 {
                     value
                 } else {
                     let mut i = 0;
-                    for r in ranges.all.iter() {
+                    for r in self.ranges.all.iter() {
                         if r.distance() >= value {
                             break;
                         }
                         i += 1;
                     }
                     i
-                });
-                cmd.push(0);
-                cmd.push(0);
-                CommandId::Range
+                };
+                Some(format_range_command(range_index))
             }
-
-            ControlType::Gain => {
-                cmd.push(0);
-                cmd.push(value);
-                cmd.push(auto);
-                cmd.push(value);
-                cmd.push(0);
-                CommandId::Gain
-            }
-            ControlType::Sea => {
-                cmd.push(value);
-                CommandId::Sea
-            }
-            ControlType::Rain => {
-                cmd.push(RADAR_A);
-                cmd.push(value);
-                CommandId::Rain
-            }
-
-            ControlType::NoTransmitStart1 => {
-                cmd = self.fill_blind_sector(Some(value), None, None, None);
-
-                CommandId::BlindSector
-            }
-            ControlType::NoTransmitEnd1 => {
-                cmd = self.fill_blind_sector(None, Some(value), None, None);
-
-                CommandId::BlindSector
-            }
-            ControlType::NoTransmitStart2 => {
-                cmd = self.fill_blind_sector(None, None, Some(value), None);
-
-                CommandId::BlindSector
-            }
-            ControlType::NoTransmitEnd2 => {
-                cmd = self.fill_blind_sector(None, None, None, Some(value));
-
-                CommandId::BlindSector
-            }
-            ControlType::ScanSpeed => CommandId::AntennaRevolution,
-            ControlType::AntennaHeight => CommandId::AntennaHeight,
-
-            // Non-hardware settings
-            _ => return Err(RadarError::CannotSetControlType(cv.id)),
+            _ => None, // Fall back to old method for other controls
         };
 
-        log::info!(
-            "{}: Send command {:02X},{:?}",
-            self.key,
-            id.clone() as u32,
-            cmd
-        );
-        self.send(write, CommandMode::Set, id, &cmd).await?;
-        self.send(
-            write,
-            CommandMode::Request,
-            CommandId::CustomPictureAll,
-            &[],
-        )
-        .await?; // $R66
+        if let Some(cmd) = formatted_cmd {
+            log::info!("{}: Send command {}", self.key, cmd.trim());
+            self.send_formatted(write, &cmd).await?;
+        } else {
+            // Handle controls not yet in mayara-core using legacy method
+            let mut cmd = Vec::with_capacity(6);
+            let id: CommandId = match cv.id {
+                ControlType::NoTransmitStart1 => {
+                    cmd = self.fill_blind_sector(Some(value), None, None, None);
+                    CommandId::BlindSector
+                }
+                ControlType::NoTransmitEnd1 => {
+                    cmd = self.fill_blind_sector(None, Some(value), None, None);
+                    CommandId::BlindSector
+                }
+                ControlType::NoTransmitStart2 => {
+                    cmd = self.fill_blind_sector(None, None, Some(value), None);
+                    CommandId::BlindSector
+                }
+                ControlType::NoTransmitEnd2 => {
+                    cmd = self.fill_blind_sector(None, None, None, Some(value));
+                    CommandId::BlindSector
+                }
+                ControlType::ScanSpeed => CommandId::AntennaRevolution,
+                ControlType::AntennaHeight => CommandId::AntennaHeight,
+                _ => return Err(RadarError::CannotSetControlType(cv.id)),
+            };
+
+            log::info!(
+                "{}: Send command {:02X},{:?}",
+                self.key,
+                id.clone() as u32,
+                cmd
+            );
+            self.send(write, CommandMode::Set, id, &cmd).await?;
+        }
+
+        // Request updated picture settings
+        self.send_formatted(write, &format_request_picture_all())
+            .await?;
         Ok(())
     }
 
@@ -343,8 +332,8 @@ impl Command {
     ) -> Result<(), RadarError> {
         log::debug!("{}: send_report_requests", self.key);
 
-        self.send(writer, CommandMode::Request, CommandId::AliveCheck, &[])
-            .await?;
+        // Use mayara-core format_keepalive for consistent keepalive format
+        self.send_formatted(writer, &format_keepalive()).await?;
         Ok(())
     }
 }
