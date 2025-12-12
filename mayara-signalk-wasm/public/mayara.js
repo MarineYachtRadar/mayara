@@ -341,10 +341,21 @@ const RadarEntry = (radar) => {
   );
 };
 
+// Track previous radar count to avoid unnecessary DOM rebuilds
+let previousRadarCount = -1;
+
 function radarsLoaded(d) {
   let radarIds = Object.keys(d);
   let c = radarIds.length;
   let r = document.getElementById("radars");
+
+  // Only rebuild if radar count changed (avoids collapsing the help details)
+  if (c === previousRadarCount && c === 0) {
+    // No change, just reschedule poll
+    setTimeout(loadRadars, 2000);
+    return;
+  }
+  previousRadarCount = c;
 
   // Clear previous content
   r.innerHTML = "";

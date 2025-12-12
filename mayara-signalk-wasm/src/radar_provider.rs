@@ -17,7 +17,7 @@ use crate::signalk_ffi::{debug, emit_json, read_config, save_config};
 use crate::spoke_receiver::{SpokeReceiver, FURUNO_OUTPUT_SPOKES};
 
 /// Custom deserializer for antenna height that accepts both float and int
-/// Old configs stored float values (e.g., 23.0), new configs use integers (0, 1, 2)
+/// Handles migration from old category values (0, 1, 2) to meters (0-100)
 fn deserialize_antenna_height<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
 where
     D: Deserializer<'de>,
@@ -32,24 +32,17 @@ where
         Some(serde_json::Value::Number(n)) => {
             // Accept both integer and float, convert to i32
             if let Some(i) = n.as_i64() {
-                // Validate range 0-2
-                if (0..=2).contains(&i) {
-                    Ok(Some(i as i32))
-                } else {
-                    // Old float value out of range, default to category 0
-                    Ok(Some(0))
-                }
-            } else if let Some(f) = n.as_f64() {
-                // Old float config - convert to category based on value
-                // Old values were arbitrary heights, map to categories
-                let category = if f < 3.0 {
-                    0  // Under 3m
-                } else if f <= 10.0 {
-                    1  // 3-10m
-                } else {
-                    2  // Over 10m
+                // Migrate old category values (0, 1, 2) to meters
+                let meters = match i {
+                    0 => 2,   // Old "Under 3m" -> 2m
+                    1 => 5,   // Old "3-10m" -> 5m
+                    2 => 15,  // Old "Over 10m" -> 15m
+                    _ => i.clamp(0, 100) as i32,  // Already meters, clamp to range
                 };
-                Ok(Some(category))
+                Ok(Some(meters))
+            } else if let Some(f) = n.as_f64() {
+                // Float value - treat as meters directly
+                Ok(Some((f as i32).clamp(0, 100)))
             } else {
                 Err(D::Error::custom("invalid antenna height value"))
             }
@@ -67,7 +60,7 @@ pub struct RadarInstallationConfig {
     /// Bearing alignment offset in degrees (-180 to 180)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bearing_alignment: Option<f64>,
-    /// Antenna height category (0=<3m, 1=3-10m, 2=>10m)
+    /// Antenna height in meters (0-100)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default, deserialize_with = "deserialize_antenna_height")]
     pub antenna_height: Option<i32>,
@@ -741,6 +734,57 @@ impl RadarProvider {
                 serde_json::json!({"mode": live_state.rain.mode, "value": live_state.rain.value}),
             );
 
+            // Signal processing controls from live state
+            controls.insert(
+                "noiseReduction".to_string(),
+                serde_json::json!(live_state.noise_reduction),
+            );
+            controls.insert(
+                "interferenceRejection".to_string(),
+                serde_json::json!(live_state.interference_rejection),
+            );
+
+            // Extended controls from live state
+            controls.insert(
+                "beamSharpening".to_string(),
+                serde_json::json!(live_state.beam_sharpening),
+            );
+            controls.insert(
+                "birdMode".to_string(),
+                serde_json::json!(live_state.bird_mode),
+            );
+            controls.insert(
+                "dopplerMode".to_string(),
+                serde_json::json!({
+                    "enabled": live_state.doppler_mode.enabled,
+                    "mode": live_state.doppler_mode.mode
+                }),
+            );
+            controls.insert(
+                "scanSpeed".to_string(),
+                serde_json::json!(live_state.scan_speed),
+            );
+            controls.insert(
+                "mainBangSuppression".to_string(),
+                serde_json::json!(live_state.main_bang_suppression),
+            );
+            controls.insert(
+                "txChannel".to_string(),
+                serde_json::json!(live_state.tx_channel),
+            );
+            controls.insert(
+                "noTransmitZones".to_string(),
+                serde_json::json!({
+                    "zones": live_state.no_transmit_zones.zones.iter().map(|z| {
+                        serde_json::json!({
+                            "enabled": z.enabled,
+                            "start": z.start,
+                            "end": z.end
+                        })
+                    }).collect::<Vec<_>>()
+                }),
+            );
+
             // Firmware version and operating hours
             if let Some(firmware) = controller.firmware_version() {
                 controls.insert("firmwareVersion".to_string(), serde_json::json!(firmware));
@@ -764,6 +808,8 @@ impl RadarProvider {
                 "rain".to_string(),
                 serde_json::json!({"mode": "manual", "value": 0}),
             );
+            controls.insert("noiseReduction".to_string(), serde_json::json!(false));
+            controls.insert("interferenceRejection".to_string(), serde_json::json!(false));
         }
 
         // Serial number from discovery (UDP model report)
@@ -857,6 +903,21 @@ impl RadarProvider {
             "operatingHours" => controller
                 .and_then(|c| c.operating_hours())
                 .map(|h| serde_json::json!(h)),
+            // Signal processing controls (from radar state)
+            "noiseReduction" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!(state.noise_reduction))
+                } else {
+                    Some(serde_json::json!(false))
+                }
+            }
+            "interferenceRejection" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!(state.interference_rejection))
+                } else {
+                    Some(serde_json::json!(false))
+                }
+            }
             // Installation config values (stored locally)
             "bearingAlignment" => self.config.radars.get(radar_id)
                 .and_then(|c| c.bearing_alignment)
@@ -864,6 +925,70 @@ impl RadarProvider {
             "antennaHeight" => self.config.radars.get(radar_id)
                 .and_then(|c| c.antenna_height)
                 .map(|v| serde_json::json!(v)),
+            // Extended controls from live state
+            "beamSharpening" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!(state.beam_sharpening))
+                } else {
+                    Some(serde_json::json!(0))
+                }
+            }
+            "birdMode" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!(state.bird_mode))
+                } else {
+                    Some(serde_json::json!(0))
+                }
+            }
+            "dopplerMode" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!({
+                        "enabled": state.doppler_mode.enabled,
+                        "mode": state.doppler_mode.mode
+                    }))
+                } else {
+                    Some(serde_json::json!({"enabled": false, "mode": "target"}))
+                }
+            }
+            "scanSpeed" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!(state.scan_speed))
+                } else {
+                    Some(serde_json::json!(0))
+                }
+            }
+            "mainBangSuppression" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!(state.main_bang_suppression))
+                } else {
+                    Some(serde_json::json!(0))
+                }
+            }
+            "txChannel" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!(state.tx_channel))
+                } else {
+                    Some(serde_json::json!(0))
+                }
+            }
+            "noTransmitZones" => {
+                if let Some(state) = live_state {
+                    Some(serde_json::json!({
+                        "zones": state.no_transmit_zones.zones.iter().map(|z| {
+                            serde_json::json!({
+                                "enabled": z.enabled,
+                                "start": z.start,
+                                "end": z.end
+                            })
+                        }).collect::<Vec<_>>()
+                    }))
+                } else {
+                    Some(serde_json::json!({"zones": [
+                        {"enabled": false, "start": 0, "end": 0},
+                        {"enabled": false, "start": 0, "end": 0}
+                    ]}))
+                }
+            }
             _ => {
                 debug(&format!("Unknown control: {}", control_id));
                 None
@@ -1000,11 +1125,17 @@ impl RadarProvider {
                     Ok(())
                 }
                 "interferenceRejection" => {
-                    let level = value.as_u64().ok_or_else(|| {
-                        ControlError::InvalidValue(
-                            "interferenceRejection must be a number".to_string(),
-                        )
-                    })? as u8;
+                    // Furuno IR is boolean in schema, convert to protocol value (0=off, 2=on)
+                    let level: u8 = if let Some(b) = value.as_bool() {
+                        if b { 2 } else { 0 }
+                    } else if let Some(n) = value.as_u64() {
+                        // Also accept numeric for backwards compatibility
+                        n as u8
+                    } else {
+                        return Err(ControlError::InvalidValue(
+                            "interferenceRejection must be a boolean".to_string(),
+                        ));
+                    };
                     controller.set_interference_rejection(level);
                     Ok(())
                 }
@@ -1016,20 +1147,25 @@ impl RadarProvider {
                     Ok(())
                 }
                 "birdMode" => {
-                    let enabled = value.as_bool().ok_or_else(|| {
-                        ControlError::InvalidValue("birdMode must be a boolean".to_string())
-                    })?;
-                    controller.set_bird_mode(enabled);
+                    let level = value.as_u64().ok_or_else(|| {
+                        ControlError::InvalidValue("birdMode must be a number (0-3)".to_string())
+                    })? as u8;
+                    controller.set_bird_mode(level);
                     Ok(())
                 }
                 "dopplerMode" => {
-                    // Doppler mode is a compound control: {mode, speed}
-                    let mode = value
+                    // Doppler mode is a compound control: {enabled: bool, mode: "target"|"rain"}
+                    let enabled = value
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let mode_str = value
                         .get("mode")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("off");
-                    let speed = value.get("speed").and_then(|v| v.as_u64()).unwrap_or(10) as u8;
-                    controller.set_target_analyzer(mode != "off", speed);
+                        .unwrap_or("target");
+                    // Convert mode string to numeric: 0=target, 1=rain
+                    let mode: u8 = if mode_str == "rain" { 1 } else { 0 };
+                    controller.set_target_analyzer(enabled, mode);
                     Ok(())
                 }
                 "bearingAlignment" => {
@@ -1100,6 +1236,45 @@ impl RadarProvider {
                     let mut install_config = self.config.radars.get(radar_id).cloned().unwrap_or_default();
                     install_config.antenna_height = Some(meters);
                     self.set_installation_config(radar_id, install_config);
+                    Ok(())
+                }
+                "noTransmitZones" => {
+                    // noTransmitZones: { zones: [{ enabled, start, end }, { enabled, start, end }] }
+                    let zones = value
+                        .get("zones")
+                        .and_then(|z| z.as_array())
+                        .ok_or_else(|| {
+                            ControlError::InvalidValue(
+                                "noTransmitZones must have a 'zones' array".to_string(),
+                            )
+                        })?;
+
+                    // Parse zone 1
+                    let (z1_enabled, z1_start, z1_end) = if let Some(z1) = zones.first() {
+                        (
+                            z1.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                            z1.get("start").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                            z1.get("end").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                        )
+                    } else {
+                        (false, 0, 0)
+                    };
+
+                    // Parse zone 2
+                    let (z2_enabled, z2_start, z2_end) = if let Some(z2) = zones.get(1) {
+                        (
+                            z2.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                            z2.get("start").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                            z2.get("end").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                        )
+                    } else {
+                        (false, 0, 0)
+                    };
+
+                    controller.set_blind_sector(
+                        z1_enabled, z1_start, z1_end,
+                        z2_enabled, z2_start, z2_end,
+                    );
                     Ok(())
                 }
                 _ => {

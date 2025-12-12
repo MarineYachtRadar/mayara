@@ -107,6 +107,14 @@ fn build_controls(model: &ModelInfo, has_serial_number: bool) -> Vec<ControlDefi
             {
                 controls.push(def);
             }
+        } else if *control_id == "interferenceRejection"
+            && model.brand == crate::Brand::Furuno
+        {
+            // Furuno has simple on/off interference rejection
+            controls.push(control_interference_rejection_furuno());
+        } else if *control_id == "scanSpeed" && model.brand == crate::Brand::Furuno {
+            // Furuno uses 0=24RPM, 2=Auto
+            controls.push(control_scan_speed_furuno());
         } else if let Some(def) = get_extended_control(control_id) {
             controls.push(def);
         }

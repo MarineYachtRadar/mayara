@@ -643,6 +643,315 @@ pub fn format_request_range() -> String {
     format_command(CommandMode::Request, CommandId::Range, &[])
 }
 
+/// Format request for signal processing settings (0x67)
+///
+/// This returns multiple $N67 responses, one per feature:
+/// - Feature 0: Interference Rejection
+/// - Feature 3: Noise Reduction
+///
+/// # Returns
+/// Formatted command: `$R67\r\n`
+pub fn format_request_signal_processing() -> String {
+    format_command(CommandMode::Request, CommandId::SignalProcessing, &[])
+}
+
+/// Format request for noise reduction state (feature 3)
+///
+/// # Returns
+/// Formatted command: `$R67,0,3\r\n`
+pub fn format_request_noise_reduction() -> String {
+    format_command(CommandMode::Request, CommandId::SignalProcessing, &[0, 3])
+}
+
+/// Format request for interference rejection state (feature 0)
+///
+/// # Returns
+/// Formatted command: `$R67,0,0\r\n`
+pub fn format_request_interference_rejection() -> String {
+    format_command(CommandMode::Request, CommandId::SignalProcessing, &[0, 0])
+}
+
+/// Signal processing settings parsed from $N67 responses
+#[derive(Debug, Clone, Default)]
+pub struct SignalProcessingState {
+    /// Interference rejection enabled (feature 0, value 2=ON)
+    pub interference_rejection: bool,
+    /// Noise reduction enabled (feature 3, value 1=ON)
+    pub noise_reduction: bool,
+}
+
+/// Parse signal processing response
+///
+/// Response format varies:
+/// - From SET echo: `$N67,0,{feature},{value},{screen}` (5 args)
+/// - From REQUEST: `$N67,{feature},{value},{screen}` (4 args) - TBD, need to verify
+///
+/// - feature 0: Interference Rejection (0=OFF, 2=ON)
+/// - feature 3: Noise Reduction (0=OFF, 1=ON)
+///
+/// # Returns
+/// Tuple of (feature, value) if this is a $N67 response
+pub fn parse_signal_processing_response(line: &str) -> Option<(i32, i32)> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::SignalProcessing.as_hex() {
+        return None;
+    }
+    // Try both formats:
+    // Format 1 (SET echo): $N67,0,{feature},{value},{screen} - args[1]=feature, args[2]=value
+    // Format 2 (REQUEST): $N67,{feature},{value},{screen} - args[0]=feature, args[1]=value
+    if args.len() >= 3 && args[0] == 0 {
+        // Format 1: leading 0, then feature, value
+        Some((args[1], args[2]))
+    } else if args.len() >= 2 {
+        // Format 2: feature, value directly (maybe from REQUEST response)
+        Some((args[0], args[1]))
+    } else {
+        None
+    }
+}
+
+/// Format request for RezBoost (beam sharpening) settings
+///
+/// # Returns
+/// Formatted command: `$REE\r\n`
+///
+/// Response format: `$NEE,{level},{screen}` where level is 0=OFF, 1=Low, 2=Med, 3=High
+pub fn format_request_rezboost() -> String {
+    format_command(CommandMode::Request, CommandId::RezBoost, &[])
+}
+
+/// Parse RezBoost response
+///
+/// Response: `$NEE,{level},{screen}`
+/// - level: 0=OFF, 1=Low, 2=Medium, 3=High
+/// - screen: 0=Primary, 1=Secondary
+///
+/// # Returns
+/// level value (0-3)
+pub fn parse_rezboost_response(line: &str) -> Option<i32> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::RezBoost.as_hex() {
+        return None;
+    }
+    args.first().copied()
+}
+
+/// Format request for Bird Mode settings
+///
+/// # Returns
+/// Formatted command: `$RED\r\n`
+///
+/// Response format: `$NED,{level},{screen}` where level is 0=OFF, 1=Low, 2=Med, 3=High
+pub fn format_request_bird_mode() -> String {
+    format_command(CommandMode::Request, CommandId::BirdMode, &[])
+}
+
+/// Parse Bird Mode response
+///
+/// Response: `$NED,{level},{screen}`
+/// - level: 0=OFF, 1=Low, 2=Medium, 3=High
+///
+/// # Returns
+/// level value (0-3)
+pub fn parse_bird_mode_response(line: &str) -> Option<i32> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::BirdMode.as_hex() {
+        return None;
+    }
+    args.first().copied()
+}
+
+/// Format request for Target Analyzer (Doppler) settings
+///
+/// # Returns
+/// Formatted command: `$REF\r\n`
+///
+/// Response format: `$NEF,{enabled},{mode},{screen}`
+pub fn format_request_target_analyzer() -> String {
+    format_command(CommandMode::Request, CommandId::TargetAnalyzer, &[])
+}
+
+/// Target Analyzer state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetAnalyzerState {
+    /// Whether Target Analyzer is enabled
+    pub enabled: bool,
+    /// Mode: 0=Target, 1=Rain
+    pub mode: i32,
+}
+
+/// Parse Target Analyzer response
+///
+/// Response: `$NEF,{enabled},{mode},{screen}`
+/// - enabled: 0=OFF, 1=ON
+/// - mode: 0=Target, 1=Rain
+///
+/// # Returns
+/// TargetAnalyzerState with enabled and mode
+pub fn parse_target_analyzer_response(line: &str) -> Option<TargetAnalyzerState> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::TargetAnalyzer.as_hex() {
+        return None;
+    }
+    if args.len() >= 2 {
+        Some(TargetAnalyzerState {
+            enabled: args[0] == 1,
+            mode: args[1],
+        })
+    } else {
+        None
+    }
+}
+
+/// Format request for Scan Speed settings
+///
+/// # Returns
+/// Formatted command: `$R89\r\n`
+///
+/// Response format: `$N89,{mode},{screen}` where mode is 0=24RPM, 2=Auto
+pub fn format_request_scan_speed() -> String {
+    format_command(CommandMode::Request, CommandId::ScanSpeed, &[])
+}
+
+/// Parse Scan Speed response
+///
+/// Response: `$N89,{mode},{screen}`
+/// - mode: 0=24RPM, 2=Auto
+///
+/// # Returns
+/// mode value (0 or 2)
+pub fn parse_scan_speed_response(line: &str) -> Option<i32> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::ScanSpeed.as_hex() {
+        return None;
+    }
+    args.first().copied()
+}
+
+/// Format request for Main Bang Suppression settings
+///
+/// # Returns
+/// Formatted command: `$R83\r\n`
+///
+/// Response format: `$N83,{value},{screen}` where value is 0-255
+pub fn format_request_main_bang() -> String {
+    format_command(CommandMode::Request, CommandId::MainBangSize, &[])
+}
+
+/// Parse Main Bang Suppression response
+///
+/// Response: `$N83,{value},{screen}`
+/// - value: 0-255 (raw value, needs conversion to 0-100%)
+///
+/// # Returns
+/// Percentage value (0-100)
+pub fn parse_main_bang_response(line: &str) -> Option<i32> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::MainBangSize.as_hex() {
+        return None;
+    }
+    // Convert 0-255 to 0-100%
+    args.first().map(|&val| (val * 100) / 255)
+}
+
+/// Format request for TX Channel settings
+///
+/// # Returns
+/// Formatted command: `$REC\r\n`
+///
+/// Response format: `$NEC,{channel}` where channel is 0=Auto, 1-3=Channel 1-3
+pub fn format_request_tx_channel() -> String {
+    format_command(CommandMode::Request, CommandId::TxChannel, &[])
+}
+
+/// Parse TX Channel response
+///
+/// Response: `$NEC,{channel}`
+/// - channel: 0=Auto, 1-3=Channel 1-3
+///
+/// # Returns
+/// channel value (0-3)
+pub fn parse_tx_channel_response(line: &str) -> Option<i32> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::TxChannel.as_hex() {
+        return None;
+    }
+    args.first().copied()
+}
+
+/// Format request for Blind Sector (no-transmit zones) settings
+///
+/// # Returns
+/// Formatted command: `$R77\r\n`
+///
+/// Response format: `$N77,{s2_enable},{s1_start},{s1_width},{s2_start},{s2_width}`
+pub fn format_request_blind_sector() -> String {
+    format_command(CommandMode::Request, CommandId::BlindSector, &[])
+}
+
+/// Blind sector (no-transmit zones) state
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BlindSectorState {
+    /// Sector 1 start angle in degrees (0-359)
+    pub sector1_start: i32,
+    /// Sector 1 width in degrees (0 = disabled)
+    pub sector1_width: i32,
+    /// Sector 2 start angle in degrees (0-359)
+    pub sector2_start: i32,
+    /// Sector 2 width in degrees (0 = disabled)
+    pub sector2_width: i32,
+}
+
+impl BlindSectorState {
+    /// Check if sector 1 is enabled (width > 0)
+    pub fn sector1_enabled(&self) -> bool {
+        self.sector1_width > 0
+    }
+
+    /// Check if sector 2 is enabled (width > 0)
+    pub fn sector2_enabled(&self) -> bool {
+        self.sector2_width > 0
+    }
+
+    /// Calculate end angle from start + width
+    pub fn sector1_end(&self) -> i32 {
+        (self.sector1_start + self.sector1_width) % 360
+    }
+
+    /// Calculate end angle from start + width
+    pub fn sector2_end(&self) -> i32 {
+        (self.sector2_start + self.sector2_width) % 360
+    }
+}
+
+/// Parse Blind Sector response
+///
+/// Response: `$N77,{s2_enable},{s1_start},{s1_width},{s2_start},{s2_width}`
+/// - s2_enable: 0=sector 2 off, 1=sector 2 on
+/// - s1_start: Sector 1 start angle (0-359)
+/// - s1_width: Sector 1 width (0 = disabled)
+/// - s2_start: Sector 2 start angle (0-359)
+/// - s2_width: Sector 2 width
+///
+/// # Returns
+/// BlindSectorState with all zone parameters
+pub fn parse_blind_sector_response(line: &str) -> Option<BlindSectorState> {
+    let (mode, cmd_id, args) = parse_response(line)?;
+    if mode != CommandMode::New || cmd_id != CommandId::BlindSector.as_hex() {
+        return None;
+    }
+    if args.len() >= 5 {
+        Some(BlindSectorState {
+            sector1_start: args[1],
+            sector1_width: args[2],
+            sector2_start: args[3],
+            sector2_width: args[4],
+        })
+    } else {
+        None
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -920,5 +1229,114 @@ mod tests {
         assert_eq!(format_request_sea(), "$R64\r\n");
         assert_eq!(format_request_rain(), "$R65\r\n");
         assert_eq!(format_request_range(), "$R62\r\n");
+    }
+
+    #[test]
+    fn test_parse_signal_processing_response() {
+        // Format 1 (SET echo): $N67,0,{feature},{value},{screen}
+        // Noise reduction ON: $N67,0,3,1,0
+        let result = parse_signal_processing_response("$N67,0,3,1,0");
+        assert_eq!(result, Some((3, 1))); // feature=3, value=1
+
+        // Noise reduction OFF: $N67,0,3,0,0
+        let result = parse_signal_processing_response("$N67,0,3,0,0");
+        assert_eq!(result, Some((3, 0))); // feature=3, value=0
+
+        // Interference rejection ON: $N67,0,0,2,0
+        let result = parse_signal_processing_response("$N67,0,0,2,0");
+        assert_eq!(result, Some((0, 2))); // feature=0, value=2
+
+        // Interference rejection OFF: $N67,0,0,0,0
+        let result = parse_signal_processing_response("$N67,0,0,0,0");
+        assert_eq!(result, Some((0, 0))); // feature=0, value=0
+
+        // Format 2 (REQUEST response): $N67,{feature},{value},{screen}
+        // Noise reduction ON: $N67,3,1,0
+        let result = parse_signal_processing_response("$N67,3,1,0");
+        assert_eq!(result, Some((3, 1))); // feature=3, value=1
+
+        // Noise reduction OFF: $N67,3,0,0
+        let result = parse_signal_processing_response("$N67,3,0,0");
+        assert_eq!(result, Some((3, 0))); // feature=3, value=0
+
+        // Interference rejection ON: $N67,0,2,0 (note: feature 0 looks like format 1!)
+        // This is ambiguous - if first arg is 0, we assume format 1
+        // So $N67,0,2,0 would be parsed as feature=2, value=0 (wrong!)
+        // This is a known limitation - format 2 with feature=0 is ambiguous
+
+        // Wrong command
+        assert!(parse_signal_processing_response("$N66,0,3,1,0").is_none());
+    }
+
+    #[test]
+    fn test_format_request_extended_commands() {
+        assert_eq!(format_request_rezboost(), "$REE\r\n");
+        assert_eq!(format_request_bird_mode(), "$RED\r\n");
+        assert_eq!(format_request_target_analyzer(), "$REF\r\n");
+        assert_eq!(format_request_scan_speed(), "$R89\r\n");
+        assert_eq!(format_request_main_bang(), "$R83\r\n");
+        assert_eq!(format_request_tx_channel(), "$REC\r\n");
+    }
+
+    #[test]
+    fn test_parse_rezboost_response() {
+        // OFF
+        assert_eq!(parse_rezboost_response("$NEE,0,0"), Some(0));
+        // High
+        assert_eq!(parse_rezboost_response("$NEE,3,0"), Some(3));
+        // Wrong command
+        assert!(parse_rezboost_response("$NED,0,0").is_none());
+    }
+
+    #[test]
+    fn test_parse_bird_mode_response() {
+        // OFF
+        assert_eq!(parse_bird_mode_response("$NED,0,0"), Some(0));
+        // Medium
+        assert_eq!(parse_bird_mode_response("$NED,2,0"), Some(2));
+    }
+
+    #[test]
+    fn test_parse_target_analyzer_response() {
+        // OFF
+        let result = parse_target_analyzer_response("$NEF,0,0,0").unwrap();
+        assert!(!result.enabled);
+        assert_eq!(result.mode, 0);
+
+        // ON, Target mode
+        let result = parse_target_analyzer_response("$NEF,1,0,0").unwrap();
+        assert!(result.enabled);
+        assert_eq!(result.mode, 0);
+
+        // ON, Rain mode
+        let result = parse_target_analyzer_response("$NEF,1,1,0").unwrap();
+        assert!(result.enabled);
+        assert_eq!(result.mode, 1);
+    }
+
+    #[test]
+    fn test_parse_scan_speed_response() {
+        // 24 RPM
+        assert_eq!(parse_scan_speed_response("$N89,0,0"), Some(0));
+        // Auto
+        assert_eq!(parse_scan_speed_response("$N89,2,0"), Some(2));
+    }
+
+    #[test]
+    fn test_parse_main_bang_response() {
+        // 0%
+        assert_eq!(parse_main_bang_response("$N83,0,0"), Some(0));
+        // ~50%
+        assert_eq!(parse_main_bang_response("$N83,127,0"), Some(49)); // 127*100/255 = 49
+        // 100%
+        assert_eq!(parse_main_bang_response("$N83,255,0"), Some(100));
+    }
+
+    #[test]
+    fn test_parse_tx_channel_response() {
+        // Auto
+        assert_eq!(parse_tx_channel_response("$NEC,0"), Some(0));
+        // Channel 2
+        assert_eq!(parse_tx_channel_response("$NEC,2"), Some(2));
     }
 }

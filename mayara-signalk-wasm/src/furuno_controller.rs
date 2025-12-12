@@ -6,15 +6,19 @@
 use crate::signalk_ffi::{debug, TcpSocket};
 use mayara_core::protocol::furuno::command::{
     format_antenna_height_command, format_auto_acquire_command, format_bird_mode_command,
-    format_gain_command, format_heading_align_command, format_interference_rejection_command,
-    format_keepalive, format_main_bang_command, format_noise_reduction_command,
-    format_rain_command, format_range_command, format_request_modules, format_request_ontime,
-    format_rezboost_command, format_scan_speed_command, format_sea_command,
-    format_status_command, format_target_analyzer_command, format_tx_channel_command,
-    meters_to_range_index, parse_login_response, LOGIN_MESSAGE,
+    format_blind_sector_command, format_gain_command, format_heading_align_command,
+    format_interference_rejection_command, format_keepalive, format_main_bang_command,
+    format_noise_reduction_command, format_rain_command, format_range_command,
+    format_request_modules, format_request_ontime, format_rezboost_command,
+    format_scan_speed_command, format_sea_command, format_status_command,
+    format_target_analyzer_command, format_tx_channel_command, meters_to_range_index,
+    parse_login_response, parse_signal_processing_response, LOGIN_MESSAGE,
     // State request functions
-    format_request_gain, format_request_rain, format_request_range,
-    format_request_sea, format_request_status,
+    format_request_bird_mode, format_request_blind_sector, format_request_gain,
+    format_request_interference_rejection, format_request_main_bang,
+    format_request_noise_reduction, format_request_rain, format_request_range,
+    format_request_rezboost, format_request_scan_speed, format_request_sea,
+    format_request_status, format_request_target_analyzer, format_request_tx_channel,
 };
 use mayara_core::protocol::furuno::{BASE_PORT, BEACON_PORT};
 use mayara_core::state::RadarState;
@@ -307,14 +311,13 @@ impl FurunoController {
     /// Set bird mode
     ///
     /// # Arguments
-    /// * `enabled` - true to enable bird mode
-    pub fn set_bird_mode(&mut self, enabled: bool) {
-        let level = if enabled { 1 } else { 0 };
-        let cmd = format_bird_mode_command(level, 0);
+    /// * `level` - 0=OFF, 1=Low, 2=Medium, 3=High
+    pub fn set_bird_mode(&mut self, level: u8) {
+        let cmd = format_bird_mode_command(level as i32, 0);
         let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
         debug(&format!(
-            "[{}] Queueing bird mode command: {} (enabled={})",
-            self.radar_id, cmd, enabled
+            "[{}] Queueing bird mode command: {} (level={})",
+            self.radar_id, cmd, level
         ));
         self.queue_command(cmd);
     }
@@ -323,13 +326,13 @@ impl FurunoController {
     ///
     /// # Arguments
     /// * `enabled` - true to enable target analyzer
-    /// * `speed` - speed threshold in knots (typically 5-20)
-    pub fn set_target_analyzer(&mut self, enabled: bool, speed: u8) {
-        let cmd = format_target_analyzer_command(enabled, speed as i32, 0);
+    /// * `mode` - 0=Target mode (highlights collision threats), 1=Rain mode (identifies precipitation)
+    pub fn set_target_analyzer(&mut self, enabled: bool, mode: u8) {
+        let cmd = format_target_analyzer_command(enabled, mode as i32, 0);
         let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
         debug(&format!(
-            "[{}] Queueing target analyzer command: {} (enabled={}, speed={})",
-            self.radar_id, cmd, enabled, speed
+            "[{}] Queueing target analyzer command: {} (enabled={}, mode={})",
+            self.radar_id, cmd, enabled, mode
         ));
         self.queue_command(cmd);
     }
@@ -416,6 +419,44 @@ impl FurunoController {
         debug(&format!(
             "[{}] Queueing antenna height command: {} (meters={})",
             self.radar_id, cmd, meters
+        ));
+        self.queue_command(cmd);
+    }
+
+    /// Set blind sector (no-transmit zones)
+    ///
+    /// # Arguments
+    /// * `zone1_enabled` - Enable zone 1
+    /// * `zone1_start` - Zone 1 start angle (0-359)
+    /// * `zone1_end` - Zone 1 end angle (0-359)
+    /// * `zone2_enabled` - Enable zone 2
+    /// * `zone2_start` - Zone 2 start angle (0-359)
+    /// * `zone2_end` - Zone 2 end angle (0-359)
+    pub fn set_blind_sector(
+        &mut self,
+        zone1_enabled: bool,
+        zone1_start: i32,
+        zone1_end: i32,
+        zone2_enabled: bool,
+        zone2_start: i32,
+        zone2_end: i32,
+    ) {
+        // Convert start/end to start/width for the protocol
+        let z1_width = if zone1_enabled {
+            ((zone1_end - zone1_start + 360) % 360).max(1)
+        } else {
+            0
+        };
+        let z2_width = if zone2_enabled {
+            ((zone2_end - zone2_start + 360) % 360).max(1)
+        } else {
+            0
+        };
+        let cmd = format_blind_sector_command(zone2_enabled, zone1_start, z1_width, zone2_start, z2_width);
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        debug(&format!(
+            "[{}] Queueing blind sector command: {} (z1: {}-{} enabled={}, z2: {}-{} enabled={})",
+            self.radar_id, cmd, zone1_start, zone1_end, zone1_enabled, zone2_start, zone2_end, zone2_enabled
         ));
         self.queue_command(cmd);
     }
@@ -739,8 +780,9 @@ impl FurunoController {
         debug(&format!("[{}] Sent info requests", self.radar_id));
     }
 
-    /// Send state requests (gain, sea, rain, range, power)
+    /// Send state requests (all controls that support querying)
     fn send_state_requests(&self) {
+        // Base controls
         // Request status ($R69)
         let cmd = format_request_status();
         let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
@@ -766,15 +808,75 @@ impl FurunoController {
         let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
         self.send_command(cmd);
 
-        debug(&format!("[{}] Sent state requests", self.radar_id));
+        // Request signal processing - query each feature separately
+        // Noise reduction ($R67,0,3)
+        let cmd = format_request_noise_reduction();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Interference rejection ($R67,0,0)
+        let cmd = format_request_interference_rejection();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Extended controls
+        // Request RezBoost ($REE)
+        let cmd = format_request_rezboost();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Request Bird Mode ($RED)
+        let cmd = format_request_bird_mode();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Request Target Analyzer ($REF)
+        let cmd = format_request_target_analyzer();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Request Scan Speed ($R89)
+        let cmd = format_request_scan_speed();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Request Main Bang Suppression ($R83)
+        let cmd = format_request_main_bang();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Request TX Channel ($REC)
+        let cmd = format_request_tx_channel();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        // Request Blind Sector / No-Transmit Zones ($R77)
+        let cmd = format_request_blind_sector();
+        let cmd = cmd.trim_end_matches('\n').trim_end_matches('\r');
+        self.send_command(cmd);
+
+        debug(&format!("[{}] Sent state requests (base + extended)", self.radar_id));
     }
 
     /// Parse a response line from the radar
     fn parse_response(&mut self, line: &str) {
-        // Try to update radar state from control responses ($N62-$N69)
+        // Debug: Log $N67 responses specifically with full parsing details
+        if line.starts_with("$N67") {
+            let parse_result = parse_signal_processing_response(line);
+            debug(&format!(
+                "[{}] $N67 response: '{}' (len={}, bytes={:?}) -> parse_result={:?}",
+                self.radar_id,
+                line,
+                line.len(),
+                line.as_bytes(),
+                parse_result
+            ));
+        }
+
+        // Try to update radar state from control responses ($N62-$N69, $N67, $NEE, $NED, $NEF, $N89, $N83, $NEC)
         if self.radar_state.update_from_response(line) {
             debug(&format!(
-                "[{}] State updated: power={:?}, range={}, gain={}/{}, sea={}/{}, rain={}/{}",
+                "[{}] State updated: power={:?}, range={}, gain={}/{}, sea={}/{}, rain={}/{}, nr={}, ir={}, rezboost={}, bird={}, doppler={}/{}, scan={}, mbs={}, txch={}",
                 self.radar_id,
                 self.radar_state.power,
                 self.radar_state.range,
@@ -783,9 +885,23 @@ impl FurunoController {
                 self.radar_state.sea.mode,
                 self.radar_state.sea.value,
                 self.radar_state.rain.mode,
-                self.radar_state.rain.value
+                self.radar_state.rain.value,
+                self.radar_state.noise_reduction,
+                self.radar_state.interference_rejection,
+                self.radar_state.beam_sharpening,
+                self.radar_state.bird_mode,
+                self.radar_state.doppler_mode.enabled,
+                self.radar_state.doppler_mode.mode,
+                self.radar_state.scan_speed,
+                self.radar_state.main_bang_suppression,
+                self.radar_state.tx_channel
             ));
             return;
+        } else if line.starts_with("$N67") {
+            debug(&format!(
+                "[{}] $N67 NOT parsed - update_from_response returned false",
+                self.radar_id
+            ));
         }
 
         // Parse $N96 - Module/firmware response

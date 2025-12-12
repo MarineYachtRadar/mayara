@@ -70,8 +70,7 @@ static RANGE_TABLE_FAR: &[u32] = &[
 /// not live controls - they're stored in SignalK plugin config
 static CONTROLS_NXT: &[&str] = &[
     "beamSharpening",      // RezBoost
-    "dopplerMode",         // Target Analyzer
-    "dopplerSpeed",        // Target Analyzer speed threshold
+    "dopplerMode",         // Target Analyzer (enabled + target/rain mode)
     "birdMode",
     "interferenceRejection",
     "noiseReduction",      // Command 0x67 feature 3

@@ -138,11 +138,14 @@ function buildControlsFromCapabilities() {
   // Group controls by category
   const baseControls = [];
   const extendedControls = [];
+  const configControls = [];
   const infoControls = [];
 
   for (const control of capabilities.controls || []) {
     if (control.readOnly) {
       infoControls.push(control);
+    } else if (control.category === 'installation') {
+      configControls.push(control);
     } else if (control.category === 'extended') {
       extendedControls.push(control);
     } else {
@@ -189,6 +192,19 @@ function buildControlsFromCapabilities() {
     van.add(controlsEl, extSection);
   }
 
+  // Build installation controls (config settings - rarely changed)
+  if (configControls.length > 0) {
+    const configSection = div({ class: "myr_control_section myr_installation_section" },
+      div({ class: "myr_section_header" }, "Installation")
+    );
+
+    for (const control of configControls) {
+      van.add(configSection, buildControl(control));
+    }
+
+    van.add(controlsEl, configSection);
+  }
+
   // Build info controls (read-only)
   if (infoControls.length > 0) {
     const infoSection = div({ class: "myr_control_section myr_info_section" },
@@ -212,6 +228,16 @@ function buildControlsFromCapabilities() {
  * Build a control widget based on its type and schema
  */
 function buildControl(control) {
+  // Special case for dopplerMode - needs custom UI (enabled toggle + mode selector)
+  if (control.id === 'dopplerMode') {
+    return buildDopplerModeControl(control);
+  }
+
+  // Special case for noTransmitZones - needs custom UI (2 zone editors)
+  if (control.id === 'noTransmitZones') {
+    return buildNoTransmitZonesControl(control);
+  }
+
   switch (control.type) {
     case 'boolean':
       return buildBooleanControl(control);
@@ -335,19 +361,21 @@ function buildNumberControl(control) {
  */
 function buildEnumControl(control) {
   const values = control.values || [];
-  const currentValue = getControlValue(control.id) || control.default;
+  const currentValue = getControlValue(control.id) ?? control.default;
 
   return div({ class: "myr_control myr_enum_control" },
     span({ class: "myr_control_label" }, control.name),
     div({ class: "myr_button_group", id: `myr_${control.id}_group` },
-      ...values.map(v =>
-        button({
+      ...values.map(v => {
+        // Compare as strings to handle number/string type differences
+        const isActive = String(v.value) === String(currentValue);
+        return button({
           type: "button",
-          class: `myr_enum_button ${v.value === currentValue ? 'myr_enum_active' : ''}`,
+          class: `myr_enum_button ${isActive ? 'myr_enum_active' : ''}`,
           "data-value": v.value,
           onclick: () => sendControlValue(control.id, v.value),
-        }, v.label || v.value)
-      )
+        }, v.label || v.value);
+      })
     )
   );
 }
@@ -417,6 +445,127 @@ function buildCompoundControl(control) {
           }
         },
       })
+    )
+  );
+}
+
+/**
+ * Doppler Mode control - 3 buttons: Off | Target | Rain
+ * Furuno Target Analyzer: { enabled: bool, mode: "target" | "rain" }
+ */
+function buildDopplerModeControl(control) {
+  const currentState = getControlValue(control.id) || { enabled: false, mode: 'target' };
+  const enabled = currentState.enabled || false;
+  const mode = currentState.mode || 'target';
+
+  // Determine which button is active: off, target, or rain
+  const activeBtn = !enabled ? 'off' : mode;
+
+  return div({ class: "myr_control", id: `myr_${control.id}_compound` },
+    span({ class: "myr_control_label" }, control.name),
+    div({ class: "myr_mode_buttons myr_mode_buttons_3" },
+      button({
+        type: "button",
+        class: `myr_mode_button ${activeBtn === 'off' ? 'myr_mode_active' : ''}`,
+        "data-value": "off",
+        onclick: () => sendControlValue(control.id, { enabled: false, mode: 'target' }),
+      }, "Off"),
+      button({
+        type: "button",
+        class: `myr_mode_button ${activeBtn === 'target' ? 'myr_mode_active' : ''}`,
+        "data-value": "target",
+        onclick: () => sendControlValue(control.id, { enabled: true, mode: 'target' }),
+      }, "Target"),
+      button({
+        type: "button",
+        class: `myr_mode_button ${activeBtn === 'rain' ? 'myr_mode_active' : ''}`,
+        "data-value": "rain",
+        onclick: () => sendControlValue(control.id, { enabled: true, mode: 'rain' }),
+      }, "Rain")
+    )
+  );
+}
+
+/**
+ * No-Transmit Zones control - 2 zone editors with enabled/start/end
+ * Furuno Sector Blanking: { zones: [{ enabled, start, end }, { enabled, start, end }] }
+ */
+function buildNoTransmitZonesControl(control) {
+  const currentState = getControlValue(control.id) || { zones: [] };
+  const zones = currentState.zones || [];
+
+  // Default zones (2 for Furuno)
+  const zone1 = zones[0] || { enabled: false, start: 0, end: 0 };
+  const zone2 = zones[1] || { enabled: false, start: 0, end: 0 };
+
+  // Read current zone values from DOM (to avoid stale closure values)
+  function getZoneFromDOM(zoneNum) {
+    const prefix = `myr_ntz_zone${zoneNum}`;
+    const enabledEl = document.getElementById(`${prefix}_enabled`);
+    const startEl = document.getElementById(`${prefix}_start`);
+    const endEl = document.getElementById(`${prefix}_end`);
+    return {
+      enabled: enabledEl?.checked || false,
+      start: parseInt(startEl?.value) || 0,
+      end: parseInt(endEl?.value) || 0
+    };
+  }
+
+  function sendCurrentZones() {
+    const z1 = getZoneFromDOM(1);
+    const z2 = getZoneFromDOM(2);
+    console.log('NTZ: Sending zones:', { z1, z2 });
+    sendControlValue(control.id, { zones: [z1, z2] });
+  }
+
+  function buildZoneEditor(zoneNum, zone) {
+    const prefix = `myr_ntz_zone${zoneNum}`;
+    return div({ class: "myr_ntz_zone" },
+      div({ class: "myr_ntz_zone_header" },
+        label({ class: "myr_checkbox_label" },
+          input({
+            type: "checkbox",
+            id: `${prefix}_enabled`,
+            checked: zone.enabled,
+            onchange: () => sendCurrentZones()
+          }),
+          ` Zone ${zoneNum}`
+        )
+      ),
+      div({ class: "myr_ntz_angles" },
+        div({ class: "myr_ntz_angle" },
+          label({ for: `${prefix}_start` }, "Start°"),
+          input({
+            type: "number",
+            id: `${prefix}_start`,
+            min: 0,
+            max: 359,
+            value: zone.start,
+            disabled: !zone.enabled,
+            onchange: () => sendCurrentZones()
+          })
+        ),
+        div({ class: "myr_ntz_angle" },
+          label({ for: `${prefix}_end` }, "End°"),
+          input({
+            type: "number",
+            id: `${prefix}_end`,
+            min: 0,
+            max: 359,
+            value: zone.end,
+            disabled: !zone.enabled,
+            onchange: () => sendCurrentZones()
+          })
+        )
+      )
+    );
+  }
+
+  return div({ class: "myr_control myr_ntz_control", id: `myr_${control.id}_compound` },
+    span({ class: "myr_control_label" }, control.name),
+    div({ class: "myr_ntz_zones" },
+      buildZoneEditor(1, zone1),
+      buildZoneEditor(2, zone2)
     )
   );
 }
@@ -547,6 +696,18 @@ function updateControlUI(controlId, value) {
   const control = capabilities?.controls?.find(c => c.id === controlId);
   if (!control) return;
 
+  // Special case for dopplerMode
+  if (controlId === 'dopplerMode') {
+    updateDopplerModeUI(controlId, value);
+    return;
+  }
+
+  // Special case for noTransmitZones
+  if (controlId === 'noTransmitZones') {
+    updateNoTransmitZonesUI(value);
+    return;
+  }
+
   switch (control.type) {
     case 'boolean':
       updateBooleanUI(controlId, value);
@@ -603,8 +764,10 @@ function updateNumberUI(controlId, value, control) {
 function updateEnumUI(controlId, value) {
   const group = document.getElementById(`myr_${controlId}_group`);
   if (group) {
+    // Convert value to string for comparison (dataset values are always strings)
+    const valueStr = String(value);
     group.querySelectorAll('.myr_enum_button').forEach(btn => {
-      btn.classList.toggle('myr_enum_active', btn.dataset.value === value);
+      btn.classList.toggle('myr_enum_active', btn.dataset.value === valueStr);
     });
   }
 }
@@ -634,6 +797,54 @@ function updateCompoundUI(controlId, value, control) {
   }
   if (valueEl) {
     valueEl.textContent = isAuto ? "Auto" : (val !== undefined ? val : '-');
+  }
+}
+
+function updateDopplerModeUI(controlId, value) {
+  const compound = document.getElementById(`myr_${controlId}_compound`);
+  if (!compound) return;
+
+  const enabled = value?.enabled || false;
+  const mode = value?.mode || 'target';
+  const activeBtn = !enabled ? 'off' : mode;
+
+  // Update buttons (Off / Target / Rain)
+  compound.querySelectorAll('.myr_mode_button').forEach(btn => {
+    btn.classList.toggle('myr_mode_active', btn.dataset.value === activeBtn);
+  });
+}
+
+function updateNoTransmitZonesUI(value) {
+  const zones = value?.zones || [];
+  const zone1 = zones[0] || { enabled: false, start: 0, end: 0 };
+  const zone2 = zones[1] || { enabled: false, start: 0, end: 0 };
+
+  // Update zone 1
+  const z1Enabled = document.getElementById('myr_ntz_zone1_enabled');
+  const z1Start = document.getElementById('myr_ntz_zone1_start');
+  const z1End = document.getElementById('myr_ntz_zone1_end');
+  if (z1Enabled) z1Enabled.checked = zone1.enabled;
+  if (z1Start) {
+    z1Start.value = zone1.start;
+    z1Start.disabled = !zone1.enabled;
+  }
+  if (z1End) {
+    z1End.value = zone1.end;
+    z1End.disabled = !zone1.enabled;
+  }
+
+  // Update zone 2
+  const z2Enabled = document.getElementById('myr_ntz_zone2_enabled');
+  const z2Start = document.getElementById('myr_ntz_zone2_start');
+  const z2End = document.getElementById('myr_ntz_zone2_end');
+  if (z2Enabled) z2Enabled.checked = zone2.enabled;
+  if (z2Start) {
+    z2Start.value = zone2.start;
+    z2Start.disabled = !zone2.enabled;
+  }
+  if (z2End) {
+    z2End.value = zone2.end;
+    z2End.disabled = !zone2.enabled;
   }
 }
 

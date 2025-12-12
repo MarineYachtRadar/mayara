@@ -8,8 +8,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::protocol::furuno::command::{
-    parse_gain_response, parse_rain_response, parse_range_response, parse_sea_response,
-    parse_status_response, range_index_to_meters, ControlValue as ParsedControlValue,
+    parse_bird_mode_response, parse_blind_sector_response, parse_gain_response,
+    parse_main_bang_response, parse_rain_response, parse_range_response,
+    parse_rezboost_response, parse_scan_speed_response, parse_sea_response,
+    parse_signal_processing_response, parse_status_response, parse_target_analyzer_response,
+    parse_tx_channel_response, range_index_to_meters, ControlValue as ParsedControlValue,
 };
 
 /// Power state of the radar
@@ -53,6 +56,34 @@ impl From<ParsedControlValue> for ControlValueState {
     }
 }
 
+/// Target Analyzer (Doppler) state for API
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetAnalyzerState {
+    /// Whether Target Analyzer is enabled
+    pub enabled: bool,
+    /// Mode: "target" or "rain"
+    pub mode: String,
+}
+
+/// No-Transmit Zone state for API
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NoTransmitZone {
+    /// Whether this zone is enabled
+    pub enabled: bool,
+    /// Start angle in degrees (0-359)
+    pub start: i32,
+    /// End angle in degrees (0-359)
+    pub end: i32,
+}
+
+/// No-Transmit Zones state (array of zones)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NoTransmitZonesState {
+    /// Array of zone configurations
+    pub zones: Vec<NoTransmitZone>,
+}
+
 /// Complete radar state
 ///
 /// Contains current values for all readable controls.
@@ -74,6 +105,33 @@ pub struct RadarState {
 
     /// Rain clutter control state
     pub rain: ControlValueState,
+
+    /// Noise reduction enabled
+    pub noise_reduction: bool,
+
+    /// Interference rejection enabled
+    pub interference_rejection: bool,
+
+    /// RezBoost (beam sharpening) level: 0=OFF, 1=Low, 2=Medium, 3=High
+    pub beam_sharpening: i32,
+
+    /// Bird Mode level: 0=OFF, 1=Low, 2=Medium, 3=High
+    pub bird_mode: i32,
+
+    /// Target Analyzer (Doppler) state
+    pub doppler_mode: TargetAnalyzerState,
+
+    /// Scan speed mode: 0=24RPM, 2=Auto
+    pub scan_speed: i32,
+
+    /// Main Bang Suppression percentage (0-100)
+    pub main_bang_suppression: i32,
+
+    /// TX Channel: 0=Auto, 1-3=Channel 1-3
+    pub tx_channel: i32,
+
+    /// No-Transmit Zones (sector blanking)
+    pub no_transmit_zones: NoTransmitZonesState,
 
     /// Timestamp of last update (milliseconds since epoch)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -126,6 +184,81 @@ impl RadarState {
             }
         }
 
+        // Try signal processing response ($N67)
+        if let Some((feature, value)) = parse_signal_processing_response(line) {
+            match feature {
+                0 => {
+                    // Interference rejection: 0=OFF, 2=ON
+                    self.interference_rejection = value == 2;
+                    return true;
+                }
+                3 => {
+                    // Noise reduction: 0=OFF, 1=ON
+                    self.noise_reduction = value == 1;
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        // Try RezBoost response ($NEE)
+        if let Some(level) = parse_rezboost_response(line) {
+            self.beam_sharpening = level;
+            return true;
+        }
+
+        // Try Bird Mode response ($NED)
+        if let Some(level) = parse_bird_mode_response(line) {
+            self.bird_mode = level;
+            return true;
+        }
+
+        // Try Target Analyzer response ($NEF)
+        if let Some(ta) = parse_target_analyzer_response(line) {
+            self.doppler_mode = TargetAnalyzerState {
+                enabled: ta.enabled,
+                mode: if ta.mode == 0 { "target" } else { "rain" }.to_string(),
+            };
+            return true;
+        }
+
+        // Try Scan Speed response ($N89)
+        if let Some(mode) = parse_scan_speed_response(line) {
+            self.scan_speed = mode;
+            return true;
+        }
+
+        // Try Main Bang Suppression response ($N83)
+        if let Some(percent) = parse_main_bang_response(line) {
+            self.main_bang_suppression = percent;
+            return true;
+        }
+
+        // Try TX Channel response ($NEC)
+        if let Some(channel) = parse_tx_channel_response(line) {
+            self.tx_channel = channel;
+            return true;
+        }
+
+        // Try Blind Sector response ($N77)
+        if let Some(bs) = parse_blind_sector_response(line) {
+            self.no_transmit_zones = NoTransmitZonesState {
+                zones: vec![
+                    NoTransmitZone {
+                        enabled: bs.sector1_width > 0,
+                        start: bs.sector1_start,
+                        end: (bs.sector1_start + bs.sector1_width) % 360,
+                    },
+                    NoTransmitZone {
+                        enabled: bs.sector2_width > 0,
+                        start: bs.sector2_start,
+                        end: (bs.sector2_start + bs.sector2_width) % 360,
+                    },
+                ],
+            };
+            return true;
+        }
+
         false
     }
 
@@ -174,6 +307,71 @@ impl RadarState {
             }),
         );
 
+        // Noise reduction
+        map.insert(
+            "noiseReduction".to_string(),
+            serde_json::json!(self.noise_reduction),
+        );
+
+        // Interference rejection
+        map.insert(
+            "interferenceRejection".to_string(),
+            serde_json::json!(self.interference_rejection),
+        );
+
+        // RezBoost (beam sharpening)
+        map.insert(
+            "beamSharpening".to_string(),
+            serde_json::json!(self.beam_sharpening),
+        );
+
+        // Bird Mode
+        map.insert(
+            "birdMode".to_string(),
+            serde_json::json!(self.bird_mode),
+        );
+
+        // Target Analyzer (Doppler)
+        map.insert(
+            "dopplerMode".to_string(),
+            serde_json::json!({
+                "enabled": self.doppler_mode.enabled,
+                "mode": self.doppler_mode.mode
+            }),
+        );
+
+        // Scan Speed
+        map.insert(
+            "scanSpeed".to_string(),
+            serde_json::json!(self.scan_speed),
+        );
+
+        // Main Bang Suppression
+        map.insert(
+            "mainBangSuppression".to_string(),
+            serde_json::json!(self.main_bang_suppression),
+        );
+
+        // TX Channel
+        map.insert(
+            "txChannel".to_string(),
+            serde_json::json!(self.tx_channel),
+        );
+
+        // No-Transmit Zones
+        map.insert(
+            "noTransmitZones".to_string(),
+            serde_json::json!({
+                "zones": self.no_transmit_zones.zones.iter().map(|z| {
+                    serde_json::json!({
+                        "enabled": z.enabled,
+                        "start": z.start,
+                        "end": z.end
+                    })
+                }).collect::<Vec<_>>()
+            }),
+        );
+
         map
     }
 }
@@ -184,8 +382,11 @@ impl RadarState {
 /// to query all readable control values.
 pub fn generate_state_requests() -> Vec<String> {
     use crate::protocol::furuno::command::{
-        format_request_gain, format_request_rain, format_request_range, format_request_sea,
-        format_request_status,
+        format_request_bird_mode, format_request_blind_sector, format_request_gain,
+        format_request_interference_rejection, format_request_main_bang,
+        format_request_noise_reduction, format_request_rain, format_request_range,
+        format_request_rezboost, format_request_scan_speed, format_request_sea,
+        format_request_status, format_request_target_analyzer, format_request_tx_channel,
     };
 
     vec![
@@ -194,6 +395,17 @@ pub fn generate_state_requests() -> Vec<String> {
         format_request_gain(),
         format_request_sea(),
         format_request_rain(),
+        // Signal processing - query each feature separately
+        format_request_noise_reduction(),
+        format_request_interference_rejection(),
+        // Extended controls
+        format_request_rezboost(),
+        format_request_bird_mode(),
+        format_request_target_analyzer(),
+        format_request_scan_speed(),
+        format_request_main_bang(),
+        format_request_tx_channel(),
+        format_request_blind_sector(),
     ]
 }
 
@@ -243,6 +455,27 @@ mod tests {
     }
 
     #[test]
+    fn test_update_from_signal_processing_response() {
+        let mut state = RadarState::new();
+
+        // Noise reduction ON
+        assert!(state.update_from_response("$N67,0,3,1,0"));
+        assert!(state.noise_reduction);
+
+        // Noise reduction OFF
+        assert!(state.update_from_response("$N67,0,3,0,0"));
+        assert!(!state.noise_reduction);
+
+        // Interference rejection ON
+        assert!(state.update_from_response("$N67,0,0,2,0"));
+        assert!(state.interference_rejection);
+
+        // Interference rejection OFF
+        assert!(state.update_from_response("$N67,0,0,0,0"));
+        assert!(!state.interference_rejection);
+    }
+
+    #[test]
     fn test_to_controls_map() {
         let mut state = RadarState::new();
         state.power = PowerState::Transmit;
@@ -266,11 +499,58 @@ mod tests {
     fn test_generate_state_requests() {
         let requests = generate_state_requests();
 
-        assert_eq!(requests.len(), 5);
+        assert_eq!(requests.len(), 14); // Base + signal processing (2) + extended controls
+        // Base controls
         assert!(requests.contains(&"$R69\r\n".to_string()));
         assert!(requests.contains(&"$R62\r\n".to_string()));
         assert!(requests.contains(&"$R63\r\n".to_string()));
         assert!(requests.contains(&"$R64\r\n".to_string()));
         assert!(requests.contains(&"$R65\r\n".to_string()));
+        // Signal processing - feature-specific queries
+        assert!(requests.contains(&"$R67,0,3\r\n".to_string())); // Noise reduction
+        assert!(requests.contains(&"$R67,0,0\r\n".to_string())); // Interference rejection
+        // Extended controls
+        assert!(requests.contains(&"$REE\r\n".to_string()));
+        assert!(requests.contains(&"$RED\r\n".to_string()));
+        assert!(requests.contains(&"$REF\r\n".to_string()));
+        assert!(requests.contains(&"$R89\r\n".to_string()));
+        assert!(requests.contains(&"$R83\r\n".to_string()));
+        assert!(requests.contains(&"$REC\r\n".to_string()));
+        assert!(requests.contains(&"$R77\r\n".to_string())); // Blind sector
+    }
+
+    #[test]
+    fn test_update_from_extended_responses() {
+        let mut state = RadarState::new();
+
+        // RezBoost
+        assert!(state.update_from_response("$NEE,2,0"));
+        assert_eq!(state.beam_sharpening, 2);
+
+        // Bird Mode
+        assert!(state.update_from_response("$NED,3,0"));
+        assert_eq!(state.bird_mode, 3);
+
+        // Target Analyzer - enabled, target mode
+        assert!(state.update_from_response("$NEF,1,0,0"));
+        assert!(state.doppler_mode.enabled);
+        assert_eq!(state.doppler_mode.mode, "target");
+
+        // Target Analyzer - enabled, rain mode
+        assert!(state.update_from_response("$NEF,1,1,0"));
+        assert!(state.doppler_mode.enabled);
+        assert_eq!(state.doppler_mode.mode, "rain");
+
+        // Scan Speed
+        assert!(state.update_from_response("$N89,2,0"));
+        assert_eq!(state.scan_speed, 2);
+
+        // Main Bang Suppression (127 = ~49%)
+        assert!(state.update_from_response("$N83,127,0"));
+        assert_eq!(state.main_bang_suppression, 49);
+
+        // TX Channel
+        assert!(state.update_from_response("$NEC,2"));
+        assert_eq!(state.tx_channel, 2);
     }
 }

@@ -26,25 +26,13 @@ TODO:
 
 ### dirkwa
 
-Webgui: Network Configuration help autocolaps every 1-2 sec even when no radar is found. 
-
-
-- API 
-  - What sees Client?
-  - Descriptions
-  - Default
-  - info 
-    - firmware
-    - hours of operation 
+Update this with your findings mayara/docs/furuno/protocol.md
 
 
 files the same? WASM/Standalone?
 - locator rs
 - Build rs
 - command rs?
-
-- furuno controller ?
-
 
 Does the model database have the functions?
 PARTIALLY - The ModelInfo struct in mayara-core has:
@@ -68,7 +56,3 @@ They don't share registration code - they're two different architectures.
 - Update Readme
 -- Link Wasm readme
 
-- bundled mode --> Standalone talking to SK-API
-
---> Mayara WASAM : Provider and Plugin with it's web gui. 
-Can we modify the webapp part in /public that it subscribes as a client (like Chartplotter) to the new radar api and change the control panel that based upon the capapbilities of the radar detected it will offer controls and map them to be usable? I prefer sliders and buttons, no drop down. rhould be touch fiendly. curent CSS is quite nice. 

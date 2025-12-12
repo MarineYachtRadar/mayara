@@ -2,6 +2,13 @@
   color-scheme: dark;
 }
 
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
 html {
   box-sizing: content-box;
   border: none;
@@ -217,6 +224,7 @@ input:read-only {
 div.myr_container {
   width: 100%;
   height: 100vh;
+  overflow: hidden;
 }
 
 div.myr_controller_left {
@@ -234,6 +242,7 @@ div.myr_ppi {
   position: relative;
   width: calc(100% - 200px);
   height: 100vh;
+  overflow: hidden;
 }
 
 #myr_canvas, #myr_canvas_webgl, #myr_canvas_webgpu {
@@ -917,8 +926,14 @@ div.myr_ppi {
 /* Boolean toggle button */
 .myr_boolean_control {
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
   align-items: center;
+  gap: 6px;
+  text-align: center;
+}
+
+.myr_boolean_control .myr_toggle_button {
+  align-self: center;
 }
 
 .myr_toggle_button {
@@ -1004,11 +1019,22 @@ div.myr_ppi {
 
 .myr_mode_buttons {
   display: flex;
+  flex-wrap: nowrap;
   gap: 4px;
 }
 
+/* 3-button mode selector (e.g., Doppler: Off/Target/Rain) - wrap to 2 rows */
+.myr_mode_buttons_3 {
+  flex-wrap: wrap;
+}
+
+.myr_mode_buttons_3 .myr_mode_button {
+  flex: 1 1 calc(50% - 2px);
+}
+
 .myr_mode_button {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 60px;
   padding: 8px 10px;
   font-size: 12px;
   font-weight: bold;
@@ -1076,6 +1102,79 @@ div.myr_ppi {
 
 .myr_info_label {
   color: #888;
+}
+
+/* No-Transmit Zones control */
+.myr_ntz_control {
+  display: flex;
+  flex-direction: column;
+}
+
+.myr_ntz_zones {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.myr_ntz_zone {
+  padding: 8px;
+  background-color: #1a1a24;
+  border-radius: 4px;
+  border: 1px solid #334;
+}
+
+.myr_ntz_zone_header {
+  margin-bottom: 8px;
+}
+
+.myr_checkbox_label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #8cf;
+  cursor: pointer;
+}
+
+.myr_checkbox_label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #4a8;
+}
+
+.myr_ntz_angles {
+  display: flex;
+  gap: 12px;
+}
+
+.myr_ntz_angle {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.myr_ntz_angle label {
+  font-size: 11px;
+  color: #888;
+}
+
+.myr_ntz_angle input[type="number"] {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 14px;
+  background-color: #224;
+  border: 1px solid #446;
+  border-radius: 4px;
+  color: #adf;
+  box-sizing: border-box;
+}
+
+.myr_ntz_angle input[type="number"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* Touch-friendly: larger touch targets */

@@ -1,6 +1,6 @@
 {
   "name": "@mayara/signalk-radar",
-  "version": "0.1.6",
+  "version": "1.0.0",
   "description": "MaYaRa Radar - Multi-brand marine radar integration for SignalK",
   "scripts": {
     "build": "node build.js",

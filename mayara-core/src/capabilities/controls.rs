@@ -465,7 +465,7 @@ pub fn control_tx_channel() -> ControlDefinition {
         id: "txChannel".into(),
         name: "TX Channel".into(),
         description: "Selects the transmission frequency channel to avoid interference with nearby radars.".into(),
-        category: ControlCategory::Extended,
+        category: ControlCategory::Installation,
         control_type: ControlType::Enum,
         range: None,
         values: Some(vec![
@@ -498,7 +498,7 @@ pub fn control_tx_channel() -> ControlDefinition {
     }
 }
 
-/// Interference rejection: filters interference from other radars
+/// Interference rejection: filters interference from other radars (multi-level for Navico/Garmin)
 pub fn control_interference_rejection() -> ControlDefinition {
     ControlDefinition {
         id: "interferenceRejection".into(),
@@ -534,6 +534,24 @@ pub fn control_interference_rejection() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(1.into()),
+    }
+}
+
+/// Interference rejection for Furuno: simple on/off toggle
+pub fn control_interference_rejection_furuno() -> ControlDefinition {
+    ControlDefinition {
+        id: "interferenceRejection".into(),
+        name: "Int. Rejection".into(),
+        description: "Interference Rejection: filters interference from other radars.".into(),
+        category: ControlCategory::Extended,
+        control_type: ControlType::Boolean,
+        range: None,
+        values: None,
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(false.into()),
     }
 }
 
@@ -674,7 +692,7 @@ pub fn control_no_transmit_zones(zone_count: u8) -> ControlDefinition {
         id: "noTransmitZones".into(),
         name: "No-Transmit Zones".into(),
         description: format!("Configure up to {} sectors where the radar will not transmit.", zone_count),
-        category: ControlCategory::Extended,
+        category: ControlCategory::Installation,
         control_type: ControlType::Compound,
         range: None,
         values: None,
@@ -698,7 +716,7 @@ pub fn control_no_transmit_zones(zone_count: u8) -> ControlDefinition {
     }
 }
 
-/// Scan speed: antenna rotation speed (Furuno, Navico)
+/// Scan speed: antenna rotation speed (Navico, generic)
 pub fn control_scan_speed() -> ControlDefinition {
     ControlDefinition {
         id: "scanSpeed".into(),
@@ -724,6 +742,37 @@ pub fn control_scan_speed() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some("normal".into()),
+    }
+}
+
+/// Scan speed: antenna rotation speed (Furuno)
+///
+/// Furuno uses: 0=24RPM (fixed), 2=Auto (varies by range)
+pub fn control_scan_speed_furuno() -> ControlDefinition {
+    ControlDefinition {
+        id: "scanSpeed".into(),
+        name: "Scan Speed".into(),
+        description: "Antenna rotation speed. Auto adjusts based on range setting.".into(),
+        category: ControlCategory::Installation,
+        control_type: ControlType::Enum,
+        range: None,
+        values: Some(vec![
+            EnumValue {
+                value: 0.into(),
+                label: "24 RPM".into(),
+                description: Some("Fixed 24 rotations per minute".into()),
+            },
+            EnumValue {
+                value: 2.into(),
+                label: "Auto".into(),
+                description: Some("Automatically adjusts based on range".into()),
+            },
+        ]),
+        properties: None,
+        modes: None,
+        default_mode: None,
+        read_only: false,
+        default: Some(2.into()),
     }
 }
 
@@ -774,7 +823,7 @@ pub fn control_main_bang_suppression() -> ControlDefinition {
         id: "mainBangSuppression".into(),
         name: "Main Bang Suppression".into(),
         description: "Reduces the main bang artifact at the center of the radar display.".into(),
-        category: ControlCategory::Extended,
+        category: ControlCategory::Installation,
         control_type: ControlType::Number,
         range: Some(RangeSpec {
             min: 0.0,
