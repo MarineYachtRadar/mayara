@@ -603,7 +603,7 @@ When running standalone with SignalK provider mode enabled:
 │  localhost:6502 │          │  Mayara provider                │
 │                 │          │                                 │
 │  Uses local     │          │  Other SignalK clients          │
-│  Mayara API     │          │  (OpenCPN, WilhelmSK, etc.)     │
+│  Mayara API     │          │  (Freeboard-SK, WilhelmSK, etc.)│
 │                 │          │  can access radar via SignalK   │
 └─────────────────┘          └─────────────────────────────────┘
 ```
@@ -726,3 +726,270 @@ WS /signalk/v2/api/radars/providers/mayara-1/radars/{id}/spokes
 | `mayara-lib/src/io.rs` | TokioSocket: IoProvider impl | Native only |
 | `mayara-server/src/storage.rs` | Local applicationData storage | Native only |
 | `mayara-server/src/main.rs` | Binary entry, Axum setup | Native only |
+
+---
+
+## Future: Mayara Standalone and OpenCPN Integration
+
+> **Status:** Research/Planning phase. This section documents findings and open questions
+> for potential integration between Mayara Standalone and OpenCPN.
+
+### Background: The radar_pi Plugin
+
+OpenCPN users currently use the [radar_pi](https://github.com/opencpn-radar-pi/radar_pi) plugin
+for radar display. This is a mature C++ plugin with 10+ years of development.
+
+**What radar_pi supports:**
+- Navico: BR24, 3G, 4G, HALO series
+- Garmin: HD, xHD (but NOT xHD2, Fantom)
+- Raymarine: Quantum, RME120
+- Emulator for testing
+
+**What radar_pi does NOT support:**
+- Furuno radars (any model)
+- Modern Garmin (xHD2, Fantom)
+- Newer Raymarine models
+
+**radar_pi Architecture Highlights:**
+- Multi-threaded: one receive thread per radar, wxWidgets main thread for UI
+- Abstracted `RadarReceive` base class for data sources
+- Built-in Emulator proves non-hardware sources work
+- Dual rendering: CPU vertex buffers or GPU shaders
+- Features: PPI display, guard zones, ARPA/MARPA tracking, trails, EBL/VRM
+
+### The Opportunity
+
+Mayara Standalone could serve as a **radar backend** for OpenCPN, providing:
+
+1. **Furuno support** - Currently missing from radar_pi
+2. **Unified protocol handling** - One implementation for all brands
+3. **Future brands** - As Mayara adds support, OpenCPN benefits automatically
+4. **Decoupled architecture** - Radar handling separate from chart plotter
+
+### Architecture Comparison
+
+```
+Current radar_pi (Direct Hardware Access):
+┌─────────────────────────────────────────────────────────────────┐
+│                         radar_pi                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │NavicoReceive │  │GarminReceive │  │RaymarineRecv │          │
+│  │(UDP multicast)│  │(UDP multicast)│  │(UDP multicast)│          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+│         └─────────────────┼─────────────────┘                   │
+│                           ▼                                      │
+│                    ┌──────────────┐                             │
+│                    │  RadarInfo   │                             │
+│                    │ProcessSpoke()│                             │
+│                    └──────┬───────┘                             │
+│                           ▼                                      │
+│         ┌─────────────────┴─────────────────┐                   │
+│         │          Rendering                 │                   │
+│         │  (Vertex / Shader / Guard Zones)   │                   │
+│         └────────────────────────────────────┘                   │
+└─────────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+                    Radar Hardware
+                  (Navico/Garmin/Raymarine)
+
+
+Proposed: radar_pi with Mayara Backend:
+┌─────────────────────────────────────────────────────────────────┐
+│                         radar_pi                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │NavicoReceive │  │GarminReceive │  │MayaraReceive │ ◄── NEW  │
+│  │(direct HW)   │  │(direct HW)   │  │(WebSocket)   │          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+│         └─────────────────┼─────────────────┘                   │
+│                           ▼                                      │
+│                    ┌──────────────┐                             │
+│                    │  RadarInfo   │  (unchanged)                │
+│                    │ProcessSpoke()│                             │
+│                    └──────┬───────┘                             │
+│                           ▼                                      │
+│         ┌─────────────────┴─────────────────┐                   │
+│         │          Rendering                 │  (unchanged)      │
+│         │  (Vertex / Shader / Guard Zones)   │                   │
+│         └────────────────────────────────────┘                   │
+└─────────────────────────────────────────────────────────────────┘
+         │                              │
+         ▼                              ▼
+   Radar Hardware                Mayara Standalone
+ (Navico/Garmin/Raymarine)              │
+                                        ▼
+                                  Radar Hardware
+                                (Furuno + others)
+```
+
+### Integration Options
+
+#### Option A: Mayara Connector in radar_pi (Minimal Change)
+
+Add a new "radar type" to radar_pi that connects to Mayara instead of hardware.
+
+**New files in radar_pi:**
+```
+radar_pi/src/mayara/
+├── MayaraReceive.cpp      # WebSocket client for spoke stream
+├── MayaraReceive.h
+├── MayaraControl.cpp      # HTTP client for control commands
+├── MayaraControl.h
+├── MayaraLocate.cpp       # HTTP discovery of Mayara radars
+├── MayaraLocate.h
+└── mayaratype.h           # DEFINE_RADAR for RT_MAYARA
+```
+
+**Data flow:**
+```
+MayaraReceive : RadarReceive
+        │
+        ├── HTTP GET /radars              (discovery)
+        ├── HTTP GET /capabilities        (once, on connect)
+        ├── WebSocket /spokes/{id}        (binary protobuf stream)
+        └── HTTP PUT /controls/{id}       (commands)
+                │
+                ▼
+        Mayara Standalone
+                │
+                ▼
+        Actual Radar Hardware
+```
+
+**Pros:**
+- Minimal changes to radar_pi (add one new radar type)
+- Leverages existing radar_pi rendering, guard zones, ARPA, trails
+- OpenCPN users get immediate Furuno support
+- Future Mayara improvements automatically available
+- Emulator pattern proves this architecture works
+
+**Cons:**
+- Requires C++ dependencies in radar_pi (HTTP client, WebSocket, protobuf)
+- Two processes running (OpenCPN + Mayara)
+- Network latency (~1ms on localhost)
+
+#### Option B: Standalone OpenCPN Plugin (mayara_pi)
+
+Create a completely new OpenCPN plugin that only talks to Mayara.
+
+**Pros:**
+- Clean slate, modern implementation
+- Full control over UI/UX
+- Could share rendering code with Mayara web GUI
+- No legacy dependencies
+
+**Cons:**
+- Must reimplement: PPI rendering, guard zones, trails, ARPA
+- radar_pi has 10+ years of battle-tested code
+- Duplicate effort, longer timeline
+
+#### Option C: Refactor radar_pi as Library + Backend
+
+Separate radar_pi into rendering library and data acquisition backends.
+
+**Pros:**
+- Clean architecture, reusable components
+- Best of both worlds
+
+**Cons:**
+- Major refactor of radar_pi
+- Breaking changes for existing users
+- Requires radar_pi maintainer buy-in
+
+### Control Mapping (Mayara → radar_pi)
+
+| Mayara Control | radar_pi ControlType | Notes |
+|----------------|---------------------|-------|
+| `power` | CT_TRANSMIT | Partial: radar_pi has on/off, Mayara has off/standby/transmit |
+| `range` | CT_RANGE | Direct mapping |
+| `gain` | CT_GAIN | Direct mapping (mode + value) |
+| `sea` | CT_SEA | Direct mapping (mode + value) |
+| `rain` | CT_RAIN | Direct mapping |
+| `interferenceRejection` | CT_INTERFERENCE_REJECTION | Direct mapping |
+| `beamSharpening` | - | New control needed or ignore |
+| `dopplerMode` | - | New control needed or ignore |
+| `birdMode` | - | New control needed or ignore |
+| `noTransmitZones` | CT_NO_TRANSMIT_START/END | Up to 4 zones |
+
+### Spoke Data Mapping
+
+**Mayara protobuf format:**
+```protobuf
+message RadarMessage {
+    message Spoke {
+        uint32 angle = 1;       // 0..spokes_per_revolution
+        uint32 bearing = 2;     // optional, true north reference
+        uint32 range = 3;       // meters
+        uint64 time = 4;        // milliseconds since epoch
+        int64 lat = 6;          // 1e-16 degrees
+        int64 lon = 7;          // 1e-16 degrees
+        bytes data = 5;         // intensity values (0-255)
+    }
+    repeated Spoke spokes = 2;
+}
+```
+
+**radar_pi internal format:**
+```cpp
+struct line_history {
+    uint8_t* line;           // intensity data
+    wxLongLong time;         // timestamp
+    GeoPosition pos;         // vessel position
+};
+
+// Called per spoke:
+void RadarInfo::ProcessRadarSpoke(
+    SpokeBearing angle,      // 0..m_spokes
+    SpokeBearing bearing,    // true bearing
+    uint8_t *data,           // intensity array
+    size_t len,              // data length
+    int range_meters,        // current range
+    wxLongLong time_rec      // timestamp
+);
+```
+
+**Conversion is straightforward** - the formats are nearly identical.
+
+### Open Questions
+
+1. **Is modifying radar_pi acceptable?**
+   - Or should this be a completely separate plugin?
+   - Who maintains radar_pi? Can we contribute upstream?
+
+2. **Long-term vision for radar_pi:**
+   - Should radar_pi eventually use Mayara as the *only* backend?
+   - Or should both direct hardware and Mayara paths coexist?
+
+3. **Priority:**
+   - Quick Furuno support for OpenCPN users?
+   - Or clean architecture first?
+
+4. **Dependencies:**
+   - What HTTP/WebSocket/protobuf libraries are acceptable for radar_pi?
+   - libcurl? cpp-httplib? websocketpp? Boost.Beast?
+
+5. **Discovery:**
+   - How should radar_pi discover Mayara instances?
+   - mDNS/Bonjour? Manual configuration? Both?
+
+6. **Dual-mode operation:**
+   - Can radar_pi simultaneously use direct hardware AND Mayara?
+   - Example: Navico via direct, Furuno via Mayara
+
+### Preliminary Recommendation
+
+**Option A (Mayara Connector in radar_pi)** appears most practical because:
+
+1. radar_pi's `RadarReceive` abstraction already supports non-hardware sources
+2. The Emulator proves this pattern works
+3. Minimal risk - additive change, doesn't break existing functionality
+4. OpenCPN users immediately benefit from Mayara's Furuno support
+5. Future: as Mayara adds Navico/Raymarine, radar_pi users get improvements
+
+### Next Steps (When Ready)
+
+1. **Prototype MayaraReceive** - WebSocket client that calls `ProcessRadarSpoke()`
+2. **Test with Furuno radar** - Verify data flow and rendering
+3. **Add MayaraControl** - HTTP client for control commands
+4. **Discuss with radar_pi maintainers** - Upstream contribution or fork?
+5. **Document user setup** - How to configure Mayara + radar_pi together
