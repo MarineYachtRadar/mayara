@@ -351,8 +351,9 @@ impl Locator {
         let session = self.session.clone();
 
         // Spawn the core locator subsystem
+        let session_for_locator = session.clone();
         subsys.start(SubsystemBuilder::new("CoreLocator", move |s| {
-            create_locator_subsystem(discovery_tx, s)
+            create_locator_subsystem(session_for_locator, discovery_tx, s)
         }));
 
         // Process discoveries from the core locator

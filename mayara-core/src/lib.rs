@@ -129,5 +129,5 @@ pub use controllers::{
 };
 pub use error::ParseError;
 pub use io::{IoError, IoProvider, TcpSocketHandle, UdpSocketHandle};
-pub use locator::{DiscoveredRadar, LocatorEvent, RadarLocator};
+pub use locator::{BrandStatus, DiscoveredRadar, LocatorEvent, LocatorStatus, RadarLocator};
 pub use state::{ControlValueState, PowerState, RadarState};

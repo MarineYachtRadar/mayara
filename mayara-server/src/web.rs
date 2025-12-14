@@ -31,7 +31,7 @@ use axum_fix::{Message, WebSocket, WebSocketUpgrade};
 use mayara_server::{
     radar::{Legend, RadarError, RadarInfo},
     storage::{AppDataKey, SharedStorage, create_shared_storage},
-    InterfaceApi, ProtoAssets, Session,
+    ProtoAssets, Session,
 };
 
 // ARPA types from mayara-core for v6 API
@@ -504,7 +504,7 @@ async fn get_radar_state(
 
 #[debug_handler]
 async fn get_interfaces(
-    State(_state): State<Web>,
+    State(state): State<Web>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: hyper::header::HeaderMap,
 ) -> Response {
@@ -515,10 +515,9 @@ async fn get_interfaces(
 
     debug!("Interface state request from {} for host '{}'", addr, host);
 
-    // deprecated_marked_for_delete: Legacy locator used to respond to interface requests.
-    // The new core locator doesn't track per-interface status yet.
-    // Return empty interface list for now.
-    Json(InterfaceApi::default()).into_response()
+    // Return the locator status from the core locator
+    let status = state.session.read().unwrap().locator_status.clone();
+    Json(status).into_response()
 }
 
 #[debug_handler]

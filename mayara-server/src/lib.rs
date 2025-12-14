@@ -321,6 +321,8 @@ pub struct SessionInner {
     pub args: Cli,
     pub tx_interface_request: broadcast::Sender<Option<mpsc::Sender<InterfaceApi>>>,
     pub radars: Option<SharedRadars>,
+    /// Locator status from core (updated by CoreLocatorAdapter)
+    pub locator_status: mayara_core::LocatorStatus,
 }
 
 #[derive(Clone)]
@@ -356,6 +358,7 @@ impl Session {
                 args,
                 tx_interface_request,
                 radars: None,
+                locator_status: mayara_core::LocatorStatus::default(),
             })),
         };
         selfref

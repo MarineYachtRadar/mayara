@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use crate::io::{IoProvider, UdpSocketHandle};
 use crate::protocol::{furuno, garmin, navico, raymarine};
 use crate::radar::RadarDiscovery;
+use crate::Brand;
 
 /// Furuno beacon/announce broadcast address
 const FURUNO_BEACON_BROADCAST: &str = "172.31.255.255";
@@ -26,6 +27,30 @@ pub enum LocatorEvent {
 pub struct DiscoveredRadar {
     pub discovery: RadarDiscovery,
     pub last_seen_ms: u64,
+}
+
+/// Status of a single brand's listener
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrandStatus {
+    /// Which brand this is for
+    pub brand: Brand,
+    /// Human-readable status ("Listening", "Failed to bind", etc.)
+    pub status: String,
+    /// Port being listened on (if active)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Multicast address (if applicable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multicast: Option<String>,
+}
+
+/// Overall locator status showing which brands are being listened for
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocatorStatus {
+    /// Status of each brand's listener
+    pub brands: Vec<BrandStatus>,
 }
 
 /// Generic radar locator that discovers radars on the network
@@ -49,6 +74,9 @@ pub struct RadarLocator {
 
     /// Poll counter for periodic announce
     poll_count: u64,
+
+    /// Current status of each brand's listener
+    status: LocatorStatus,
 }
 
 impl RadarLocator {
@@ -62,11 +90,13 @@ impl RadarLocator {
             garmin_socket: None,
             radars: BTreeMap::new(),
             poll_count: 0,
+            status: LocatorStatus::default(),
         }
     }
 
     /// Start listening for beacons
     pub fn start<I: IoProvider>(&mut self, io: &mut I) {
+        self.status.brands.clear();
         self.start_furuno(io);
         self.start_navico_br24(io);
         self.start_navico_gen3(io);
@@ -74,8 +104,13 @@ impl RadarLocator {
         self.start_garmin(io);
     }
 
+    /// Get the current status of all brand listeners
+    pub fn status(&self) -> &LocatorStatus {
+        &self.status
+    }
+
     fn start_furuno<I: IoProvider>(&mut self, io: &mut I) {
-        match io.udp_create() {
+        let status = match io.udp_create() {
             Ok(socket) => {
                 // Enable broadcast mode BEFORE binding (required for sending to 172.31.255.255)
                 if let Err(e) = io.udp_set_broadcast(&socket, true) {
@@ -92,15 +127,34 @@ impl RadarLocator {
                     self.furuno_socket = Some(socket);
                     // Send initial announce from the same socket (port 10010)
                     self.send_furuno_announce(io);
+                    BrandStatus {
+                        brand: Brand::Furuno,
+                        status: "Listening".to_string(),
+                        port: Some(furuno::BEACON_PORT),
+                        multicast: None, // Furuno uses broadcast, not multicast
+                    }
                 } else {
                     io.debug("Failed to bind Furuno beacon socket");
                     io.udp_close(socket);
+                    BrandStatus {
+                        brand: Brand::Furuno,
+                        status: "Failed to bind".to_string(),
+                        port: None,
+                        multicast: None,
+                    }
                 }
             }
             Err(e) => {
                 io.debug(&format!("Failed to create Furuno socket: {}", e));
+                BrandStatus {
+                    brand: Brand::Furuno,
+                    status: format!("Failed: {}", e),
+                    port: None,
+                    multicast: None,
+                }
             }
-        }
+        };
+        self.status.brands.push(status);
     }
 
     /// Send Furuno announce and beacon request packets
@@ -132,7 +186,7 @@ impl RadarLocator {
     }
 
     fn start_navico_br24<I: IoProvider>(&mut self, io: &mut I) {
-        match io.udp_create() {
+        let status = match io.udp_create() {
             Ok(socket) => {
                 if io.udp_bind(&socket, navico::BR24_BEACON_PORT).is_ok() {
                     if io.udp_join_multicast(&socket, navico::BR24_BEACON_ADDR, "").is_ok() {
@@ -142,23 +196,48 @@ impl RadarLocator {
                             navico::BR24_BEACON_PORT
                         ));
                         self.navico_br24_socket = Some(socket);
+                        BrandStatus {
+                            brand: Brand::Navico,
+                            status: "Listening (BR24)".to_string(),
+                            port: Some(navico::BR24_BEACON_PORT),
+                            multicast: Some(navico::BR24_BEACON_ADDR.to_string()),
+                        }
                     } else {
                         io.debug("Failed to join Navico BR24 multicast group");
                         io.udp_close(socket);
+                        BrandStatus {
+                            brand: Brand::Navico,
+                            status: "Failed to join BR24 multicast".to_string(),
+                            port: None,
+                            multicast: None,
+                        }
                     }
                 } else {
                     io.debug("Failed to bind Navico BR24 beacon socket");
                     io.udp_close(socket);
+                    BrandStatus {
+                        brand: Brand::Navico,
+                        status: "Failed to bind BR24".to_string(),
+                        port: None,
+                        multicast: None,
+                    }
                 }
             }
             Err(e) => {
                 io.debug(&format!("Failed to create Navico BR24 socket: {}", e));
+                BrandStatus {
+                    brand: Brand::Navico,
+                    status: format!("BR24 failed: {}", e),
+                    port: None,
+                    multicast: None,
+                }
             }
-        }
+        };
+        self.status.brands.push(status);
     }
 
     fn start_navico_gen3<I: IoProvider>(&mut self, io: &mut I) {
-        match io.udp_create() {
+        let status = match io.udp_create() {
             Ok(socket) => {
                 if io.udp_bind(&socket, navico::GEN3_BEACON_PORT).is_ok() {
                     if io.udp_join_multicast(&socket, navico::GEN3_BEACON_ADDR, "").is_ok() {
@@ -168,23 +247,48 @@ impl RadarLocator {
                             navico::GEN3_BEACON_PORT
                         ));
                         self.navico_gen3_socket = Some(socket);
+                        BrandStatus {
+                            brand: Brand::Navico,
+                            status: "Listening (3G/4G/HALO)".to_string(),
+                            port: Some(navico::GEN3_BEACON_PORT),
+                            multicast: Some(navico::GEN3_BEACON_ADDR.to_string()),
+                        }
                     } else {
                         io.debug("Failed to join Navico Gen3 multicast group");
                         io.udp_close(socket);
+                        BrandStatus {
+                            brand: Brand::Navico,
+                            status: "Failed to join Gen3 multicast".to_string(),
+                            port: None,
+                            multicast: None,
+                        }
                     }
                 } else {
                     io.debug("Failed to bind Navico Gen3 beacon socket");
                     io.udp_close(socket);
+                    BrandStatus {
+                        brand: Brand::Navico,
+                        status: "Failed to bind Gen3".to_string(),
+                        port: None,
+                        multicast: None,
+                    }
                 }
             }
             Err(e) => {
                 io.debug(&format!("Failed to create Navico Gen3 socket: {}", e));
+                BrandStatus {
+                    brand: Brand::Navico,
+                    status: format!("Gen3 failed: {}", e),
+                    port: None,
+                    multicast: None,
+                }
             }
-        }
+        };
+        self.status.brands.push(status);
     }
 
     fn start_raymarine<I: IoProvider>(&mut self, io: &mut I) {
-        match io.udp_create() {
+        let status = match io.udp_create() {
             Ok(socket) => {
                 if io.udp_bind(&socket, raymarine::BEACON_PORT).is_ok() {
                     if io.udp_join_multicast(&socket, raymarine::BEACON_ADDR, "").is_ok() {
@@ -194,23 +298,48 @@ impl RadarLocator {
                             raymarine::BEACON_PORT
                         ));
                         self.raymarine_socket = Some(socket);
+                        BrandStatus {
+                            brand: Brand::Raymarine,
+                            status: "Listening".to_string(),
+                            port: Some(raymarine::BEACON_PORT),
+                            multicast: Some(raymarine::BEACON_ADDR.to_string()),
+                        }
                     } else {
                         io.debug("Failed to join Raymarine multicast group");
                         io.udp_close(socket);
+                        BrandStatus {
+                            brand: Brand::Raymarine,
+                            status: "Failed to join multicast".to_string(),
+                            port: None,
+                            multicast: None,
+                        }
                     }
                 } else {
                     io.debug("Failed to bind Raymarine beacon socket");
                     io.udp_close(socket);
+                    BrandStatus {
+                        brand: Brand::Raymarine,
+                        status: "Failed to bind".to_string(),
+                        port: None,
+                        multicast: None,
+                    }
                 }
             }
             Err(e) => {
                 io.debug(&format!("Failed to create Raymarine socket: {}", e));
+                BrandStatus {
+                    brand: Brand::Raymarine,
+                    status: format!("Failed: {}", e),
+                    port: None,
+                    multicast: None,
+                }
             }
-        }
+        };
+        self.status.brands.push(status);
     }
 
     fn start_garmin<I: IoProvider>(&mut self, io: &mut I) {
-        match io.udp_create() {
+        let status = match io.udp_create() {
             Ok(socket) => {
                 if io.udp_bind(&socket, garmin::REPORT_PORT).is_ok() {
                     if io.udp_join_multicast(&socket, garmin::REPORT_ADDR, "").is_ok() {
@@ -220,19 +349,44 @@ impl RadarLocator {
                             garmin::REPORT_PORT
                         ));
                         self.garmin_socket = Some(socket);
+                        BrandStatus {
+                            brand: Brand::Garmin,
+                            status: "Listening".to_string(),
+                            port: Some(garmin::REPORT_PORT),
+                            multicast: Some(garmin::REPORT_ADDR.to_string()),
+                        }
                     } else {
                         io.debug("Failed to join Garmin multicast group");
                         io.udp_close(socket);
+                        BrandStatus {
+                            brand: Brand::Garmin,
+                            status: "Failed to join multicast".to_string(),
+                            port: None,
+                            multicast: None,
+                        }
                     }
                 } else {
                     io.debug("Failed to bind Garmin report socket");
                     io.udp_close(socket);
+                    BrandStatus {
+                        brand: Brand::Garmin,
+                        status: "Failed to bind".to_string(),
+                        port: None,
+                        multicast: None,
+                    }
                 }
             }
             Err(e) => {
                 io.debug(&format!("Failed to create Garmin socket: {}", e));
+                BrandStatus {
+                    brand: Brand::Garmin,
+                    status: format!("Failed: {}", e),
+                    port: None,
+                    multicast: None,
+                }
             }
-        }
+        };
+        self.status.brands.push(status);
     }
 
     /// Poll for incoming beacon packets

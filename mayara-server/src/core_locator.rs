@@ -65,26 +65,30 @@ pub struct CoreLocatorAdapter {
     discovery_tx: mpsc::Sender<LocatorMessage>,
     /// Poll interval (how often to check for beacons)
     poll_interval: Duration,
+    /// Session to update with locator status
+    session: crate::Session,
 }
 
 impl CoreLocatorAdapter {
     /// Create a new locator adapter.
     ///
     /// # Arguments
+    /// * `session` - Session to update with locator status
     /// * `discovery_tx` - Channel to send radar discoveries to the server
     /// * `poll_interval` - How often to poll for beacons (default: 100ms = 10 polls/sec)
-    pub fn new(discovery_tx: mpsc::Sender<LocatorMessage>, poll_interval: Duration) -> Self {
+    pub fn new(session: crate::Session, discovery_tx: mpsc::Sender<LocatorMessage>, poll_interval: Duration) -> Self {
         Self {
             locator: RadarLocator::new(),
             io: TokioIoProvider::new(),
             discovery_tx,
             poll_interval,
+            session,
         }
     }
 
     /// Create with default poll interval (100ms).
-    pub fn with_default_interval(discovery_tx: mpsc::Sender<LocatorMessage>) -> Self {
-        Self::new(discovery_tx, Duration::from_millis(100))
+    pub fn with_default_interval(session: crate::Session, discovery_tx: mpsc::Sender<LocatorMessage>) -> Self {
+        Self::new(session, discovery_tx, Duration::from_millis(100))
     }
 
     /// Start the locator.
@@ -93,6 +97,12 @@ impl CoreLocatorAdapter {
     pub fn start(&mut self) {
         log::info!("Starting core radar locator");
         self.locator.start(&mut self.io);
+
+        // Update session with locator status
+        if let Ok(mut session) = self.session.write() {
+            session.locator_status = self.locator.status().clone();
+            log::info!("Updated session with {} brand statuses", session.locator_status.brands.len());
+        }
     }
 
     /// Poll for discoveries once.
@@ -194,7 +204,7 @@ impl CoreLocatorAdapter {
 ///
 /// // Add to subsystem
 /// subsys.start(SubsystemBuilder::new("core-locator", |s| {
-///     create_locator_subsystem(tx, s)
+///     create_locator_subsystem(session.clone(), tx, s)
 /// }));
 ///
 /// // Receive discoveries
@@ -208,10 +218,11 @@ impl CoreLocatorAdapter {
 /// }
 /// ```
 pub async fn create_locator_subsystem(
+    session: crate::Session,
     discovery_tx: mpsc::Sender<LocatorMessage>,
     subsys: SubsystemHandle,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let adapter = CoreLocatorAdapter::with_default_interval(discovery_tx);
+    let adapter = CoreLocatorAdapter::with_default_interval(session, discovery_tx);
     adapter.run(subsys).await
 }
 
