@@ -474,7 +474,7 @@ pub fn format_antenna_height_command(meters: i32) -> String {
 /// Response format: `${mode}{command_id},{args...}`
 ///
 /// # Returns
-/// Tuple of (CommandMode, command_id, Vec<args>) if valid
+/// Tuple of `(CommandMode, command_id, Vec<args>)` if valid
 #[inline(never)]
 pub fn parse_response(line: &str) -> Option<(CommandMode, u8, Vec<i32>)> {
     let line = line.trim();

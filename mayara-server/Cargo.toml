@@ -3,6 +3,16 @@ name = "mayara-server"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.80.1"
+description = "Marine radar server with REST API and WebSocket support"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/mayara-radar/mayara"
+keywords = ["radar", "marine", "server", "websocket", "rest-api"]
+categories = ["network-programming", "web-programming::http-server"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 name = "mayara_server"

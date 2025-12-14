@@ -1,3 +1,104 @@
+//! # Mayara Server
+//!
+//! Marine radar server with REST API and WebSocket support.
+//!
+//! This crate provides a complete radar server that:
+//! - Discovers radars on the local network
+//! - Provides a REST API for radar control
+//! - Streams radar data via WebSocket
+//! - Serves a web-based radar display
+//!
+//! ## Architecture
+//!
+//! The server is built on top of [`mayara_core`] for platform-independent
+//! protocol handling, with [`tokio`] providing the async runtime.
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────┐
+//! │                    mayara-server                        │
+//! │  ┌─────────────┐  ┌─────────────┐  ┌──────────────────┐ │
+//! │  │ REST API    │  │ WebSocket   │  │ Web UI (static)  │ │
+//! │  │ (axum)      │  │ (spokes)    │  │ (rust-embed)     │ │
+//! │  └──────┬──────┘  └──────┬──────┘  └──────────────────┘ │
+//! │         │                │                              │
+//! │         ▼                ▼                              │
+//! │  ┌─────────────────────────────────────────────────────┐│
+//! │  │              SharedRadars (Arc<RwLock>)             ││
+//! │  │  - Radar discovery & lifecycle                      ││
+//! │  │  - Control state                                    ││
+//! │  │  - Spoke data buffers                               ││
+//! │  └─────────────────────────────────────────────────────┘│
+//! │         │                                               │
+//! │         ▼                                               │
+//! │  ┌─────────────────────────────────────────────────────┐│
+//! │  │              TokioIoProvider                        ││
+//! │  │  - TCP/UDP socket management                        ││
+//! │  │  - Implements mayara_core::IoProvider               ││
+//! │  └─────────────────────────────────────────────────────┘│
+//! └─────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Key Components
+//!
+//! - [`Session`] - Main application state container
+//! - [`radar::SharedRadars`] - Thread-safe radar registry
+//! - `locator::Locator` - Network radar discovery (internal)
+//! - [`tokio_io::TokioIoProvider`] - Tokio-based I/O for mayara-core
+//! - [`core_locator::CoreLocatorAdapter`] - Bridges core's locator to tokio
+//!
+//! ## REST API
+//!
+//! The server exposes a REST API (via the `web` module in `main.rs`):
+//!
+//! | Endpoint | Description |
+//! |----------|-------------|
+//! | `GET /api/v1/radars` | List discovered radars |
+//! | `GET /api/v1/radars/{id}` | Get radar details |
+//! | `GET /api/v1/radars/{id}/controls` | Get control values |
+//! | `PUT /api/v1/radars/{id}/controls/{name}` | Set control value |
+//! | `WS /api/v1/radars/{id}/spokes` | WebSocket spoke stream |
+//!
+//! ## Example: Starting the Server
+//!
+//! ```rust,no_run
+//! use clap::Parser;
+//! use mayara_server::{Cli, Session};
+//! use tokio_graceful_shutdown::Toplevel;
+//! use std::time::Duration;
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let args = Cli::parse_from(["mayara-server", "-p", "8080"]);
+//!
+//!     Toplevel::new(|s| async move {
+//!         let session = Session::new(&s, args).await;
+//!         // Start web server, etc.
+//!     })
+//!     .catch_signals()
+//!     .handle_shutdown_requests(Duration::from_secs(5))
+//!     .await
+//!     .unwrap();
+//! }
+//! ```
+//!
+//! ## Feature Flags
+//!
+//! Enable/disable support for specific radar brands:
+//!
+//! - `furuno` - Furuno radar support (default)
+//! - `navico` - Navico radar support (default)
+//! - `raymarine` - Raymarine radar support (default)
+//! - `garmin` - Garmin radar support (default)
+//!
+//! ## Command-Line Interface
+//!
+//! See [`Cli`] for all available options. Key options:
+//!
+//! - `-p, --port` - HTTP server port (default: 6502)
+//! - `-v` - Increase verbosity (use multiple times)
+//! - `--replay` - Replay mode for testing without radar hardware
+//! - `--interface` - Limit discovery to specific network interface
+
 extern crate tokio;
 
 use clap::Parser;
@@ -15,6 +116,7 @@ use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 pub mod brand;
 pub mod config;
 pub mod control_factory;
+pub mod core_locator;
 pub mod locator;
 pub mod navdata;
 pub mod network;
@@ -22,6 +124,7 @@ pub mod protos;
 pub mod radar;
 pub mod settings;
 pub mod storage;
+pub mod tokio_io;
 pub mod util;
 use rust_embed::RustEmbed;
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};

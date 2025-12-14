@@ -5,6 +5,13 @@ edition = "2021"
 description = "Platform-independent radar protocol library for Mayara"
 license = "Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/mayara-radar/mayara"
+keywords = ["radar", "marine", "furuno", "navico", "protocol"]
+categories = ["parsing", "science", "embedded"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 name = "mayara_core"

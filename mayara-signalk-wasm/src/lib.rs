@@ -4,7 +4,6 @@
 //! It uses mayara-core for protocol parsing and SignalK's socket FFI
 //! for network I/O.
 
-mod furuno_controller;
 mod locator;
 mod protobuf;
 mod radar_provider;

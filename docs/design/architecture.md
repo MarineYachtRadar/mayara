@@ -16,11 +16,29 @@
 │   Contains ALL knowledge about radars:                                       │
 │   - Model database (ranges, spokes, capabilities per model)                  │
 │   - Control definitions (what controls exist, their types, min/max, units)   │
-│   - Protocol specifications                                                  │
+│   - Protocol specifications (wire format, parsing, command dispatch)         │
 │   - Feature flags (doppler, dual-range, no-transmit zones, etc.)            │
+│   - Connection state machine (platform-independent)                          │
+│   - I/O abstraction (IoProvider trait)                                      │
+│   - RadarLocator (discovery logic)                                          │
 │                                                                              │
-│   THIS IS THE ONLY PLACE WHERE RADAR CAPABILITIES ARE DEFINED.              │
-│   NO OTHER COMPONENT MAY HAVE STATIC/HARDCODED RADAR DATA.                  │
+│   THIS IS THE ONLY PLACE WHERE RADAR LOGIC IS DEFINED.                      │
+│   SERVER AND WASM ARE THIN I/O ADAPTERS AROUND CORE.                        │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    │ adapters implement IoProvider
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           I/O Provider Layer                                 │
+│                                                                              │
+│  ┌─────────────────────────┐          ┌─────────────────────────┐           │
+│  │    TokioIoProvider      │          │     WasmIoProvider      │           │
+│  │    (mayara-server)      │          │  (mayara-signalk-wasm)  │           │
+│  │                         │          │                         │           │
+│  │  Wraps tokio sockets    │          │  Wraps SignalK FFI      │           │
+│  │  in poll-based API      │          │  socket calls           │           │
+│  └─────────────────────────┘          └─────────────────────────┘           │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -57,197 +75,295 @@
    - All control types (gain, sea, rain, dopplerMode, etc.)
    - Valid ranges per model
    - Available features per model
+   - Wire protocol encoding/decoding
+   - **Command dispatch** (control ID → wire command)
+   - **Connection state machine** (Disconnected → Connecting → Connected → Active)
 
-2. **mayara-server (and WASM) have NO static radar data:**
-   - No hardcoded range tables
-   - No hardcoded control lists
-   - No model-specific constants
-   - They get ALL of this from mayara-core at runtime
+2. **mayara-server and mayara-signalk-wasm are thin adapters:**
+   - Implement `IoProvider` trait for their platform
+   - Run the **same** RadarLocator code from mayara-core
+   - Use the **same** dispatch functions for control commands
+   - No hardcoded control names, range tables, or protocol details
 
 3. **The REST API is the contract:**
    - `/capabilities` returns what the radar can do (from mayara-core)
    - Clients build their UI dynamically from this response
    - Same WebGUI works for ANY radar brand because it follows the API
 
-4. **Adding a new radar model:**
-   - Add it to mayara-core's model database
-   - Implement wire protocol handling (if new brand)
-   - That's it - the API automatically exposes the new capabilities
-   - WebGUI automatically shows the right controls
+4. **Adding a new control:**
+   - Add definition to `mayara-core/capabilities/controls.rs`
+   - Add dispatch entry in `mayara-core/protocol/{brand}/dispatch.rs`
+   - Add to model's control list in `mayara-core/models/{brand}.rs`
+   - **Server and WASM automatically pick it up - no changes needed!**
 
-5. **Control names are API names:**
-   - Use strings like `"gain"`, `"dopplerMode"`, NOT enums
-   - Control IDs in code match the API exactly
-   - No translation layers, no mapping, no confusion
+---
 
-### Why This Matters
+## Current Crate Structure (December 2025)
 
-- **Consistency:** WASM and Standalone behave identically
-- **Maintainability:** Change radar specs in ONE place (mayara-core)
-- **Extensibility:** New features automatically available everywhere
-- **Testability:** Test the core, API contract is verified
-- **No drift:** Impossible for server to have different data than API
+```
+mayara/
+├── mayara-core/                    # Platform-independent radar library
+│   └── src/
+│       ├── lib.rs                  # Re-exports: Brand, IoProvider, RadarLocator, controllers, etc.
+│       ├── io.rs                   # IoProvider trait (UDP/TCP abstraction)
+│       ├── locator.rs              # RadarLocator (multi-brand discovery)
+│       ├── connection.rs           # ConnectionState, ConnectionManager, furuno login
+│       ├── state.rs                # RadarState, PowerState (control values)
+│       ├── brand.rs                # Brand enum (Furuno, Navico, Raymarine, Garmin)
+│       ├── radar.rs                # RadarDiscovery struct
+│       ├── error.rs                # ParseError type
+│       ├── dual_range.rs           # Dual-range controller logic
+│       │
+│       ├── controllers/            # ★ UNIFIED BRAND CONTROLLERS ★
+│       │   ├── mod.rs              # Re-exports all controllers
+│       │   ├── furuno.rs           # FurunoController (TCP login + commands)
+│       │   ├── navico.rs           # NavicoController (UDP multicast)
+│       │   ├── raymarine.rs        # RaymarineController (Quantum/RD)
+│       │   └── garmin.rs           # GarminController (UDP)
+│       │
+│       ├── protocol/               # Wire protocol (encoding/decoding)
+│       │   ├── furuno/
+│       │   │   ├── mod.rs          # Beacon parsing, spoke parsing, constants
+│       │   │   ├── command.rs      # Format functions (format_gain_command, etc.)
+│       │   │   ├── dispatch.rs     # Control dispatch (ID → wire command)
+│       │   │   └── report.rs       # TCP response parsing
+│       │   ├── navico.rs           # Navico protocol
+│       │   ├── raymarine.rs        # Raymarine protocol
+│       │   └── garmin.rs           # Garmin protocol
+│       │
+│       ├── models/                 # Radar model database
+│       │   ├── furuno.rs           # DRS4D-NXT, DRS6A-NXT, etc. (ranges, controls)
+│       │   ├── navico.rs           # HALO, 4G, 3G, BR24
+│       │   ├── raymarine.rs        # Quantum, RD series
+│       │   └── garmin.rs           # xHD series
+│       │
+│       ├── capabilities/           # Control definitions
+│       │   ├── controls.rs         # 40+ control definitions (gain, sea, dopplerMode...)
+│       │   └── builder.rs          # Capability manifest builder
+│       │
+│       ├── arpa/                   # ARPA target tracking
+│       │   ├── detector.rs         # Contour detection
+│       │   ├── tracker.rs          # Kalman filter tracking
+│       │   ├── cpa.rs              # CPA/TCPA calculation
+│       │   └── ...
+│       │
+│       ├── trails/                 # Target trail history
+│       └── guard_zones/            # Guard zone alerting
+│
+├── mayara-server/                  # Standalone native server
+│   └── src/
+│       ├── main.rs                 # Entry point, tokio runtime
+│       ├── lib.rs                  # Session, Cli, VERSION exports
+│       ├── tokio_io.rs             # TokioIoProvider (implements IoProvider)
+│       ├── core_locator.rs         # CoreLocatorAdapter (wraps mayara-core RadarLocator)
+│       ├── locator.rs              # Legacy platform-specific locator
+│       ├── web.rs                  # Axum HTTP/WebSocket handlers
+│       ├── settings.rs             # Control factory using mayara-core definitions
+│       ├── storage.rs              # Local applicationData storage
+│       ├── navdata.rs              # NMEA/SignalK navigation input
+│       │
+│       └── brand/                  # Brand-specific controllers
+│           ├── furuno/             # Furuno TCP controller
+│           ├── navico/             # Navico UDP controller
+│           ├── raymarine/          # Raymarine controller
+│           └── garmin/             # Garmin controller
+│
+├── mayara-signalk-wasm/            # SignalK WASM plugin
+│   └── src/
+│       ├── lib.rs                  # WASM entry point, plugin exports
+│       ├── wasm_io.rs              # WasmIoProvider (implements IoProvider)
+│       ├── locator.rs              # Re-exports RadarLocator from mayara-core
+│       ├── radar_provider.rs       # RadarProvider (uses controllers from mayara-core)
+│       ├── spoke_receiver.rs       # UDP spoke data receiver
+│       └── signalk_ffi.rs          # SignalK FFI bindings
+│
+└── mayara-gui/                     # Shared web GUI assets
+    ├── index.html
+    ├── viewer.html
+    ├── control.html
+    ├── api.js                      # Auto-detects SignalK vs Standalone
+    └── ...
+```
+
+---
+
+## The IoProvider Architecture
+
+**Key Insight:** Both WASM and Server use the **exact same** radar logic from mayara-core.
+The only difference is how sockets are implemented.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           mayara-core                                        │
+│                    (Pure Rust, no I/O, WASM-compatible)                      │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                       IoProvider Trait                               │    │
+│  │  (mayara-core/io.rs)                                                 │    │
+│  │                                                                      │    │
+│  │  trait IoProvider {                                                  │    │
+│  │      // UDP: create, bind, broadcast, multicast, send, recv, close   │    │
+│  │      // TCP: create, connect, send, recv_line, recv_raw, close       │    │
+│  │      // Utility: current_time_ms(), debug()                          │    │
+│  │  }                                                                   │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                       RadarLocator                                   │    │
+│  │  (mayara-core/locator.rs)                                           │    │
+│  │                                                                      │    │
+│  │  - Multi-brand discovery (Furuno, Navico, Raymarine, Garmin)         │    │
+│  │  - Beacon packet construction                                        │    │
+│  │  - Multicast group management                                        │    │
+│  │  - Radar identification and deduplication                            │    │
+│  │                                                                      │    │
+│  │  Uses IoProvider for all I/O:                                        │    │
+│  │    fn start<I: IoProvider>(&mut self, io: &mut I)                    │    │
+│  │    fn poll<I: IoProvider>(&mut self, io: &mut I) -> Vec<Discovery>   │    │
+│  │    fn shutdown<I: IoProvider>(&mut self, io: &mut I)                 │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                       ConnectionManager                              │    │
+│  │  (mayara-core/connection.rs)                                         │    │
+│  │                                                                      │    │
+│  │  - ConnectionState enum (Disconnected → Connected → Active)          │    │
+│  │  - Exponential backoff logic (1s, 2s, 4s, 8s, max 30s)              │    │
+│  │  - Furuno login protocol constants and parsing                       │    │
+│  │  - ReceiveSocketType (multicast/broadcast fallback)                  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                       Dispatch Functions                             │    │
+│  │  (mayara-core/protocol/furuno/dispatch.rs)                          │    │
+│  │                                                                      │    │
+│  │  - format_control_command(id, value, auto) → wire command            │    │
+│  │  - format_request_command(id) → request command                      │    │
+│  │  - parse_control_response(line) → ControlUpdate enum                 │    │
+│  │                                                                      │    │
+│  │  Controllers call dispatch, not individual format functions!         │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                       Unified Brand Controllers                      │    │
+│  │  (mayara-core/controllers/)                                         │    │
+│  │                                                                      │    │
+│  │  FurunoController   - TCP login + command, uses dispatch functions   │    │
+│  │  NavicoController   - UDP multicast, BR24/3G/4G/HALO support        │    │
+│  │  RaymarineController - UDP, Quantum (solid-state) / RD (magnetron)  │    │
+│  │  GarminController   - UDP multicast, xHD series                     │    │
+│  │                                                                      │    │
+│  │  All controllers use IoProvider for I/O:                            │    │
+│  │    fn poll<I: IoProvider>(&mut self, io: &mut I) -> bool            │    │
+│  │    fn set_gain<I: IoProvider>(&mut self, io: &mut I, value, auto)   │    │
+│  │    fn shutdown<I: IoProvider>(&mut self, io: &mut I)                │    │
+│  │                                                                      │    │
+│  │  SAME CODE runs on both server (tokio) and WASM (FFI)!              │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+     ┌────────────────────────────┐    ┌────────────────────────────┐
+     │      TokioIoProvider       │    │      WasmIoProvider        │
+     │   (mayara-server)          │    │   (mayara-signalk-wasm)    │
+     │                            │    │                            │
+     │   impl IoProvider for      │    │   impl IoProvider for      │
+     │   TokioIoProvider {        │    │   WasmIoProvider {         │
+     │     fn udp_create() {      │    │     fn udp_create() {      │
+     │       socket2::Socket::new │    │       sk_udp_create()      │
+     │       tokio::UdpSocket     │    │     }                      │
+     │     }                      │    │     fn udp_send_to() {     │
+     │     fn udp_recv_from() {   │    │       sk_udp_send()        │
+     │       socket.try_recv_from │    │     }                      │
+     │     }                      │    │   }                        │
+     │   }                        │    │                            │
+     └────────────────────────────┘    └────────────────────────────┘
+```
+
+### Server's CoreLocatorAdapter
+
+The server wraps mayara-core's sync RadarLocator in an async adapter:
+
+```rust
+// mayara-server/src/core_locator.rs
+
+pub struct CoreLocatorAdapter {
+    locator: RadarLocator,       // from mayara-core (sync)
+    io: TokioIoProvider,         // platform I/O adapter
+    discovery_tx: mpsc::Sender<LocatorMessage>,
+    poll_interval: Duration,     // default: 100ms
+}
+
+impl CoreLocatorAdapter {
+    pub async fn run(mut self, subsys: SubsystemHandle) -> Result<...> {
+        self.locator.start(&mut self.io);  // Same code as WASM!
+
+        loop {
+            select! {
+                _ = subsys.on_shutdown_requested() => break,
+                _ = poll_timer.tick() => {
+                    let discoveries = self.locator.poll(&mut self.io);  // Same!
+                    for d in discoveries {
+                        self.discovery_tx.send(LocatorMessage::RadarDiscovered(d)).await;
+                    }
+                }
+            }
+        }
+        self.locator.shutdown(&mut self.io);
+    }
+}
+```
 
 ---
 
 ## Implementation Status (December 2025)
 
-### Current Crate Structure
+### ✅ Fully Implemented
 
-```
-mayara-core (pure protocol, WASM-safe, ~10k LOC)
-    │
-    ├── mayara-server (native binary, tokio I/O, Axum web server)
-    │   - Platform-specific locator (netlink, CoreFoundation, Win32)
-    │   - Controller implementations (tokio TCP/UDP)
-    │   - NMEA/SignalK navdata integration
-    │   - Web GUI embedded via rust-embed from mayara-gui/
-    │
-    └── mayara-signalk-wasm (WASM plugin for SignalK)
-        - WasmIoProvider using SignalK FFI
-        - Re-exports RadarLocator from mayara-core
-        - Web GUI copied to public/ at build time from mayara-gui/
-
-mayara-gui/ (shared web assets)
-    - viewer.html, control.html
-    - JavaScript, CSS, protobuf files
-    - Used by BOTH mayara-server and mayara-signalk-wasm
-```
-
-### ✅ Implemented
-
-| Component | Location | Status |
-|-----------|----------|--------|
-| Protocol parsing (Furuno, Navico, Raymarine, Garmin) | mayara-core/protocol/ | ✅ Complete |
-| Model database | mayara-core/models/ | ✅ Complete |
-| Capability definitions (v5 API) | mayara-core/capabilities/ | ✅ Complete |
-| Radar state types | mayara-core/state/ | ✅ Complete |
-| **ARPA target tracking** | mayara-core/arpa/ | ✅ Complete |
-| **Trails history** | mayara-core/trails/ | ✅ Complete |
-| **Guard zones** | mayara-core/guard_zones/ | ✅ Complete |
-| **IoProvider trait** | mayara-core/io.rs | ✅ Complete |
-| **RadarLocator (generic)** | mayara-core/locator.rs | ✅ Complete |
-| SignalK WASM plugin (v5 API) | mayara-signalk-wasm/ | ✅ Working (Furuno)* |
-| **WasmIoProvider** | mayara-signalk-wasm/wasm_io.rs | ✅ Complete |
-| v6 ARPA WASM exports | mayara-signalk-wasm/lib.rs | ✅ Complete |
-| SignalK notification FFI | mayara-signalk-wasm/signalk_ffi.rs | ✅ Complete |
-| mayara-server standalone | mayara-server/ | ✅ Complete |
-| v6 ARPA endpoints | mayara-server/web.rs | ✅ Complete |
-| SignalK-style API | mayara-server/web.rs | ✅ Complete |
-| **mayara-gui shared package** | mayara-gui/ | ✅ Complete |
-| **Local applicationData API** | mayara-server/storage.rs | ✅ Complete |
+| Component | Location | Notes |
+|-----------|----------|-------|
+| **Protocol parsing** | mayara-core/protocol/ | All 4 brands: Furuno, Navico, Raymarine, Garmin |
+| **Model database** | mayara-core/models/ | All models with ranges, spokes, capabilities |
+| **Control definitions** | mayara-core/capabilities/ | 40+ controls (v5 API) |
+| **IoProvider trait** | mayara-core/io.rs | Platform-independent I/O abstraction |
+| **RadarLocator** | mayara-core/locator.rs | Multi-brand discovery via IoProvider |
+| **ConnectionManager** | mayara-core/connection.rs | State machine, backoff, Furuno login |
+| **RadarState types** | mayara-core/state.rs | Control values, update_from_response() |
+| **Dispatch functions** | mayara-core/protocol/furuno/dispatch.rs | Control ID → wire command routing |
+| **Unified Controllers** | mayara-core/controllers/ | Furuno, Navico, Raymarine, Garmin (all brands!) |
+| **ARPA tracking** | mayara-core/arpa/ | Kalman filter, CPA/TCPA, contour detection |
+| **Trails history** | mayara-core/trails/ | Target position storage |
+| **Guard zones** | mayara-core/guard_zones/ | Zone alerting logic |
+| **TokioIoProvider** | mayara-server/tokio_io.rs | Tokio sockets implementing IoProvider |
+| **CoreLocatorAdapter** | mayara-server/core_locator.rs | Async wrapper for RadarLocator |
+| **WasmIoProvider** | mayara-signalk-wasm/wasm_io.rs | SignalK FFI implementing IoProvider |
+| **SignalK WASM plugin** | mayara-signalk-wasm/ | Working with Furuno |
+| **Standalone server** | mayara-server/ | Full functionality |
+| **Web GUI** | mayara-gui/ | Shared between WASM and Standalone |
+| **Local storage API** | mayara-server/storage.rs | SignalK-compatible applicationData |
 
 ### 🚧 In Progress / Partial
 
 | Component | Location | Status |
 |-----------|----------|--------|
-| Raymarine support | mayara-server/brand/raymarine/ | 🚧 Partial (untested) |
-| Garmin support | mayara-server/brand/garmin/ | 🚧 Stub only |
+| Raymarine support | mayara-server/brand/raymarine/ | Partial (untested) |
+| Garmin support | mayara-server/brand/garmin/ | Stub only |
 
 ### ❌ Not Yet Implemented
 
-| Component | Planned Location | Notes |
-|-----------|-----------------|-------|
-| mayara_opencpn plugin | mayara_opencpn/ | OpenCPN integration |
-| SignalK Provider Mode | mayara-server | Standalone → SignalK provider |
-| WASM Navico controller | mayara-signalk-wasm/ | Navico uses UDP-based protocol |
-| WASM Raymarine controller | mayara-signalk-wasm/ | Raymarine uses different protocol |
-| WASM Garmin controller | mayara-signalk-wasm/ | Garmin uses different protocol |
-
-> **Note on brand controllers:** Each radar brand uses a different control protocol
-> (Furuno=TCP/NMEA-like, Navico=UDP/binary, etc.). The WASM plugin currently only
-> implements FurunoController. mayara-server has controllers for all brands in
-> `brand/*/`. To add more brands to WASM, each needs its own controller implementation.
-
----
-
-## Design Principle: Unified SignalK-Compatible API
-
-**Key Insight:** The SignalK WASM plugin has a fully tested, working implementation of the
-SignalK Radar API v5 with Furuno. Instead of maintaining two different APIs, **Standalone
-implements the same SignalK-compatible API** (without requiring SignalK itself) so that:
-
-1. **Same GUI** works unchanged in WASM and Standalone modes
-2. **Same locator and controller code** can be shared (only I/O layer differs)
-3. **Standalone can optionally register as a SignalK provider** later
-
-### The API Contract
-
-Standalone implements a SignalK-compatible API surface. The GUI code doesn't know or care
-whether it's talking to SignalK or Standalone - the endpoints behave identically.
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                  SignalK-Compatible API (implemented by both)                │
-│                                                                              │
-│  a) RADAR API (v5)                                                           │
-│  ───────────────────────────────────────────────────────────────────────────│
-│  GET  /radars                         - List discovered radars              │
-│  GET  /radars/{id}                    - Get radar info                      │
-│  GET  /radars/{id}/capabilities       - Get capabilities manifest           │
-│  GET  /radars/{id}/state              - Get current state                   │
-│  PUT  /radars/{id}/state              - Update state (controls)             │
-│  WS   /radars/{id}/spokes             - WebSocket spoke stream              │
-│                                                                              │
-│  b) ARPA TARGET API (v6)                                                     │
-│  ───────────────────────────────────────────────────────────────────────────│
-│  GET  /radars/{id}/targets            - List tracked ARPA targets           │
-│  POST /radars/{id}/targets            - Manual target acquisition           │
-│  DELETE /radars/{id}/targets/{tid}    - Cancel target tracking              │
-│  GET  /radars/{id}/arpa/settings      - Get ARPA settings                   │
-│  PUT  /radars/{id}/arpa/settings      - Update ARPA settings                │
-│  WS   /radars/{id}/targets            - WebSocket target stream             │
-│                                                                              │
-│  c) APPLICATION DATA API (for settings/storage)                              │
-│  ───────────────────────────────────────────────────────────────────────────│
-│  GET  /signalk/v1/applicationData/global/{appid}/{version}/{*key}           │
-│  PUT  /signalk/v1/applicationData/global/{appid}/{version}/{*key}           │
-│  (See: https://demo.signalk.org/documentation/Developing/Plugins/WebApps)   │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                ┌───────────────────┴───────────────────┐
-                │                                       │
-                ▼                                       ▼
-┌───────────────────────────────────┐    ┌───────────────────────────────────┐
-│         WASM Plugin               │    │           Standalone              │
-│       (runs in SignalK)           │    │        (own Axum server)          │
-├───────────────────────────────────┤    ├───────────────────────────────────┤
-│                                   │    │                                   │
-│  SignalK provides API endpoints   │    │  Axum provides SAME endpoints    │
-│  SignalK provides storage API     │    │  Local file provides storage     │
-│                                   │    │                                   │
-│  Mayara WASM implements:          │    │  Mayara Standalone implements:   │
-│  - RadarLocator (from core)       │    │  - Locator (tokio I/O)           │
-│  - WasmIoProvider (FFI I/O)       │    │  - Controller (tokio I/O)        │
-│  - RadarProvider trait            │    │  - web.rs handlers               │
-│                                   │    │                                   │
-│  GUI served by SignalK            │    │  GUI embedded via rust-embed     │
-│  (copied from mayara-gui/)        │    │  (from mayara-gui/)              │
-│                                   │    │                                   │
-└───────────────────────────────────┘    └───────────────────────────────────┘
-                │                                       │
-                └───────────────────┬───────────────────┘
-                                    │
-                                    ▼
-                    ┌───────────────────────────────────┐
-                    │         mayara-gui/               │
-                    │     (shared web assets)           │
-                    │                                   │
-                    │  index.html, viewer.html          │
-                    │  control.html, api.js             │
-                    │  *.js, *.css, protobuf/           │
-                    │                                   │
-                    │  api.js auto-detects mode:        │
-                    │  - SignalK: uses SK endpoints     │
-                    │  - Standalone: uses local API     │
-                    └───────────────────────────────────┘
-```
+| Component | Notes |
+|-----------|-------|
+| mayara_opencpn plugin | OpenCPN integration (see Future section) |
+| SignalK Provider Mode | Standalone → SignalK provider registration |
 
 ---
 
 ## Deployment Modes
 
-### Mode 1: SignalK WASM Plugin (Current, to be tested)
+### Mode 1: SignalK WASM Plugin
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -259,276 +375,260 @@ whether it's talking to SignalK or Standalone - the endpoints behave identically
 │  │  │                                                                   │  │ │
 │  │  │  ┌──────────────────┐  ┌───────────────────────────────────────┐ │  │ │
 │  │  │  │  WasmIoProvider  │  │   RadarLocator (from mayara-core)     │ │  │ │
-│  │  │  │  (FFI sockets)   │──│   Uses IoProvider for I/O             │ │  │ │
+│  │  │  │  (FFI sockets)   │──│   SAME CODE AS SERVER                 │ │  │ │
 │  │  │  └──────────────────┘  └───────────────────────────────────────┘ │  │ │
-│  │  │         │                      │                                  │  │ │
-│  │  │         └──────────┬───────────┘                                  │  │ │
-│  │  │                    ▼                                              │  │ │
+│  │  │                                                                   │  │ │
 │  │  │  ┌──────────────────────────────────────────────────────────┐    │  │ │
-│  │  │  │                     RadarProvider                         │    │  │ │
-│  │  │  │  - Brand Controllers* (TCP/UDP via IoProvider)            │    │  │ │
-│  │  │  │  - SpokeReceiver (UDP multicast via IoProvider)           │    │  │ │
-│  │  │  │  - ArpaProcessor (from mayara-core)                       │    │  │ │
-│  │  │  │  *Currently: Furuno only. Each brand needs its own        │    │  │ │
-│  │  │  │   controller due to different protocols.                  │    │  │ │
+│  │  │  │         Unified Controllers (from mayara-core)            │    │  │ │
+│  │  │  │  FurunoController   │ NavicoController   (SAME CODE!)     │    │  │ │
+│  │  │  │  RaymarineController│ GarminController   (AS SERVER!)     │    │  │ │
 │  │  │  └──────────────────────────────────────────────────────────┘    │  │ │
-│  │  └──────────────────────────┬───────────────────────────────────────┘  │ │
-│  └─────────────────────────────┼──────────────────────────────────────────┘ │
-│                                │ FFI calls                                   │
-│  ┌─────────────────────────────┴──────────────────────────────────────────┐ │
-│  │           SignalK Radar API v5/v6 Endpoints                             │ │
-│  │  (SignalK routes requests to RadarProvider methods)                     │ │
+│  │  └──────────────────────────────────────────────────────────────────┘  │ │
 │  └─────────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
-              │
-              ▼
-         Browser / GUI (from mayara-gui/)
 ```
 
 **Characteristics:**
 - Runs inside SignalK's WASM sandbox
 - Uses SignalK FFI for all network I/O via WasmIoProvider
 - Poll-based (no async runtime in WASM)
-- SignalK handles HTTP routing, WebSocket management
-- RadarLocator from mayara-core runs unchanged
+- **Same RadarLocator AND Controllers as server** (all 4 brands!)
 
-### Mode 2: Standalone (Working)
+### Mode 2: Standalone Server
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                    mayara-server (Rust)                                      │
 │                                                                              │
-│  ┌─────────────┐  ┌──────────────────────────────────────────────────────┐  │
-│  │  Locator    │  │   Brand Controllers (brand/furuno/, etc.)            │  │
-│  │  (tokio)    │  │   (tokio TCP/UDP)                                    │  │
-│  └──────┬──────┘  └────────────────────────┬─────────────────────────────┘  │
-│         │                                  │                                 │
-│         └──────────┬───────────────────────┘                                │
-│                    ▼                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                     CoreLocatorAdapter                               │    │
+│  │  ┌──────────────────┐  ┌───────────────────────────────────────┐    │    │
+│  │  │  TokioIoProvider │  │   RadarLocator (from mayara-core)     │    │    │
+│  │  │  (tokio sockets) │──│   SAME CODE AS WASM                   │    │    │
+│  │  └──────────────────┘  └───────────────────────────────────────┘    │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │   Brand Controllers (can use mayara-core/controllers/ OR brand/)     │    │
+│  │   - Unified controllers from mayara-core (FurunoController, etc.)    │    │
+│  │   - OR async wrappers in brand/ that use core's controllers          │    │
+│  │   - TokioIoProvider implements IoProvider for I/O                    │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │              Axum Router (web.rs)                                    │    │
-│  │  ┌─────────────────────────────────────────────────────────────┐    │    │
-│  │  │         SignalK Radar API v5/v6 Handlers                     │    │    │
-│  │  │                                                              │    │    │
-│  │  │  GET  /radars                                                │    │    │
-│  │  │  GET  /radars/{radar_id}/capabilities                        │    │    │
-│  │  │  GET  /radars/{radar_id}/state                               │    │    │
-│  │  │  PUT  /radars/{radar_id}/state                               │    │    │
-│  │  │  WS   /radars/{radar_id}/spokes                              │    │    │
-│  │  │  GET  /radars/{radar_id}/targets                             │    │    │
-│  │  │  POST /radars/{radar_id}/targets                             │    │    │
-│  │  │  DELETE /radars/{radar_id}/targets/{target_id}               │    │    │
-│  │  └─────────────────────────────────────────────────────────────┘    │    │
-│  │  ┌─────────────────────────────────────────────────────────────┐    │    │
-│  │  │         Static File Server (GUI via rust-embed)              │    │    │
-│  │  │  /                    → index.html (from mayara-gui/)        │    │    │
-│  │  │  /viewer.html         → viewer.html                          │    │    │
-│  │  │  /control.html        → control.html                         │    │    │
-│  │  │  /style.css, etc.                                            │    │    │
-│  │  └─────────────────────────────────────────────────────────────┘    │    │
+│  │   /radars/*, /targets/*, static files (rust-embed from mayara-gui/) │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
-              │
-              ▼
-         Browser / GUI (same files from mayara-gui/!)
 ```
 
 **Characteristics:**
 - Native Rust binary with tokio async runtime
-- Direct network I/O (socket2, tokio, platform-specific netlink/CoreFoundation)
+- Direct network I/O via TokioIoProvider
 - Axum web server hosts API + GUI
-- GUI embedded via `rust-embed` from `mayara-gui/`
+- **Same RadarLocator AND Controllers as WASM** (from mayara-core)
 - **Same API paths as SignalK** → same GUI works unchanged
-
-### Mode 3: Standalone + SignalK Provider (Future)
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    mayara-server (Rust)                                      │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │   (Same as Mode 2: Locator, Controller, web.rs)                      │    │
-│  └──────────────────────────┬──────────────────────────────────────────┘    │
-│                             │                                                │
-│  ┌──────────────────────────┴──────────────────────────────────────────┐    │
-│  │                    Axum Router                                       │    │
-│  │  ┌────────────────────┐  ┌────────────────────────┐                 │    │
-│  │  │  Local API (v5/v6) │  │  SignalK Provider      │                 │    │
-│  │  │  /radars/*         │  │  Client                │                 │    │
-│  │  │                    │  │                        │                 │    │
-│  │  │  For local GUI     │  │  Registers with SK     │                 │    │
-│  │  │  and direct access │  │  Forwards radar data   │                 │    │
-│  │  └────────────────────┘  └───────────┬────────────┘                 │    │
-│  └──────────────────────────────────────┼──────────────────────────────┘    │
-└─────────────────────────────────────────┼───────────────────────────────────┘
-              │                           │
-              ▼                           ▼
-         Browser / GUI          ┌─────────────────────────┐
-         (local access)         │    SignalK Server       │
-                                │                         │
-                                │  Mayara registered as   │
-                                │  radar provider         │
-                                │                         │
-                                │  Other SK clients       │
-                                │  see radar via SignalK  │
-                                └─────────────────────────┘
-```
 
 ---
 
-## Code Sharing Strategy
+## What Gets Shared
 
-### Key Insight: IoProvider Abstraction
+| Component | Location | WASM | Server | Notes |
+|-----------|----------|:----:|:------:|-------|
+| **Protocol parsing** | mayara-core/protocol/ | ✓ | ✓ | Packet encode/decode |
+| **Model database** | mayara-core/models/ | ✓ | ✓ | Ranges, capabilities |
+| **Control definitions** | mayara-core/capabilities/ | ✓ | ✓ | v5 API schemas |
+| **IoProvider trait** | mayara-core/io.rs | ✓ | ✓ | Socket abstraction |
+| **RadarLocator** | mayara-core/locator.rs | ✓ | ✓ | **Same discovery code!** |
+| **Unified Controllers** | mayara-core/controllers/ | ✓ | ✓ | **ALL 4 brands!** |
+| **ConnectionManager** | mayara-core/connection.rs | ✓ | ✓ | State machine, backoff |
+| **Dispatch functions** | mayara-core/protocol/furuno/dispatch.rs | ✓ | ✓ | Control routing |
+| **RadarState** | mayara-core/state.rs | ✓ | ✓ | update_from_response() |
+| **ARPA** | mayara-core/arpa/ | ✓ | ✓ | Target tracking |
+| **Trails** | mayara-core/trails/ | ✓ | ✓ | Position history |
+| **Guard zones** | mayara-core/guard_zones/ | ✓ | ✓ | Alerting logic |
+| **Web GUI** | mayara-gui/ | ✓ | ✓ | Shared assets |
 
-The WASM plugin and standalone share radar locator and controller logic through
-the `IoProvider` trait. All socket operations are abstracted, allowing the same
-discovery and control code to run on both platforms.
+**What's platform-specific:**
+- TokioIoProvider (mayara-server) - wraps tokio sockets
+- WasmIoProvider (mayara-signalk-wasm) - wraps SignalK FFI
+- Axum web server (mayara-server only)
+- Spoke data receivers (async in server, poll-based in WASM)
+
+---
+
+## Unified Controllers Architecture
+
+The most significant architectural advancement is the **unified controller system** in `mayara-core/controllers/`. This eliminates code duplication between server and WASM, ensuring identical behavior across platforms.
+
+### Controller Design Principles
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           SHARED CODE (mayara-core)                          │
+│                      Controller Design Pattern                               │
+├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                       RadarLocator                                   │    │
-│  │  (mayara-core/locator.rs)                                           │    │
-│  │                                                                      │    │
-│  │  - Beacon packet construction (Furuno, Navico, Raymarine, Garmin)    │    │
-│  │  - Discovery state machine                                           │    │
-│  │  - Multicast group management                                        │    │
-│  │  - Radar identification                                              │    │
-│  │                                                                      │    │
-│  │  Uses IoProvider for all I/O:                                        │    │
-│  │    fn start<I: IoProvider>(&mut self, io: &mut I)                    │    │
-│  │    fn poll<I: IoProvider>(&mut self, io: &mut I)                     │    │
-│  │    fn send_furuno_announce<I: IoProvider>(&self, io: &mut I)         │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
+│  1. Poll-based (not async) → works in WASM without runtime                  │
+│  2. IoProvider abstraction → no direct socket calls                         │
+│  3. State machine → handles connect/disconnect/reconnect                    │
+│  4. Brand-specific protocol → TCP (Furuno) or UDP (Navico/Raymarine/Garmin) │
 │                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                      ARPA / Trails / Guard Zones                     │    │
-│  │  (mayara-core/arpa/, trails/, guard_zones/)                         │    │
-│  │                                                                      │    │
-│  │  - Target detection and tracking (Kalman filter)                     │    │
-│  │  - CPA/TCPA calculation                                              │    │
-│  │  - Trail history storage                                             │    │
-│  │  - Guard zone alerting                                               │    │
-│  │                                                                      │    │
-│  │  Pure computation, no I/O - works identically on WASM and native     │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │                      Controller Interface                               │ │
+│  │                                                                         │ │
+│  │  fn new(radar_id, address, ...) -> Self                                │ │
+│  │  fn poll<I: IoProvider>(&mut self, io: &mut I) -> bool                 │ │
+│  │  fn is_connected(&self) -> bool                                        │ │
+│  │  fn state(&self) -> ControllerState                                    │ │
+│  │                                                                         │ │
+│  │  // Control setters (all take IoProvider)                              │ │
+│  │  fn set_power<I: IoProvider>(&mut self, io: &mut I, transmit: bool)    │ │
+│  │  fn set_range<I: IoProvider>(&mut self, io: &mut I, meters: u32)       │ │
+│  │  fn set_gain<I: IoProvider>(&mut self, io: &mut I, value: u32, auto)   │ │
+│  │  fn set_sea<I: IoProvider>(&mut self, io: &mut I, value: u32, auto)    │ │
+│  │  fn set_rain<I: IoProvider>(&mut self, io: &mut I, value: u32, auto)   │ │
+│  │  ...                                                                    │ │
+│  │                                                                         │ │
+│  │  fn shutdown<I: IoProvider>(&mut self, io: &mut I)                     │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
-                    │                               │
-                    ▼                               ▼
-     ┌──────────────────────────┐     ┌──────────────────────────┐
-     │   WasmIoProvider         │     │   Tokio I/O (direct)     │
-     │   (mayara-signalk-wasm)  │     │   (mayara-server)        │
-     │                          │     │                          │
-     │   impl IoProvider for    │     │   tokio::net::UdpSocket  │
-     │   WasmIoProvider {       │     │   tokio::net::TcpStream  │
-     │     fn udp_create() {    │     │                          │
-     │       sk_udp_create()    │     │   Platform-specific:     │
-     │     }                    │     │   - netlink (Linux)      │
-     │     fn udp_send_to() {   │     │   - CoreFoundation (Mac) │
-     │       sk_udp_send()      │     │   - Win32 (Windows)      │
-     │     }                    │     │                          │
-     │   }                      │     │                          │
-     └──────────────────────────┘     └──────────────────────────┘
 ```
 
-### The IoProvider Trait
+### Controller State Machines
 
-```rust
-// mayara-core/src/io.rs
+Each controller manages its own connection state:
 
-/// Platform-independent I/O provider.
-///
-/// All operations are non-blocking and poll-based.
-pub trait IoProvider {
-    // UDP Operations
-    fn udp_create(&mut self) -> Result<UdpSocketHandle, IoError>;
-    fn udp_bind(&mut self, socket: &UdpSocketHandle, port: u16) -> Result<(), IoError>;
-    fn udp_set_broadcast(&mut self, socket: &UdpSocketHandle, enabled: bool) -> Result<(), IoError>;
-    fn udp_join_multicast(&mut self, socket: &UdpSocketHandle, group: &str, interface: &str) -> Result<(), IoError>;
-    fn udp_send_to(&mut self, socket: &UdpSocketHandle, data: &[u8], addr: &str, port: u16) -> Result<usize, IoError>;
-    fn udp_recv_from(&mut self, socket: &UdpSocketHandle, buf: &mut [u8]) -> Option<(usize, String, u16)>;
-    fn udp_pending(&self, socket: &UdpSocketHandle) -> i32;
-    fn udp_close(&mut self, socket: UdpSocketHandle);
-
-    // TCP Operations
-    fn tcp_create(&mut self) -> Result<TcpSocketHandle, IoError>;
-    fn tcp_connect(&mut self, socket: &TcpSocketHandle, addr: &str, port: u16) -> Result<(), IoError>;
-    fn tcp_is_connected(&self, socket: &TcpSocketHandle) -> bool;
-    fn tcp_send(&mut self, socket: &TcpSocketHandle, data: &[u8]) -> Result<usize, IoError>;
-    fn tcp_recv_line(&mut self, socket: &TcpSocketHandle, buf: &mut [u8]) -> Option<usize>;
-    fn tcp_close(&mut self, socket: TcpSocketHandle);
-
-    // Utility
-    fn current_time_ms(&self) -> u64;
-    fn debug(&self, msg: &str);
-}
+```
+                    ┌──────────────┐
+                    │ Disconnected │ ◄──────────────────────────────┐
+                    └──────┬───────┘                                │
+                           │ poll() creates sockets                 │
+                           ▼                                        │
+                    ┌──────────────┐                                │
+                    │  Listening   │  (UDP: waiting for reports)    │
+                    │  Connecting  │  (TCP: waiting for connect)    │
+                    └──────┬───────┘                                │
+                           │ reports received / TCP connected       │
+                           ▼                                        │
+                    ┌──────────────┐                                │
+                    │  Connected   │  (ready for commands)          │
+                    └──────┬───────┘                                │
+                           │ connection lost / timeout              │
+                           └────────────────────────────────────────┘
 ```
 
-### WASM IoProvider Implementation
+### Brand-Specific Details
 
-```rust
-// mayara-signalk-wasm/src/wasm_io.rs
+| Brand | Protocol | Connection | Special Features |
+|-------|----------|------------|------------------|
+| **Furuno** | TCP | Login sequence (root) | NXT Doppler modes, ~30 controls |
+| **Navico** | UDP multicast | Report multicast join | BR24/3G/4G/HALO, Doppler (HALO) |
+| **Raymarine** | UDP | Report multicast | Quantum (solid-state) vs RD (magnetron) |
+| **Garmin** | UDP multicast | Report multicast | xHD series, simple protocol |
 
-pub struct WasmIoProvider {
-    current_time_ms: u64,
-}
-
-impl IoProvider for WasmIoProvider {
-    fn udp_create(&mut self) -> Result<UdpSocketHandle, IoError> {
-        let id = unsafe { signalk_ffi::raw::sk_udp_create(0) };
-        if id < 0 { Err(IoError::from_code(id)) }
-        else { Ok(UdpSocketHandle(id)) }
-    }
-
-    fn udp_send_to(&mut self, socket: &UdpSocketHandle, data: &[u8], addr: &str, port: u16) -> Result<usize, IoError> {
-        let result = unsafe {
-            signalk_ffi::raw::sk_udp_send(socket.0, addr.as_ptr(), addr.len(), port, data.as_ptr(), data.len())
-        };
-        if result < 0 { Err(IoError::from_code(result)) }
-        else { Ok(result as usize) }
-    }
-
-    // ... other methods wrap SignalK FFI calls
-}
-```
-
-### RadarLocator Usage (WASM)
+### Usage Example (WASM)
 
 ```rust
 // mayara-signalk-wasm/src/radar_provider.rs
 
-pub struct RadarProvider {
+use mayara_core::controllers::{
+    FurunoController, NavicoController, RaymarineController, GarminController,
+};
+use mayara_core::Brand;
+
+struct RadarProvider {
     io: WasmIoProvider,
-    locator: RadarLocator,  // from mayara-core
-    // ...
+    furuno_controllers: BTreeMap<String, FurunoController>,
+    navico_controllers: BTreeMap<String, NavicoController>,
+    raymarine_controllers: BTreeMap<String, RaymarineController>,
+    garmin_controllers: BTreeMap<String, GarminController>,
 }
 
 impl RadarProvider {
-    pub fn new() -> Self {
-        let mut io = WasmIoProvider::new();
-        let mut locator = RadarLocator::new();
-        locator.start(&mut io);  // Same locator code as native!
-
-        Self { io, locator, /* ... */ }
+    fn poll(&mut self) {
+        // Poll all controllers - same code regardless of platform!
+        for controller in self.furuno_controllers.values_mut() {
+            controller.poll(&mut self.io);
+        }
+        for controller in self.navico_controllers.values_mut() {
+            controller.poll(&mut self.io);
+        }
+        // ... etc
     }
 
-    pub fn poll(&mut self) -> i32 {
-        self.io.set_time(/* timestamp from host */);
-        let new_radars = self.locator.poll(&mut self.io);  // Same poll code!
-
-        for discovery in &new_radars {
-            self.emit_radar_discovered(discovery);
+    fn set_gain(&mut self, radar_id: &str, value: u32, auto: bool) {
+        if let Some(c) = self.furuno_controllers.get_mut(radar_id) {
+            c.set_gain(&mut self.io, value, auto);
+        } else if let Some(c) = self.navico_controllers.get_mut(radar_id) {
+            c.set_gain(&mut self.io, value, auto);
         }
-        // ...
+        // ... etc
     }
 }
 ```
 
+### Benefits of Unified Controllers
+
+| Benefit | Description |
+|---------|-------------|
+| **Single source of truth** | Fix bugs once, fixed everywhere |
+| **Consistent behavior** | WASM and server behave identically |
+| **Easier testing** | Mock IoProvider for unit tests |
+| **Reduced code size** | ~1500 lines shared vs ~3000 lines duplicated |
+| **Faster feature development** | Add control to core, works on all platforms |
+
 ---
 
-## Architecture Diagram (Current State)
+## Adding a New Feature: The Workflow
+
+### Example: Adding a New Control (e.g., "pulseWidth")
+
+**Step 1: Add control definition (mayara-core)**
+```rust
+// mayara-core/src/capabilities/controls.rs
+pub fn control_pulse_width() -> ControlDefinition {
+    ControlDefinition {
+        id: "pulseWidth",
+        name: "Pulse Width",
+        control_type: ControlType::Number,
+        min: Some(0.0),
+        max: Some(3.0),
+        ...
+    }
+}
+```
+
+**Step 2: Add to model capabilities (mayara-core)**
+```rust
+// mayara-core/src/models/furuno.rs
+static CONTROLS_NXT: &[&str] = &[
+    "beamSharpening", "dopplerMode", ...,
+    "pulseWidth",  // ← Add here
+];
+```
+
+**Step 3: Add dispatch entry (mayara-core)**
+```rust
+// mayara-core/src/protocol/furuno/dispatch.rs
+pub fn format_control_command(control_id: &str, value: i32, auto: bool) -> Option<String> {
+    match control_id {
+        ...
+        "pulseWidth" => Some(format_pulse_width_command(value)),  // ← Add here
+        _ => None,
+    }
+}
+```
+
+**Step 4: Done!**
+- Server automatically uses new dispatch entry
+- WASM automatically uses new dispatch entry
+- GUI automatically shows control (reads from /capabilities)
+- No server code changes needed!
+
+---
+
+## Architecture Diagram: Full Picture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -538,26 +638,28 @@ impl RadarProvider {
 │                                                                              │
 │  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐ ┌───────────────┐   │
 │  │  protocol/    │ │   models/     │ │ capabilities/ │ │   state.rs    │   │
-│  │  - furuno/    │ │ - furuno.rs   │ │ - controls.rs │ │   (types)     │   │
-│  │  - navico.rs  │ │ - navico.rs   │ │ - builder.rs  │ │               │   │
-│  │  - raymarine  │ │ - raymarine   │ │               │ │               │   │
-│  │  - garmin.rs  │ │ - garmin.rs   │ │               │ │               │   │
+│  │  - furuno/    │ │ - furuno.rs   │ │ - controls.rs │ │   RadarState  │   │
+│  │    - dispatch │ │ - navico.rs   │ │ - builder.rs  │ │   PowerState  │   │
+│  │    - command  │ │ - raymarine   │ │               │ │               │   │
+│  │    - report   │ │ - garmin.rs   │ │               │ │               │   │
+│  │  - navico.rs  │ │               │ │               │ │               │   │
+│  │  - raymarine  │ │               │ │               │ │               │   │
+│  │  - garmin.rs  │ │               │ │               │ │               │   │
 │  └───────────────┘ └───────────────┘ └───────────────┘ └───────────────┘   │
 │                                                                              │
 │  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐ ┌───────────────┐   │
-│  │  arpa/        │ │  trails/      │ │ guard_zones/  │ │  io.rs        │   │
-│  │  - types.rs   │ │ - history.rs  │ │ - zone.rs     │ │ (IoProvider   │   │
-│  │  - detector   │ │               │ │               │ │  trait)       │   │
-│  │  - tracker    │ │               │ │               │ │               │   │
-│  │  - cpa.rs     │ │               │ │               │ │               │   │
+│  │  io.rs        │ │ locator.rs    │ │ connection.rs │ │  arpa/        │   │
+│  │  IoProvider   │ │ RadarLocator  │ │ ConnManager   │ │  trails/      │   │
+│  │  trait        │ │ (discovery)   │ │ ConnState     │ │  guard_zones/ │   │
 │  └───────────────┘ └───────────────┘ └───────────────┘ └───────────────┘   │
 │                                                                              │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │  locator.rs - Generic RadarLocator using IoProvider                    │  │
-│  │                                                                        │  │
-│  │  Discovers: Furuno, Navico (BR24, Gen3), Raymarine, Garmin             │  │
-│  │  Methods: start(), poll(), send_furuno_announce(), shutdown()          │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    controllers/  (★ UNIFIED ★)                       │   │
+│  │   FurunoController │ NavicoController │ RaymarineController │ Garmin │   │
+│  │   (TCP login)      │ (UDP multicast)  │ (Quantum/RD)        │ (UDP)  │   │
+│  │                                                                      │   │
+│  │   ALL controllers use IoProvider - SAME code on server AND WASM!    │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -569,25 +671,24 @@ impl RadarProvider {
      │      (WASM + FFI)          │    │    (Native + tokio)        │
      ├────────────────────────────┤    ├────────────────────────────┤
      │                            │    │                            │
-     │  wasm_io.rs:               │    │  locator.rs:               │
-     │  - WasmIoProvider          │    │  - Native discovery        │
-     │  - Implements IoProvider   │    │  - Platform netlink/CF     │
+     │  wasm_io.rs:               │    │  tokio_io.rs:              │
+     │  - WasmIoProvider          │    │  - TokioIoProvider         │
+     │  - impl IoProvider         │    │  - impl IoProvider         │
      │                            │    │                            │
-     │  locator.rs:               │    │  brand/:                   │
-     │  - Re-exports RadarLocator │    │  - furuno/ (tokio TCP)     │
-     │    from mayara-core        │    │  - navico/                 │
-     │                            │    │  - raymarine/              │
-     │  furuno_controller.rs:     │    │                            │
-     │  - TCP control via FFI     │    │  navdata.rs:               │
-     │                            │    │  - NMEA/SignalK input      │
-     │  radar_provider.rs:        │    │                            │
-     │  - RadarProvider impl      │    │  web.rs:                   │
-     │  - ArpaProcessor usage     │    │  - Axum handlers           │
-     │                            │    │  - ArpaProcessor usage     │
-     │  signalk_ffi.rs:           │    │                            │
-     │  - FFI bindings            │    │  storage.rs:               │
-     │  - Notifications           │    │  - Local applicationData   │
+     │  locator.rs:               │    │  core_locator.rs:          │
+     │  - Re-exports RadarLocator │    │  - CoreLocatorAdapter      │
+     │    from mayara-core        │    │  - Wraps RadarLocator      │
      │                            │    │                            │
+     │  radar_provider.rs:        │    │  brand/:                   │
+     │  - Uses controllers from   │    │  - Can use core controllers│
+     │    mayara-core directly!   │    │    with TokioIoProvider    │
+     │  - FurunoController        │    │  - OR async wrappers       │
+     │  - NavicoController        │    │                            │
+     │  - RaymarineController     │    │  web.rs:                   │
+     │  - GarminController        │    │  - Axum handlers           │
+     │                            │    │                            │
+     │  signalk_ffi.rs:           │    │  storage.rs:               │
+     │  - FFI bindings            │    │  - Local applicationData   │
      └────────────────────────────┘    └────────────────────────────┘
                     │                               │
                     ▼                               ▼
@@ -596,10 +697,6 @@ impl RadarProvider {
      │                            │    │                            │
      │  Routes /radars/* to       │    │  /radars/*  (same API!)    │
      │  WASM RadarProvider        │    │  Static files (same GUI!)  │
-     │                            │    │                            │
-     │  Serves GUI from           │    │  GUI embedded via          │
-     │  plugin public/ dir        │    │  rust-embed                │
-     │                            │    │                            │
      └────────────────────────────┘    └────────────────────────────┘
                     │                               │
                     └───────────────┬───────────────┘
@@ -609,232 +706,32 @@ impl RadarProvider {
                      │         mayara-gui/        │
                      │     (shared web assets)    │
                      │                            │
-                     │  index.html, viewer.html   │
-                     │  control.html, api.js      │
-                     │  mayara.js, viewer.js      │
-                     │  style.css                 │
-                     │  protobuf/ (client lib)    │
-                     │  proto/RadarMessage.proto  │
-                     │                            │
-                     │  api.js auto-detects:      │
-                     │  - SignalK vs Standalone   │
                      │  Works in ANY mode!        │
+                     │  api.js auto-detects       │
                      └────────────────────────────┘
 ```
 
 ---
 
-## What Gets Shared
+## Benefits of This Architecture
 
-| Component | Location | WASM | Standalone | mayara_opencpn | Notes |
-|-----------|----------|:----:|:----------:|:--------------:|-------|
-| Protocol parsing | mayara-core/protocol/ | ✓ | ✓ | ✓ | Packet encoding/decoding |
-| Model database | mayara-core/models/ | ✓ | ✓ | ✓ | Radar specs, range tables |
-| Control definitions | mayara-core/capabilities/ | ✓ | ✓ | ✓ | v5 API control schemas |
-| RadarState types | mayara-core/state.rs | ✓ | ✓ | ✓ | State representation |
-| **IoProvider trait** | mayara-core/io.rs | ✓ | - | - | I/O abstraction |
-| **RadarLocator** | mayara-core/locator.rs | ✓ | - | - | Generic discovery |
-| **ARPA** | mayara-core/arpa/ | ✓ | ✓ | ✓ | Target tracking, CPA/TCPA |
-| **Trails** | mayara-core/trails/ | ✓ | ✓ | ✓ | Target position history |
-| **Guard zones** | mayara-core/guard_zones/ | ✓ | ✓ | ✓ | Zone alerting logic |
-| **Web GUI** | mayara-gui/ | ✓ | ✓ | - | Shared web assets |
-
----
-
-## Build System
-
-### mayara-signalk-wasm Build (build.js)
-
-```bash
-node build.js [--test] [--no-pack]
-
-Steps:
-1. (optional) Run cargo tests on mayara-core
-2. Copy GUI assets from mayara-gui/ → public/
-3. Build WASM: cargo build --target wasm32-wasip1 --release -p mayara-signalk-wasm
-4. Copy plugin.wasm to package directory
-5. (default) Create npm package: npm pack
-```
-
-### mayara-server Build
-
-```bash
-cargo build --release -p mayara-server
-
-# build.rs:
-# - Generates protobuf Rust code
-# - Copies RadarMessage.proto to web output
-# - Downloads protobuf.js for web clients
-# - Triggers rebuild if mayara-gui/ changes
-
-# rust-embed:
-# - Embeds mayara-gui/ directory at compile time
-# - Served via axum_embed::ServeEmbed<Assets>
-```
-
----
-
-## SignalK Notifications from ARPA
-
-The WASM plugin publishes collision warnings to SignalK's notification system,
-enabling chart plotters to display radar-based alerts alongside AIS warnings.
-
-### Notification Paths
-
-```
-notifications.navigation.closestApproach.radar:{radarId}:target:{targetId}
-notifications.navigation.radarGuardZone.radar:{radarId}:zone:{zoneId}
-notifications.navigation.radarTargetLost.radar:{radarId}:target:{targetId}
-```
-
-### How It Works
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          mayara-signalk-wasm                                 │
-│                                                                              │
-│   Spokes ──► ArpaProcessor (mayara-core) ──► Targets with CPA/TCPA          │
-│                    │                                                         │
-│                    ▼                                                         │
-│         ┌─────────────────────┐                                             │
-│         │  Notification Logic │                                             │
-│         │  - CPA < threshold? │                                             │
-│         │  - Guard zone hit?  │                                             │
-│         │  - Target lost?     │                                             │
-│         └─────────┬───────────┘                                             │
-│                   │                                                          │
-│                   ▼ SignalK FFI: publish_notification()                      │
-└───────────────────┼─────────────────────────────────────────────────────────┘
-                    │
-                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          SignalK Server                                      │
-│                                                                              │
-│   notifications.navigation.closestApproach.radar:furuno-1:target:3          │
-│   { "state": "warn", "message": "ARPA target 3: CPA 320m in 5m 24s" }       │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-                    │
-                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    Chart Plotters / SignalK Clients                          │
-│                                                                              │
-│   Same collision warning UI as AIS-based alerts                              │
-│   (Freeboard-SK, WilhelmSK, etc.)                                           │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Alert States
-
-| State | CPA Threshold | Description |
-|-------|---------------|-------------|
-| `normal` | > 1000m | Target tracked, no danger |
-| `alert` | < 1000m | Approaching, monitor closely |
-| `warn` | < 500m | Getting close |
-| `alarm` | < 200m | Danger, take action |
-| `emergency` | < 100m | Imminent collision |
-
----
-
-## Application Data Storage API
-
-The GUI needs to persist settings (like guard zone configurations, display preferences).
-SignalK provides this via the applicationData API. Standalone implements the same interface.
-
-### API Endpoints
-
-```
-GET  /signalk/v1/applicationData/global/{appid}/{version}/{*key}
-PUT  /signalk/v1/applicationData/global/{appid}/{version}/{*key}
-
-Examples:
-  GET  /signalk/v1/applicationData/global/mayara/1.0/guardZones
-  PUT  /signalk/v1/applicationData/global/mayara/1.0/displaySettings
-```
-
-### Storage Backend
-
-**WASM (SignalK provides storage):**
-- SignalK stores data in its own database
-- GUI calls SignalK's applicationData API
-
-**Standalone (local storage via storage.rs):**
-- Axum implements same endpoints
-- Data stored in local file (`~/.config/mayara/appdata.json`)
-
-### GUI Usage (same code works in both modes)
-
-```javascript
-// mayara-gui/api.js
-
-const STORAGE_BASE = '/signalk/v1/applicationData/global/mayara/1.0';
-
-async function loadSettings(key) {
-    const response = await fetch(`${STORAGE_BASE}/${key}`);
-    return response.json();
-}
-
-async function saveSettings(key, value) {
-    await fetch(`${STORAGE_BASE}/${key}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(value)
-    });
-}
-
-// Works identically whether talking to SignalK or Standalone
-const guardZones = await loadSettings('guardZones');
-await saveSettings('displaySettings', { colorScheme: 'night' });
-```
-
----
-
-## File Reference
-
-| Path | Purpose | WASM | Native | Status |
-|------|---------|:----:|:------:|:------:|
-| `mayara-core/src/protocol/` | Protocol parsing | ✓ | ✓ | ✅ |
-| `mayara-core/src/models/` | Model database | ✓ | ✓ | ✅ |
-| `mayara-core/src/capabilities/` | Control definitions | ✓ | ✓ | ✅ |
-| `mayara-core/src/state.rs` | State types | ✓ | ✓ | ✅ |
-| `mayara-core/src/arpa/` | ARPA target tracking | ✓ | ✓ | ✅ |
-| `mayara-core/src/trails/` | Target trail history | ✓ | ✓ | ✅ |
-| `mayara-core/src/guard_zones/` | Guard zone logic | ✓ | ✓ | ✅ |
-| `mayara-core/src/io.rs` | IoProvider trait | ✓ | - | ✅ |
-| `mayara-core/src/locator.rs` | Generic RadarLocator | ✓ | - | ✅ |
-| `mayara-gui/` | Web GUI assets | ✓ | ✓ | ✅ |
-| `mayara-signalk-wasm/src/wasm_io.rs` | WasmIoProvider | WASM | - | ✅ |
-| `mayara-signalk-wasm/src/locator.rs` | Re-exports RadarLocator | WASM | - | ✅ |
-| `mayara-signalk-wasm/src/signalk_ffi.rs` | SignalK FFI bindings | WASM | - | ✅ |
-| `mayara-signalk-wasm/src/lib.rs` | WASM entry point (v5+v6) | WASM | - | ✅ |
-| `mayara-signalk-wasm/src/radar_provider.rs` | RadarProvider impl | WASM | - | ✅ |
-| `mayara-server/src/main.rs` | Binary entry, Axum setup | - | Native | ✅ |
-| `mayara-server/src/locator.rs` | Network radar discovery | - | Native | ✅ |
-| `mayara-server/src/brand/` | Controller implementations | - | Native | ✅ |
-| `mayara-server/src/network/` | Platform-specific sockets | - | Native | ✅ |
-| `mayara-server/src/navdata.rs` | NMEA/SignalK integration | - | Native | ✅ |
-| `mayara-server/src/web.rs` | Axum handlers (v5+v6 API) | - | Native | ✅ |
-| `mayara-server/src/storage.rs` | Local applicationData | - | Native | ✅ |
+| Benefit | Description |
+|---------|-------------|
+| **Single source of truth** | All radar logic in mayara-core |
+| **Fixes apply everywhere** | Bug fixed in core → fixed in WASM and Server |
+| **No code duplication** | Same RadarLocator, same controllers, same dispatch |
+| **All 4 brands everywhere** | Furuno, Navico, Raymarine, Garmin work on WASM AND Server |
+| **Easy to add features** | Add to core, both platforms get it automatically |
+| **Testable** | Core is pure Rust, mock IoProvider for unit tests |
+| **WASM-compatible** | Core has zero tokio dependencies |
+| **Same GUI** | Works unchanged with SignalK or Standalone |
+| **Same API** | Clients don't know which backend they're talking to |
 
 ---
 
 ## Future: OpenCPN Integration (mayara_opencpn)
 
-> **Decision:** Create a standalone OpenCPN plugin (mayara_opencpn) that connects to Mayara Standalone.
-
-### Background
-
-OpenCPN users currently use [radar_pi](https://github.com/opencpn-radar-pi/radar_pi) for radar display.
-While mature (10+ years), it lacks Furuno support and modern Garmin/Raymarine models.
-
-**Decision Rationale (Option B - Standalone Plugin):**
-- Clean slate implementation with full control over UI/UX
-- No dependency on radar_pi maintainers for upstream changes
-- ARPA/trails logic already in mayara-core - no reimplementation needed
-- Leverages Mayara's proven WebSocket/protobuf protocol
-
-### Architecture
+> Create a standalone OpenCPN plugin that connects to Mayara Standalone via HTTP/WebSocket.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -843,10 +740,8 @@ While mature (10+ years), it lacks Furuno support and modern Garmin/Raymarine mo
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │                    MayaraRadarPanel                       │   │
 │  │  - PPI rendering (OpenGL/GLES with shaders)               │   │
-│  │  - Guard zones display                                    │   │
-│  │  - ARPA target display (from /targets API)                │   │
-│  │  - Trails display                                         │   │
-│  │  - EBL/VRM tools                                          │   │
+│  │  - Guard zones, ARPA targets, trails display              │   │
+│  │  - All data from mayara-server API                        │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                              │                                   │
 │  ┌──────────────────────────────────────────────────────────┐   │
@@ -867,49 +762,7 @@ While mature (10+ years), it lacks Furuno support and modern Garmin/Raymarine mo
                     (Furuno, Navico, etc.)
 ```
 
-### What mayara_opencpn Gets "For Free"
-
-Because ARPA and trails logic is in mayara-core, mayara_opencpn benefits:
-
-| Feature | Source | Notes |
-|---------|--------|-------|
-| Target detection | mayara-core/arpa/ | Contour detection, blob tracking |
-| Target tracking | mayara-core/arpa/ | Kalman filtering, prediction |
-| CPA/TCPA calculation | mayara-core/arpa/ | Collision warnings |
-| Target trails | mayara-core/trails/ | Historical position storage |
-| Guard zones | mayara-core/guard_zones/ | Zone definition + alerting logic |
-
-mayara_opencpn only needs to implement:
-- OpenGL PPI rendering (shader-based, like radar_pi)
-- wxWidgets UI integration
-- HTTP/WebSocket client
-- Protobuf parsing
-
-### Rendering Strategy
-
-**Use OpenGL/GLES with shader-based polar rendering** (same approach as radar_pi):
-
-1. **Spoke texture:** Store all spokes in a 2D texture
-2. **Fragment shader:** Rectangular → polar coordinate conversion
-3. **Efficient updates:** Only changed spoke rows updated via `glTexSubImage2D`
-
-Platform compatibility: Desktop OpenGL 2.0+, RPi5 GLESv2, RPi3/4 GLShim.
-
-### Open Questions
-
-1. **Discovery:** mDNS/Bonjour for automatic Mayara discovery, or manual configuration?
-2. **Multiple radars:** One panel per radar, or single panel with selector?
-
----
-
-## Benefits Summary
-
-| Benefit | Description |
-|---------|-------------|
-| **One API to maintain** | SignalK Radar API v5/v6 is the standard, used everywhere |
-| **One GUI to maintain** | Same HTML/JS/CSS in mayara-gui/ works in all modes |
-| **Shared locator code** | RadarLocator in mayara-core runs unchanged on WASM and (future) native |
-| **ARPA everywhere** | Collision warnings in WASM, Standalone, AND future mayara_opencpn |
-| **Tested implementation** | WASM plugin proves the API and code design works |
-| **Flexibility** | Users choose: WASM plugin OR standalone OR standalone+provider |
-| **Code quality** | Shared logic means bugs fixed once, everywhere |
+**Why this works well:**
+- ARPA logic already in mayara-core
+- No reimplementation needed in OpenCPN plugin
+- Plugin is just a thin rendering client

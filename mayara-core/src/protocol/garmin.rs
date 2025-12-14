@@ -249,7 +249,7 @@ pub fn is_report_packet(data: &[u8]) -> bool {
 /// Report packets have the format:
 /// - u32: packet type
 /// - u32: data length
-/// - [u8; len]: data (can be 1, 2, or 4 bytes typically)
+/// - \[u8; len\]: data (can be 1, 2, or 4 bytes typically)
 pub fn parse_report(data: &[u8]) -> Result<Report, ParseError> {
     if data.len() < 9 {
         return Err(ParseError::TooShort {

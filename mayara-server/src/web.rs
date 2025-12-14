@@ -85,6 +85,12 @@ struct Assets;
 #[folder = "$OUT_DIR/web/"]
 struct ProtoWebAssets;
 
+/// Rustdoc HTML documentation - served at /rustdoc/
+/// Generate with: cargo doc --no-deps -p mayara-core -p mayara-server
+#[derive(RustEmbed, Clone)]
+#[folder = "../target/doc/"]
+struct RustdocAssets;
+
 #[derive(Error, Debug)]
 pub enum WebError {
     #[error("Socket operation failed")]
@@ -144,6 +150,7 @@ impl Web {
         let serve_assets = ServeEmbed::<Assets>::new();
         let proto_web_assets = ServeEmbed::<ProtoWebAssets>::new();
         let proto_assets = ServeEmbed::<ProtoAssets>::new();
+        let rustdoc_assets = ServeEmbed::<RustdocAssets>::new();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let shutdown_tx = self.shutdown_tx.clone(); // Clone as self used in with_state() and with_graceful_shutdown() below
 
@@ -177,6 +184,7 @@ impl Web {
             // Static assets (no middleware - can be cached)
             .nest_service("/protobuf", proto_web_assets)
             .nest_service("/proto", proto_assets)
+            .nest_service("/rustdoc", rustdoc_assets)
             .fallback_service(serve_assets)
             .with_state(self)
             .into_make_service_with_connect_info::<SocketAddr>();

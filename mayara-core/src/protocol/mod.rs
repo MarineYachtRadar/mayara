@@ -1,6 +1,34 @@
-//! Radar protocol implementations
+//! Radar protocol implementations.
 //!
-//! Each module contains constants and pure parsing functions for a specific brand.
+//! This module contains wire protocol parsing and formatting for each radar brand.
+//! All functions are pure (no I/O) and suitable for WASM compilation.
+//!
+//! # Structure
+//!
+//! Each brand module provides:
+//! - **Beacon parsing** - Discovery packet parsing
+//! - **Command formatting** - Control command generation
+//! - **Response parsing** - Status response parsing
+//! - **Dispatch functions** - Control ID → wire command routing
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use mayara_core::protocol::furuno;
+//!
+//! // Parse discovery beacon
+//! let packet: &[u8] = &[/* beacon data */];
+//! if furuno::is_beacon_response(packet) {
+//!     let discovery = furuno::parse_beacon_response(packet, "172.31.6.1").unwrap();
+//!     println!("Found: {}", discovery.name);
+//! }
+//!
+//! // Format a control command
+//! use mayara_core::protocol::furuno::dispatch;
+//! if let Some(cmd) = dispatch::format_control_command("gain", 50, false) {
+//!     // Send cmd over TCP
+//! }
+//! ```
 
 #[cfg(feature = "furuno")]
 pub mod furuno;

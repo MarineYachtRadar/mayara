@@ -1,0 +1,394 @@
+//! Navico Radar UDP Controller
+//!
+//! Platform-independent controller for Navico radars (BR24, 3G, 4G, HALO) using the
+//! [`IoProvider`] trait. All communication is via UDP multicast.
+//!
+//! # Protocol
+//!
+//! Navico radars use UDP multicast for all communication:
+//! - Commands: Sent to radar's command multicast address
+//! - Reports: Received on report multicast address
+//! - Data: Received on spoke data multicast address
+//!
+//! # Models
+//!
+//! | Model | Max Range | Doppler | Features |
+//! |-------|-----------|---------|----------|
+//! | BR24 | 24 NM | No | Legacy |
+//! | 3G | 36 NM | No | Gen3 |
+//! | 4G | 48 NM | No | Gen4 |
+//! | HALO | 96 NM | Yes | Advanced |
+
+use crate::io::{IoProvider, UdpSocketHandle};
+use crate::protocol::navico;
+
+/// Navico radar model
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavicoModel {
+    BR24,
+    Gen3,
+    Gen4,
+    Halo,
+}
+
+impl Default for NavicoModel {
+    fn default() -> Self {
+        NavicoModel::Gen4
+    }
+}
+
+/// Controller state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavicoControllerState {
+    /// Not initialized
+    Disconnected,
+    /// Sockets created, waiting for reports
+    Listening,
+    /// Receiving reports, ready for commands
+    Connected,
+}
+
+/// Navico radar UDP controller
+///
+/// Manages UDP multicast communication for Navico radars.
+pub struct NavicoController {
+    /// Radar ID (for logging)
+    radar_id: String,
+    /// Radar addresses from beacon
+    command_addr: String,
+    command_port: u16,
+    report_addr: String,
+    report_port: u16,
+    /// Command socket
+    command_socket: Option<UdpSocketHandle>,
+    /// Report socket
+    report_socket: Option<UdpSocketHandle>,
+    /// Current state
+    state: NavicoControllerState,
+    /// Radar model
+    model: NavicoModel,
+    /// Poll count
+    poll_count: u64,
+    /// Last report request time
+    last_report_request: u64,
+    /// Last stay-on command time
+    last_stay_on: u64,
+}
+
+impl NavicoController {
+    /// Report request interval (poll counts, ~5 seconds at 10Hz)
+    const REPORT_REQUEST_INTERVAL: u64 = 50;
+    /// Stay-on command interval (poll counts, ~1 second)
+    const STAY_ON_INTERVAL: u64 = 10;
+
+    /// Create a new Navico controller
+    pub fn new(
+        radar_id: &str,
+        command_addr: &str,
+        command_port: u16,
+        report_addr: &str,
+        report_port: u16,
+        model: NavicoModel,
+    ) -> Self {
+        Self {
+            radar_id: radar_id.to_string(),
+            command_addr: command_addr.to_string(),
+            command_port,
+            report_addr: report_addr.to_string(),
+            report_port,
+            command_socket: None,
+            report_socket: None,
+            state: NavicoControllerState::Disconnected,
+            model,
+            poll_count: 0,
+            last_report_request: 0,
+            last_stay_on: 0,
+        }
+    }
+
+    /// Get current state
+    pub fn state(&self) -> NavicoControllerState {
+        self.state
+    }
+
+    /// Check if connected
+    pub fn is_connected(&self) -> bool {
+        self.state == NavicoControllerState::Connected
+    }
+
+    /// Get radar model
+    pub fn model(&self) -> NavicoModel {
+        self.model
+    }
+
+    /// Poll the controller
+    pub fn poll<I: IoProvider>(&mut self, io: &mut I) -> bool {
+        self.poll_count += 1;
+
+        match self.state {
+            NavicoControllerState::Disconnected => {
+                self.start_sockets(io);
+                true
+            }
+            NavicoControllerState::Listening | NavicoControllerState::Connected => {
+                self.poll_connected(io)
+            }
+        }
+    }
+
+    fn start_sockets<I: IoProvider>(&mut self, io: &mut I) {
+        // Create command socket
+        match io.udp_create() {
+            Ok(socket) => {
+                if io.udp_bind(&socket, 0).is_ok() {
+                    self.command_socket = Some(socket);
+                    io.debug(&format!(
+                        "[{}] Command socket created for {}:{}",
+                        self.radar_id, self.command_addr, self.command_port
+                    ));
+                } else {
+                    io.udp_close(socket);
+                }
+            }
+            Err(e) => {
+                io.debug(&format!("[{}] Failed to create command socket: {}", self.radar_id, e));
+            }
+        }
+
+        // Create report socket
+        match io.udp_create() {
+            Ok(socket) => {
+                if io.udp_bind(&socket, self.report_port).is_ok() {
+                    if io.udp_join_multicast(&socket, &self.report_addr, "").is_ok() {
+                        self.report_socket = Some(socket);
+                        io.debug(&format!(
+                            "[{}] Joined report multicast {}:{}",
+                            self.radar_id, self.report_addr, self.report_port
+                        ));
+                        self.state = NavicoControllerState::Listening;
+                    } else {
+                        io.debug(&format!("[{}] Failed to join report multicast", self.radar_id));
+                        io.udp_close(socket);
+                    }
+                } else {
+                    io.debug(&format!("[{}] Failed to bind report socket", self.radar_id));
+                    io.udp_close(socket);
+                }
+            }
+            Err(e) => {
+                io.debug(&format!("[{}] Failed to create report socket: {}", self.radar_id, e));
+            }
+        }
+    }
+
+    fn poll_connected<I: IoProvider>(&mut self, io: &mut I) -> bool {
+        let mut activity = false;
+
+        // Process incoming reports
+        if let Some(socket) = self.report_socket {
+            let mut buf = [0u8; 2048];
+            while let Some((len, _addr, _port)) = io.udp_recv_from(&socket, &mut buf) {
+                self.process_report(io, &buf[..len]);
+                activity = true;
+                if self.state == NavicoControllerState::Listening {
+                    self.state = NavicoControllerState::Connected;
+                }
+            }
+        }
+
+        // Send periodic report requests
+        if self.poll_count - self.last_report_request > Self::REPORT_REQUEST_INTERVAL {
+            self.send_report_requests(io);
+            self.last_report_request = self.poll_count;
+        }
+
+        // Send stay-on command
+        if self.poll_count - self.last_stay_on > Self::STAY_ON_INTERVAL {
+            self.send_stay_on(io);
+            self.last_stay_on = self.poll_count;
+        }
+
+        activity
+    }
+
+    fn process_report<I: IoProvider>(&mut self, io: &I, data: &[u8]) {
+        if data.len() < 2 {
+            return;
+        }
+
+        // Report type is in first two bytes
+        let report_type = (data[1] as u16) << 8 | data[0] as u16;
+        io.debug(&format!(
+            "[{}] Report type: 0x{:04X}, len: {}",
+            self.radar_id, report_type, data.len()
+        ));
+
+        // Parse based on report type
+        // 0x01C4 = Report 01 (Status)
+        // 0x02C4 = Report 02 (Settings)
+        // 0x03C4 = Report 03 (Model)
+        // etc.
+    }
+
+    fn send_report_requests<I: IoProvider>(&self, io: &mut I) {
+        // Request report 03 (model/firmware)
+        self.send_command(io, &navico::REQUEST_03_REPORT);
+        // Request multiple reports
+        self.send_command(io, &navico::REQUEST_MANY2_REPORT);
+    }
+
+    fn send_stay_on<I: IoProvider>(&self, io: &mut I) {
+        self.send_command(io, &navico::COMMAND_STAY_ON_A);
+    }
+
+    fn send_command<I: IoProvider>(&self, io: &mut I, data: &[u8]) {
+        if let Some(socket) = self.command_socket {
+            if let Err(e) = io.udp_send_to(&socket, data, &self.command_addr, self.command_port) {
+                io.debug(&format!("[{}] Failed to send command: {}", self.radar_id, e));
+            }
+        }
+    }
+
+    // Control methods
+
+    /// Set power state (transmit/standby)
+    pub fn set_power<I: IoProvider>(&mut self, io: &mut I, transmit: bool) {
+        let cmd = if transmit {
+            [0x00, 0xC1, 0x01]
+        } else {
+            [0x00, 0xC1, 0x00]
+        };
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set power: {}", self.radar_id, transmit));
+    }
+
+    /// Set range in decimeters
+    pub fn set_range<I: IoProvider>(&mut self, io: &mut I, range_dm: i32) {
+        let mut cmd = vec![0x03, 0xC1];
+        cmd.extend_from_slice(&range_dm.to_le_bytes());
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set range: {} dm", self.radar_id, range_dm));
+    }
+
+    /// Set gain (0-255 scale)
+    pub fn set_gain<I: IoProvider>(&mut self, io: &mut I, value: u8, auto: bool) {
+        let auto_val: u32 = if auto { 1 } else { 0 };
+        let mut cmd = vec![0x06, 0xC1, 0x00, 0x00, 0x00, 0x00];
+        cmd.extend_from_slice(&auto_val.to_le_bytes());
+        cmd.push(value);
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set gain: {} auto={}", self.radar_id, value, auto));
+    }
+
+    /// Set sea clutter (0-255 scale)
+    pub fn set_sea<I: IoProvider>(&mut self, io: &mut I, value: u8, auto: bool) {
+        // Different command for HALO vs older models
+        if self.model == NavicoModel::Halo {
+            let auto_val: u32 = if auto { 1 } else { 0 };
+            let mut cmd = vec![0x11, 0xC1];
+            cmd.extend_from_slice(&auto_val.to_le_bytes());
+            cmd.push(value);
+            self.send_command(io, &cmd);
+        } else {
+            let auto_val: u32 = if auto { 1 } else { 0 };
+            let mut cmd = vec![0x06, 0xC1, 0x02, 0x00, 0x00, 0x00];
+            cmd.extend_from_slice(&auto_val.to_le_bytes());
+            cmd.push(value);
+            self.send_command(io, &cmd);
+        }
+        io.debug(&format!("[{}] Set sea: {} auto={}", self.radar_id, value, auto));
+    }
+
+    /// Set rain clutter (0-255 scale)
+    pub fn set_rain<I: IoProvider>(&mut self, io: &mut I, value: u8) {
+        let cmd = vec![0x06, 0xC1, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, value];
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set rain: {}", self.radar_id, value));
+    }
+
+    /// Set interference rejection (0-3)
+    pub fn set_interference_rejection<I: IoProvider>(&mut self, io: &mut I, level: u8) {
+        let cmd = [0x08, 0xC1, level];
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set IR: {}", self.radar_id, level));
+    }
+
+    /// Set target expansion (0-2)
+    pub fn set_target_expansion<I: IoProvider>(&mut self, io: &mut I, level: u8) {
+        let cmd_id = if self.model == NavicoModel::Halo { 0x12 } else { 0x09 };
+        let cmd = [cmd_id, 0xC1, level];
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set target expansion: {}", self.radar_id, level));
+    }
+
+    /// Set target boost (0-2)
+    pub fn set_target_boost<I: IoProvider>(&mut self, io: &mut I, level: u8) {
+        let cmd = [0x0A, 0xC1, level];
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set target boost: {}", self.radar_id, level));
+    }
+
+    /// Set scan speed (0=normal, 1=fast)
+    pub fn set_scan_speed<I: IoProvider>(&mut self, io: &mut I, fast: bool) {
+        let cmd = [0x0F, 0xC1, if fast { 1 } else { 0 }];
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set scan speed: {}", self.radar_id, fast));
+    }
+
+    /// Set bearing alignment in deci-degrees
+    pub fn set_bearing_alignment<I: IoProvider>(&mut self, io: &mut I, deci_degrees: i16) {
+        let mut cmd = vec![0x05, 0xC1];
+        cmd.extend_from_slice(&deci_degrees.to_le_bytes());
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set bearing alignment: {}", self.radar_id, deci_degrees));
+    }
+
+    /// Set antenna height in mm
+    pub fn set_antenna_height<I: IoProvider>(&mut self, io: &mut I, height_mm: u16) {
+        let mut cmd = vec![0x30, 0xC1, 0x01, 0x00, 0x00, 0x00];
+        cmd.extend_from_slice(&height_mm.to_le_bytes());
+        cmd.extend_from_slice(&[0x00, 0x00]);
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set antenna height: {} mm", self.radar_id, height_mm));
+    }
+
+    /// Set doppler mode (HALO only, 0=off, 1=normal, 2=approaching)
+    pub fn set_doppler_mode<I: IoProvider>(&mut self, io: &mut I, mode: u8) {
+        if self.model == NavicoModel::Halo {
+            let cmd = [0x23, 0xC1, mode];
+            self.send_command(io, &cmd);
+            io.debug(&format!("[{}] Set doppler mode: {}", self.radar_id, mode));
+        }
+    }
+
+    /// Set doppler speed threshold (HALO only)
+    pub fn set_doppler_speed<I: IoProvider>(&mut self, io: &mut I, speed: u16) {
+        if self.model == NavicoModel::Halo {
+            let mut cmd = vec![0x24, 0xC1];
+            cmd.extend_from_slice(&speed.to_le_bytes());
+            self.send_command(io, &cmd);
+            io.debug(&format!("[{}] Set doppler speed: {}", self.radar_id, speed));
+        }
+    }
+
+    /// Set mode (HALO only, 0-3)
+    pub fn set_mode<I: IoProvider>(&mut self, io: &mut I, mode: u8) {
+        if self.model == NavicoModel::Halo {
+            let cmd = [0x10, 0xC1, mode];
+            self.send_command(io, &cmd);
+            io.debug(&format!("[{}] Set mode: {}", self.radar_id, mode));
+        }
+    }
+
+    /// Shutdown the controller
+    pub fn shutdown<I: IoProvider>(&mut self, io: &mut I) {
+        io.debug(&format!("[{}] Shutting down", self.radar_id));
+        if let Some(socket) = self.command_socket.take() {
+            io.udp_close(socket);
+        }
+        if let Some(socket) = self.report_socket.take() {
+            io.udp_close(socket);
+        }
+        self.state = NavicoControllerState::Disconnected;
+    }
+}

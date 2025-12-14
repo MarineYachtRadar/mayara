@@ -344,12 +344,12 @@ pub fn is_spoke_frame(data: &[u8]) -> bool {
 ///
 /// Header format (from radar.dll reverse engineering):
 /// - Byte 0: 0x02 (always)
-/// - Byte 8-9: range value (v1 = (data[8] + (data[9] & 0x01) * 256) * 4 + 4)
-/// - Byte 9: sweep_count = data[9] >> 1
-/// - Byte 10-11: sweep_len = ((data[11] & 0x07) << 8) | data[10]
-/// - Byte 11: encoding = (data[11] & 0x18) >> 3
+/// - Byte 8-9: range value (v1 = (data\[8\] + (data\[9\] & 0x01) * 256) * 4 + 4)
+/// - Byte 9: sweep_count = data\[9\] >> 1
+/// - Byte 10-11: sweep_len = ((data\[11\] & 0x07) << 8) | data\[10\]
+/// - Byte 11: encoding = (data\[11\] & 0x18) >> 3
 /// - Byte 12: range_index
-/// - Byte 15: have_heading = (data[15] & 0x30) >> 3
+/// - Byte 15: have_heading = (data\[15\] & 0x30) >> 3
 pub fn parse_spoke_header(data: &[u8]) -> Result<SpokeFrameHeader, ParseError> {
     if data.len() < 16 {
         return Err(ParseError::TooShort {
