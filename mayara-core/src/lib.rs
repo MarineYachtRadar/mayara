@@ -23,15 +23,23 @@
 //! }
 //! ```
 
+pub mod arpa;
 pub mod brand;
 pub mod capabilities;
+pub mod dual_range;
 pub mod error;
+pub mod guard_zones;
+pub mod io;
+pub mod locator;
 pub mod models;
 pub mod protocol;
 pub mod radar;
 pub mod state;
+pub mod trails;
 
 // Re-export commonly used types
 pub use brand::Brand;
 pub use error::ParseError;
+pub use io::{IoError, IoProvider, TcpSocketHandle, UdpSocketHandle};
+pub use locator::{DiscoveredRadar, RadarLocator};
 pub use state::{ControlValueState, PowerState, RadarState};

@@ -492,6 +492,390 @@ pub fn is_valid_beacon_36_subtype(subtype: u32, base_model: BaseModel) -> bool {
 }
 
 // =============================================================================
+// Quantum Frame Parsing
+// =============================================================================
+
+/// Quantum frame header (20 bytes)
+#[derive(Deserialize, Debug, Copy, Clone)]
+#[repr(C, packed)]
+pub struct QuantumFrameHeader {
+    pub frame_type: u32, // 0x00280003
+    pub seq_num: u16,
+    pub something_1: u16,       // 0x0101
+    pub scan_len: u16,          // 0x002b
+    pub num_spokes: u16,        // 0x00fa
+    pub something_3: u16,       // 0x0008
+    pub returns_per_range: u16, // number of radar returns per range from the status
+    pub azimuth: u16,
+    pub data_len: u16, // length of the rest of the data
+}
+
+pub const QUANTUM_FRAME_HEADER_SIZE: usize = std::mem::size_of::<QuantumFrameHeader>();
+
+/// Parsed Quantum frame header
+#[derive(Debug, Clone)]
+pub struct ParsedQuantumFrame {
+    pub seq_num: u16,
+    pub scan_len: u16,
+    pub num_spokes: u16,
+    pub returns_per_range: u16,
+    pub azimuth: u16,
+    pub data_len: u16,
+}
+
+/// Parse Quantum frame header
+pub fn parse_quantum_frame_header(data: &[u8]) -> Result<ParsedQuantumFrame, ParseError> {
+    if data.len() < QUANTUM_FRAME_HEADER_SIZE {
+        return Err(ParseError::TooShort {
+            expected: QUANTUM_FRAME_HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    let header: QuantumFrameHeader = bincode::deserialize(&data[..QUANTUM_FRAME_HEADER_SIZE])?;
+
+    Ok(ParsedQuantumFrame {
+        seq_num: header.seq_num,
+        scan_len: u16::from_le_bytes(header.scan_len.to_le_bytes()),
+        num_spokes: u16::from_le_bytes(header.num_spokes.to_le_bytes()),
+        returns_per_range: u16::from_le_bytes(header.returns_per_range.to_le_bytes()),
+        azimuth: u16::from_le_bytes(header.azimuth.to_le_bytes()),
+        data_len: u16::from_le_bytes(header.data_len.to_le_bytes()),
+    })
+}
+
+// =============================================================================
+// Quantum Status Report
+// =============================================================================
+
+/// Controls per mode for Quantum
+#[derive(Debug, Clone, Copy)]
+pub struct QuantumControlsPerMode {
+    pub gain_auto: bool,
+    pub gain: u8,
+    pub color_gain_auto: bool,
+    pub color_gain: u8,
+    pub sea_auto: bool,
+    pub sea: u8,
+    pub rain_enabled: bool,
+    pub rain: u8,
+}
+
+/// Parsed Quantum status report
+#[derive(Debug, Clone)]
+pub struct ParsedQuantumStatus {
+    pub status: u8,
+    pub bearing_offset: i16,
+    pub interference_rejection: u8,
+    pub range_index: u8,
+    pub mode: u8,
+    pub controls: [QuantumControlsPerMode; 4],
+    pub target_expansion: u8,
+    pub mbs_enabled: bool,
+    pub ranges: Vec<u32>,
+}
+
+/// Parse Quantum status report (0x00280002)
+pub fn parse_quantum_status(data: &[u8]) -> Result<ParsedQuantumStatus, ParseError> {
+    const MIN_SIZE: usize = 228; // Minimum size for status report with ranges
+    if data.len() < MIN_SIZE {
+        return Err(ParseError::TooShort {
+            expected: MIN_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    let status = data[4];
+    let bearing_offset = i16::from_le_bytes([data[14], data[15]]);
+    let interference_rejection = data[17];
+    let range_index = data[20];
+    let mode = data[21];
+
+    // Parse controls for 4 modes (each 8 bytes starting at offset 22)
+    let mut controls = [QuantumControlsPerMode {
+        gain_auto: false,
+        gain: 0,
+        color_gain_auto: false,
+        color_gain: 0,
+        sea_auto: false,
+        sea: 0,
+        rain_enabled: false,
+        rain: 0,
+    }; 4];
+
+    for i in 0..4 {
+        let base = 22 + i * 8;
+        controls[i] = QuantumControlsPerMode {
+            gain_auto: data[base] > 0,
+            gain: data[base + 1],
+            color_gain_auto: data[base + 2] > 0,
+            color_gain: data[base + 3],
+            sea_auto: data[base + 4] > 0,
+            sea: data[base + 5],
+            rain_enabled: data[base + 6] > 0,
+            rain: data[base + 7],
+        };
+    }
+
+    let target_expansion = data[54];
+    let mbs_enabled = data[59] > 0;
+
+    // Parse ranges (20 u32 values starting at offset 148)
+    let mut ranges = Vec::with_capacity(20);
+    for i in 0..20 {
+        let offset = 148 + i * 4;
+        if offset + 4 <= data.len() {
+            let range = u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+            ranges.push(range);
+        }
+    }
+
+    Ok(ParsedQuantumStatus {
+        status,
+        bearing_offset,
+        interference_rejection,
+        range_index,
+        mode,
+        controls,
+        target_expansion,
+        mbs_enabled,
+        ranges,
+    })
+}
+
+// =============================================================================
+// RD Frame Parsing
+// =============================================================================
+
+/// RD frame header (32 bytes)
+#[derive(Deserialize, Debug, Copy, Clone)]
+#[repr(C, packed)]
+pub struct RdFrameHeader {
+    pub field01: u32,     // 0x00010003
+    pub zero_1: u32,
+    pub fieldx_1: u32,    // 0x0000001c
+    pub nspokes: u32,     // 0x00000008 - usually but changes
+    pub spoke_count: u32, // 0x00000000 in regular, counting in HD
+    pub zero_3: u32,
+    pub fieldx_3: u32,    // 0x00000001
+    pub fieldx_4: u32,    // 0x00000000 or 0xffffffff in regular, 0x400 in HD
+}
+
+pub const RD_FRAME_HEADER_SIZE: usize = std::mem::size_of::<RdFrameHeader>();
+
+/// Parsed RD frame header
+#[derive(Debug, Clone)]
+pub struct ParsedRdFrame {
+    pub nspokes: u32,
+    pub is_hd: bool,
+}
+
+/// Parse RD frame header
+pub fn parse_rd_frame_header(data: &[u8]) -> Result<ParsedRdFrame, ParseError> {
+    if data.len() < RD_FRAME_HEADER_SIZE {
+        return Err(ParseError::TooShort {
+            expected: RD_FRAME_HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    let header: RdFrameHeader = bincode::deserialize(&data[..RD_FRAME_HEADER_SIZE])?;
+
+    // Validate frame header
+    if header.field01 != 0x00010003 || header.fieldx_1 != 0x0000001c || header.fieldx_3 != 0x00000001 {
+        return Err(ParseError::InvalidHeader {
+            expected: vec![0x03, 0x00, 0x01, 0x00],
+            actual: vec![(header.field01 & 0xFF) as u8],
+        });
+    }
+
+    let is_hd = header.fieldx_4 == 0x400;
+
+    Ok(ParsedRdFrame {
+        nspokes: header.nspokes,
+        is_hd,
+    })
+}
+
+// =============================================================================
+// RD Status Report
+// =============================================================================
+
+/// Parsed RD status report
+#[derive(Debug, Clone)]
+pub struct ParsedRdStatus {
+    pub ranges: Vec<u32>,
+    pub status: u8,
+    pub warmup_time: u8,
+    pub signal_strength: u8,
+    pub range_id: u8,
+    pub auto_gain: bool,
+    pub gain: u32,
+    pub auto_sea: u8,
+    pub sea: u8,
+    pub rain_enabled: bool,
+    pub rain: u8,
+    pub ftc_enabled: bool,
+    pub ftc: u8,
+    pub auto_tune: bool,
+    pub tune: u8,
+    pub bearing_offset: i16,
+    pub interference_rejection: u8,
+    pub target_expansion: u8,
+    pub mbs_enabled: bool,
+    pub is_hd: bool,
+}
+
+/// Parse RD status report (0x010001 or 0x018801)
+pub fn parse_rd_status(data: &[u8]) -> Result<ParsedRdStatus, ParseError> {
+    const MIN_SIZE: usize = 250; // Minimum size for RD status report
+    if data.len() < MIN_SIZE {
+        return Err(ParseError::TooShort {
+            expected: MIN_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    let field01 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    if field01 != 0x010001 && field01 != 0x018801 {
+        return Err(ParseError::InvalidHeader {
+            expected: vec![0x01, 0x00, 0x01, 0x00],
+            actual: vec![data[0], data[1], data[2], data[3]],
+        });
+    }
+
+    let is_hd = field01 == 0x018801;
+
+    // Parse ranges (11 u32 values starting at offset 4)
+    let mut ranges = Vec::with_capacity(11);
+    for i in 0..11 {
+        let offset = 4 + i * 4;
+        let range = u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+        ranges.push(range);
+    }
+
+    let status = data[180];
+    let warmup_time = data[184];
+    let signal_strength = data[185];
+    let range_id = data[193];
+    let auto_gain = data[196] > 0;
+    let gain = u32::from_le_bytes([data[200], data[201], data[202], data[203]]);
+    let auto_sea = data[204];
+    let sea = data[208];
+    let rain_enabled = data[209] > 0;
+    let rain = data[213];
+    let ftc_enabled = data[214] > 0;
+    let ftc = data[218];
+    let auto_tune = data[219] > 0;
+    let tune = data[223];
+    let bearing_offset = i16::from_le_bytes([data[224], data[225]]);
+    let interference_rejection = data[226];
+    let target_expansion = data[230];
+    let mbs_enabled = data[244] > 0;
+
+    Ok(ParsedRdStatus {
+        ranges,
+        status,
+        warmup_time,
+        signal_strength,
+        range_id,
+        auto_gain,
+        gain,
+        auto_sea,
+        sea,
+        rain_enabled,
+        rain,
+        ftc_enabled,
+        ftc,
+        auto_tune,
+        tune,
+        bearing_offset,
+        interference_rejection,
+        target_expansion,
+        mbs_enabled,
+        is_hd,
+    })
+}
+
+// =============================================================================
+// Spoke Data Decompression
+// =============================================================================
+
+/// Decompress Quantum spoke data using RLE (0x5c escape byte)
+pub fn decompress_quantum_spoke(data: &[u8], doppler_lookup: &[u8; 256], returns_per_line: usize) -> Vec<u8> {
+    let mut unpacked = Vec::with_capacity(1024);
+    let mut offset = 0;
+
+    while offset < data.len() {
+        if data[offset] != 0x5c {
+            let pixel = data[offset] as usize;
+            unpacked.push(doppler_lookup[pixel]);
+            offset += 1;
+        } else if offset + 2 < data.len() {
+            let count = data[offset + 1] as usize;
+            let pixel = data[offset + 2] as usize;
+            let value = doppler_lookup[pixel];
+            for _ in 0..count {
+                unpacked.push(value);
+            }
+            offset += 3;
+        } else {
+            break;
+        }
+    }
+
+    unpacked.truncate(returns_per_line);
+    unpacked
+}
+
+/// Decompress RD spoke data using RLE (0x5c escape byte)
+///
+/// HD mode: single byte per pixel, shift right by 1
+/// Non-HD mode: two pixels per byte (low and high nibbles)
+pub fn decompress_rd_spoke(data: &[u8], is_hd: bool, returns_per_line: usize) -> Vec<u8> {
+    let mut unpacked = Vec::with_capacity(returns_per_line);
+    let mut offset = 0;
+
+    while offset < data.len() {
+        if is_hd {
+            if data[offset] != 0x5c {
+                unpacked.push(data[offset] >> 1);
+                offset += 1;
+            } else if offset + 2 < data.len() {
+                let count = data[offset + 1] as usize;
+                let value = data[offset + 2] >> 1;
+                for _ in 0..count {
+                    unpacked.push(value);
+                }
+                offset += 3;
+            } else {
+                break;
+            }
+        } else {
+            // Non-HD: 2 pixels per byte
+            if data[offset] != 0x5c {
+                unpacked.push(data[offset] & 0x0f);
+                unpacked.push(data[offset] >> 4);
+                offset += 1;
+            } else if offset + 2 < data.len() {
+                let count = data[offset + 1] as usize;
+                let value = data[offset + 2];
+                for _ in 0..count {
+                    unpacked.push(value & 0x0f);
+                    unpacked.push(value >> 4);
+                }
+                offset += 3;
+            } else {
+                break;
+            }
+        }
+    }
+
+    unpacked.truncate(returns_per_line);
+    unpacked
+}
+
+// =============================================================================
 // MFD Beacon
 // =============================================================================
 

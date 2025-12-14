@@ -10,6 +10,10 @@ mod protobuf;
 mod radar_provider;
 mod signalk_ffi;
 mod spoke_receiver;
+mod wasm_io;
+
+// Re-export WasmIoProvider for use by locator/controller
+pub use wasm_io::WasmIoProvider;
 
 use radar_provider::RadarProvider;
 use signalk_ffi::{debug, register_radar_provider, set_status};
@@ -694,6 +698,255 @@ pub extern "C" fn radar_set_control(
     unsafe {
         if let Some(ref mut provider) = PROVIDER {
             match provider.set_control_v5(&req.radar_id, &req.control_id, &req.value) {
+                Ok(()) => write_string(r#"{"success":true}"#, out_ptr, out_max_len),
+                Err(e) => {
+                    let error = format!(r#"{{"success":false,"error":"{}"}}"#, e);
+                    write_string(&error, out_ptr, out_max_len)
+                }
+            }
+        } else {
+            write_string(r#"{"success":false,"error":"provider not initialized"}"#, out_ptr, out_max_len)
+        }
+    }
+}
+
+// =============================================================================
+// Radar Provider API v6 Exports (ARPA Targets)
+// =============================================================================
+
+/// Get all tracked ARPA targets for a radar
+/// Request: {"radarId": "..."}
+/// Response: TargetListResponse JSON or {"error": "..."}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn radar_get_targets(
+    request_ptr: *const u8,
+    request_len: usize,
+    out_ptr: *mut u8,
+    out_max_len: usize,
+) -> i32 {
+    let request_str = match parse_request(request_ptr, request_len) {
+        Ok(s) => s,
+        Err(_) => return write_string(r#"{"error":"invalid utf8"}"#, out_ptr, out_max_len),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "radarId")]
+        radar_id: String,
+    }
+
+    let req: Request = match serde_json::from_str(&request_str) {
+        Ok(r) => r,
+        Err(_) => return write_string(r#"{"error":"invalid request"}"#, out_ptr, out_max_len),
+    };
+
+    debug(&format!("radar_get_targets: {}", req.radar_id));
+
+    unsafe {
+        if let Some(ref provider) = PROVIDER {
+            if let Some(targets) = provider.get_targets(&req.radar_id) {
+                // Build TargetListResponse
+                let response = serde_json::json!({
+                    "radarId": req.radar_id,
+                    "timestamp": "2025-01-01T00:00:00Z",  // TODO: real timestamp
+                    "targets": targets
+                });
+                match serde_json::to_string(&response) {
+                    Ok(json) => write_string(&json, out_ptr, out_max_len),
+                    Err(_) => write_string(r#"{"error":"serialize failed"}"#, out_ptr, out_max_len),
+                }
+            } else {
+                // No ARPA processor for this radar yet - return empty list
+                let response = serde_json::json!({
+                    "radarId": req.radar_id,
+                    "timestamp": "2025-01-01T00:00:00Z",
+                    "targets": []
+                });
+                match serde_json::to_string(&response) {
+                    Ok(json) => write_string(&json, out_ptr, out_max_len),
+                    Err(_) => write_string(r#"{"error":"serialize failed"}"#, out_ptr, out_max_len),
+                }
+            }
+        } else {
+            write_string(r#"{"error":"provider not initialized"}"#, out_ptr, out_max_len)
+        }
+    }
+}
+
+/// Manually acquire a target
+/// Request: {"radarId": "...", "bearing": 45.0, "distance": 1000.0}
+/// Response: {"success": true, "targetId": 1} or {"success": false, "error": "..."}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn radar_acquire_target(
+    request_ptr: *const u8,
+    request_len: usize,
+    out_ptr: *mut u8,
+    out_max_len: usize,
+) -> i32 {
+    let request_str = match parse_request(request_ptr, request_len) {
+        Ok(s) => s,
+        Err(_) => return write_string(r#"{"success":false,"error":"invalid utf8"}"#, out_ptr, out_max_len),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "radarId")]
+        radar_id: String,
+        bearing: f64,
+        distance: f64,
+    }
+
+    let req: Request = match serde_json::from_str(&request_str) {
+        Ok(r) => r,
+        Err(_) => return write_string(r#"{"success":false,"error":"invalid request"}"#, out_ptr, out_max_len),
+    };
+
+    debug(&format!("radar_acquire_target: {} bearing={} distance={}", req.radar_id, req.bearing, req.distance));
+
+    unsafe {
+        if let Some(ref mut provider) = PROVIDER {
+            match provider.acquire_target(&req.radar_id, req.bearing, req.distance) {
+                Ok(target_id) => {
+                    let response = format!(r#"{{"success":true,"targetId":{}}}"#, target_id);
+                    write_string(&response, out_ptr, out_max_len)
+                }
+                Err(e) => {
+                    let error = format!(r#"{{"success":false,"error":"{}"}}"#, e);
+                    write_string(&error, out_ptr, out_max_len)
+                }
+            }
+        } else {
+            write_string(r#"{"success":false,"error":"provider not initialized"}"#, out_ptr, out_max_len)
+        }
+    }
+}
+
+/// Cancel tracking of a target
+/// Request: {"radarId": "...", "targetId": 1}
+/// Response: "true" or "false"
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn radar_cancel_target(
+    request_ptr: *const u8,
+    request_len: usize,
+    out_ptr: *mut u8,
+    out_max_len: usize,
+) -> i32 {
+    let request_str = match parse_request(request_ptr, request_len) {
+        Ok(s) => s,
+        Err(_) => return write_string("false", out_ptr, out_max_len),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "radarId")]
+        radar_id: String,
+        #[serde(rename = "targetId")]
+        target_id: u32,
+    }
+
+    let req: Request = match serde_json::from_str(&request_str) {
+        Ok(r) => r,
+        Err(_) => return write_string("false", out_ptr, out_max_len),
+    };
+
+    debug(&format!("radar_cancel_target: {} target={}", req.radar_id, req.target_id));
+
+    unsafe {
+        if let Some(ref mut provider) = PROVIDER {
+            let success = provider.cancel_target(&req.radar_id, req.target_id);
+            write_string(if success { "true" } else { "false" }, out_ptr, out_max_len)
+        } else {
+            write_string("false", out_ptr, out_max_len)
+        }
+    }
+}
+
+/// Get ARPA settings for a radar
+/// Request: {"radarId": "..."}
+/// Response: ArpaSettings JSON or {"error": "..."}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn radar_get_arpa_settings(
+    request_ptr: *const u8,
+    request_len: usize,
+    out_ptr: *mut u8,
+    out_max_len: usize,
+) -> i32 {
+    let request_str = match parse_request(request_ptr, request_len) {
+        Ok(s) => s,
+        Err(_) => return write_string(r#"{"error":"invalid utf8"}"#, out_ptr, out_max_len),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "radarId")]
+        radar_id: String,
+    }
+
+    let req: Request = match serde_json::from_str(&request_str) {
+        Ok(r) => r,
+        Err(_) => return write_string(r#"{"error":"invalid request"}"#, out_ptr, out_max_len),
+    };
+
+    debug(&format!("radar_get_arpa_settings: {}", req.radar_id));
+
+    unsafe {
+        if let Some(ref provider) = PROVIDER {
+            if let Some(settings) = provider.get_arpa_settings(&req.radar_id) {
+                match serde_json::to_string(&settings) {
+                    Ok(json) => write_string(&json, out_ptr, out_max_len),
+                    Err(_) => write_string(r#"{"error":"serialize failed"}"#, out_ptr, out_max_len),
+                }
+            } else {
+                // Return default settings if no processor exists
+                let defaults = mayara_core::arpa::ArpaSettings::default();
+                match serde_json::to_string(&defaults) {
+                    Ok(json) => write_string(&json, out_ptr, out_max_len),
+                    Err(_) => write_string(r#"{"error":"serialize failed"}"#, out_ptr, out_max_len),
+                }
+            }
+        } else {
+            write_string(r#"{"error":"provider not initialized"}"#, out_ptr, out_max_len)
+        }
+    }
+}
+
+/// Update ARPA settings for a radar
+/// Request: {"radarId": "...", "settings": {...}}
+/// Response: {"success": true} or {"success": false, "error": "..."}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn radar_set_arpa_settings(
+    request_ptr: *const u8,
+    request_len: usize,
+    out_ptr: *mut u8,
+    out_max_len: usize,
+) -> i32 {
+    let request_str = match parse_request(request_ptr, request_len) {
+        Ok(s) => s,
+        Err(_) => return write_string(r#"{"success":false,"error":"invalid utf8"}"#, out_ptr, out_max_len),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "radarId")]
+        radar_id: String,
+        settings: mayara_core::arpa::ArpaSettings,
+    }
+
+    let req: Request = match serde_json::from_str(&request_str) {
+        Ok(r) => r,
+        Err(_) => return write_string(r#"{"success":false,"error":"invalid request"}"#, out_ptr, out_max_len),
+    };
+
+    debug(&format!("radar_set_arpa_settings: {}", req.radar_id));
+
+    unsafe {
+        if let Some(ref mut provider) = PROVIDER {
+            match provider.set_arpa_settings(&req.radar_id, req.settings) {
                 Ok(()) => write_string(r#"{"success":true}"#, out_ptr, out_max_len),
                 Err(e) => {
                     let error = format!(r#"{{"success":false,"error":"{}"}}"#, e);

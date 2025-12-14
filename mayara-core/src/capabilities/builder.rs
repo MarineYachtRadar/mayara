@@ -8,14 +8,21 @@ use crate::radar::RadarDiscovery;
 use super::controls::*;
 use super::{
     CapabilityManifest, Characteristics, ConstraintCondition, ConstraintEffect, ConstraintType,
-    ControlConstraint, ControlDefinition,
+    ControlConstraint, ControlDefinition, SupportedFeature,
 };
 
 /// Build a capability manifest for a discovered radar
 ///
 /// Uses the model database to look up capabilities, falling back to
 /// a generic configuration for unknown models.
-pub fn build_capabilities(discovery: &RadarDiscovery, radar_id: &str) -> CapabilityManifest {
+///
+/// The `supported_features` parameter declares which optional API features
+/// the provider implements (e.g., ARPA, guard zones, trails).
+pub fn build_capabilities(
+    discovery: &RadarDiscovery,
+    radar_id: &str,
+    supported_features: Vec<SupportedFeature>,
+) -> CapabilityManifest {
     // Try to find model in database
     let model_info = discovery
         .model
@@ -45,13 +52,21 @@ pub fn build_capabilities(discovery: &RadarDiscovery, radar_id: &str) -> Capabil
 
         controls: build_controls(model_info, discovery.serial_number.is_some()),
         constraints: build_constraints(model_info),
+        supported_features,
     }
 }
 
 /// Build a capability manifest directly from model info
 ///
 /// Useful when you don't have a RadarDiscovery but know the model.
-pub fn build_capabilities_from_model(model_info: &ModelInfo, radar_id: &str) -> CapabilityManifest {
+///
+/// The `supported_features` parameter declares which optional API features
+/// the provider implements (e.g., ARPA, guard zones, trails).
+pub fn build_capabilities_from_model(
+    model_info: &ModelInfo,
+    radar_id: &str,
+    supported_features: Vec<SupportedFeature>,
+) -> CapabilityManifest {
     CapabilityManifest {
         id: radar_id.to_string(),
         make: model_info.brand.as_str().to_string(),
@@ -74,6 +89,44 @@ pub fn build_capabilities_from_model(model_info: &ModelInfo, radar_id: &str) -> 
 
         controls: build_controls(model_info, false), // No serial number available
         constraints: build_constraints(model_info),
+        supported_features,
+    }
+}
+
+/// Build a capability manifest directly from model info with custom spokes configuration
+///
+/// Useful when you don't have a RadarDiscovery but know the model and have
+/// runtime information about spoke characteristics.
+pub fn build_capabilities_from_model_with_spokes(
+    model_info: &ModelInfo,
+    radar_id: &str,
+    supported_features: Vec<SupportedFeature>,
+    spokes_per_revolution: u16,
+    max_spoke_length: u16,
+) -> CapabilityManifest {
+    CapabilityManifest {
+        id: radar_id.to_string(),
+        make: model_info.brand.as_str().to_string(),
+        model: model_info.model.to_string(),
+        model_family: Some(model_info.family.to_string()),
+        serial_number: None,
+        firmware_version: None,
+
+        characteristics: Characteristics {
+            max_range: model_info.max_range,
+            min_range: model_info.min_range,
+            supported_ranges: model_info.range_table.to_vec(),
+            spokes_per_revolution,
+            max_spoke_length,
+            has_doppler: model_info.has_doppler,
+            has_dual_range: model_info.has_dual_range,
+            max_dual_range: model_info.max_dual_range,
+            no_transmit_zone_count: model_info.no_transmit_zone_count,
+        },
+
+        controls: build_controls(model_info, false),
+        constraints: build_constraints(model_info),
+        supported_features,
     }
 }
 
@@ -191,7 +244,7 @@ mod tests {
             serial_number: Some("12345".into()),
         };
 
-        let caps = build_capabilities(&discovery, "1");
+        let caps = build_capabilities(&discovery, "1", vec![]);
 
         assert_eq!(caps.id, "1");
         assert_eq!(caps.make, "Furuno");
@@ -199,5 +252,32 @@ mod tests {
         assert!(caps.characteristics.has_doppler);
         assert!(caps.characteristics.has_dual_range);
         assert!(caps.controls.len() >= 5); // At least base controls
+        assert!(caps.supported_features.is_empty());
+    }
+
+    #[test]
+    fn test_build_capabilities_with_features() {
+        let discovery = RadarDiscovery {
+            brand: Brand::Furuno,
+            model: Some("DRS4D-NXT".into()),
+            name: "Test Radar".into(),
+            address: "192.168.1.100:10010".into(),
+            data_port: 10024,
+            command_port: 10025,
+            spokes_per_revolution: 2048,
+            max_spoke_len: 512,
+            pixel_values: 64,
+            serial_number: None,
+        };
+
+        let caps = build_capabilities(
+            &discovery,
+            "1",
+            vec![SupportedFeature::Arpa, SupportedFeature::GuardZones],
+        );
+
+        assert_eq!(caps.supported_features.len(), 2);
+        assert!(caps.supported_features.contains(&SupportedFeature::Arpa));
+        assert!(caps.supported_features.contains(&SupportedFeature::GuardZones));
     }
 }

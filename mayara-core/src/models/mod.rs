@@ -104,6 +104,20 @@ pub fn infer_model(brand: Brand, spokes: u16, max_spoke_len: u16) -> Option<&'st
     })
 }
 
+/// Get all unique range values supported by any model of a given brand.
+/// This is useful for range detection when the specific model is not yet known.
+/// Returns a sorted, deduplicated list of ranges in meters.
+pub fn get_all_ranges_for_brand(brand: Brand) -> Vec<u32> {
+    let models = get_models_for_brand(brand);
+    let mut ranges: Vec<u32> = models
+        .iter()
+        .flat_map(|m| m.range_table.iter().copied())
+        .collect();
+    ranges.sort();
+    ranges.dedup();
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

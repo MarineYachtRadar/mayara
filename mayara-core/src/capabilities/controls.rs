@@ -7,7 +7,9 @@ use std::collections::HashMap;
 
 use super::{
     ControlCategory, ControlDefinition, ControlType, EnumValue, PropertyDefinition, RangeSpec,
+    WireProtocolHint,
 };
+use crate::Brand;
 
 // =============================================================================
 // Base Controls (Required - All Radars)
@@ -49,6 +51,7 @@ pub fn control_power() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some("standby".into()),
+        wire_hints: None,
     }
 }
 
@@ -75,6 +78,7 @@ pub fn control_range(supported_ranges: &[u32]) -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: None,
+        wire_hints: None,
     }
 }
 
@@ -131,6 +135,7 @@ pub fn control_gain() -> ControlDefinition {
         default_mode: Some("auto".into()),
         read_only: false,
         default: Some(serde_json::json!({"mode": "auto", "value": 50})),
+        wire_hints: None,
     }
 }
 
@@ -187,6 +192,7 @@ pub fn control_sea() -> ControlDefinition {
         default_mode: Some("auto".into()),
         read_only: false,
         default: Some(serde_json::json!({"mode": "auto", "value": 30})),
+        wire_hints: None,
     }
 }
 
@@ -243,6 +249,7 @@ pub fn control_rain() -> ControlDefinition {
         default_mode: Some("manual".into()),
         read_only: false,
         default: Some(serde_json::json!({"mode": "manual", "value": 0})),
+        wire_hints: None,
     }
 }
 
@@ -265,6 +272,7 @@ pub fn control_serial_number() -> ControlDefinition {
         default_mode: None,
         read_only: true,
         default: None,
+        wire_hints: None,
     }
 }
 
@@ -283,6 +291,7 @@ pub fn control_firmware_version() -> ControlDefinition {
         default_mode: None,
         read_only: true,
         default: None,
+        wire_hints: None,
     }
 }
 
@@ -306,6 +315,7 @@ pub fn control_operating_hours() -> ControlDefinition {
         default_mode: None,
         read_only: true,
         default: None,
+        wire_hints: None,
     }
 }
 
@@ -352,6 +362,7 @@ pub fn control_beam_sharpening() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(2.into()),
+        wire_hints: None,
     }
 }
 
@@ -417,6 +428,7 @@ pub fn control_doppler_mode() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(serde_json::json!({"enabled": true, "mode": "approaching"})),
+        wire_hints: None,
     }
 }
 
@@ -456,6 +468,7 @@ pub fn control_bird_mode() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(0.into()),
+        wire_hints: None,
     }
 }
 
@@ -495,6 +508,7 @@ pub fn control_tx_channel() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(0.into()),
+        wire_hints: None,
     }
 }
 
@@ -534,6 +548,7 @@ pub fn control_interference_rejection() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(1.into()),
+        wire_hints: None,
     }
 }
 
@@ -552,6 +567,7 @@ pub fn control_interference_rejection_furuno() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(false.into()),
+        wire_hints: None,
     }
 }
 
@@ -596,6 +612,7 @@ pub fn control_preset_mode() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some("harbor".into()),
+        wire_hints: None,
     }
 }
 
@@ -635,6 +652,7 @@ pub fn control_target_separation() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(1.into()),
+        wire_hints: None,
     }
 }
 
@@ -658,6 +676,7 @@ pub fn control_bearing_alignment() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(0.0.into()),
+        wire_hints: None,
     }
 }
 
@@ -683,6 +702,7 @@ pub fn control_antenna_height() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(5.into()),
+        wire_hints: None,
     }
 }
 
@@ -713,6 +733,7 @@ pub fn control_no_transmit_zones(zone_count: u8) -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: None,
+        wire_hints: None,
     }
 }
 
@@ -742,6 +763,7 @@ pub fn control_scan_speed() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some("normal".into()),
+        wire_hints: None,
     }
 }
 
@@ -773,6 +795,7 @@ pub fn control_scan_speed_furuno() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(2.into()),
+        wire_hints: None,
     }
 }
 
@@ -791,6 +814,7 @@ pub fn control_auto_acquire() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(false.into()),
+        wire_hints: None,
     }
 }
 
@@ -811,6 +835,7 @@ pub fn control_noise_reduction() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(false.into()),
+        wire_hints: None,
     }
 }
 
@@ -837,6 +862,7 @@ pub fn control_main_bang_suppression() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(50.into()),
+        wire_hints: None,
     }
 }
 
@@ -874,6 +900,7 @@ pub fn control_target_expansion() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(0.into()),
+        wire_hints: None,
     }
 }
 
@@ -910,6 +937,7 @@ pub fn control_target_boost() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(0.into()),
+        wire_hints: None,
     }
 }
 
@@ -946,6 +974,7 @@ pub fn control_sea_state() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(0.into()),
+        wire_hints: None,
     }
 }
 
@@ -1004,6 +1033,7 @@ pub fn control_sidelobe_suppression() -> ControlDefinition {
         default_mode: Some("auto".into()),
         read_only: false,
         default: Some(serde_json::json!({"mode": "auto", "value": 50})),
+        wire_hints: None,
     }
 }
 
@@ -1045,6 +1075,7 @@ pub fn control_noise_rejection() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(0.into()),
+        wire_hints: None,
     }
 }
 
@@ -1076,6 +1107,7 @@ pub fn control_crosstalk_rejection() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(0.into()),
+        wire_hints: None,
     }
 }
 
@@ -1124,6 +1156,7 @@ pub fn control_ftc() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(serde_json::json!({"enabled": false, "value": 0})),
+        wire_hints: None,
     }
 }
 
@@ -1182,6 +1215,7 @@ pub fn control_tune() -> ControlDefinition {
         default_mode: Some("auto".into()),
         read_only: false,
         default: Some(serde_json::json!({"mode": "auto", "value": 50})),
+        wire_hints: None,
     }
 }
 
@@ -1240,6 +1274,7 @@ pub fn control_color_gain() -> ControlDefinition {
         default_mode: Some("auto".into()),
         read_only: false,
         default: Some(serde_json::json!({"mode": "auto", "value": 50})),
+        wire_hints: None,
     }
 }
 
@@ -1281,6 +1316,7 @@ pub fn control_accent_light() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(0.into()),
+        wire_hints: None,
     }
 }
 
@@ -1307,6 +1343,7 @@ pub fn control_doppler_speed() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(5.0.into()),
+        wire_hints: None,
     }
 }
 
@@ -1348,6 +1385,7 @@ pub fn control_local_interference_rejection() -> ControlDefinition {
         default_mode: None,
         read_only: false,
         default: Some(0.into()),
+        wire_hints: None,
     }
 }
 
@@ -1403,4 +1441,209 @@ pub fn get_extended_control_with_zones(id: &str, zone_count: u8) -> Option<Contr
     } else {
         get_extended_control(id)
     }
+}
+
+// =============================================================================
+// Brand-Aware Factory Functions
+// =============================================================================
+//
+// These functions return ControlDefinitions with WireProtocolHint populated
+// based on brand-specific wire encoding requirements.
+
+/// Gain control with brand-specific wire hints
+pub fn control_gain_for_brand(brand: Brand) -> ControlDefinition {
+    let mut def = control_gain();
+    def.wire_hints = Some(match brand {
+        Brand::Raymarine => WireProtocolHint {
+            scale_factor: Some(100.0),
+            has_auto: true,
+            ..Default::default()
+        },
+        Brand::Furuno | Brand::Navico | Brand::Garmin => WireProtocolHint {
+            scale_factor: Some(255.0),
+            has_auto: true,
+            ..Default::default()
+        },
+    });
+    def
+}
+
+/// Sea clutter control with brand-specific wire hints
+pub fn control_sea_for_brand(brand: Brand) -> ControlDefinition {
+    let mut def = control_sea();
+    def.wire_hints = Some(match brand {
+        Brand::Furuno | Brand::Navico | Brand::Raymarine | Brand::Garmin => WireProtocolHint {
+            scale_factor: Some(255.0),
+            has_auto: true,
+            ..Default::default()
+        },
+    });
+    def
+}
+
+/// Rain clutter control with brand-specific wire hints
+pub fn control_rain_for_brand(brand: Brand) -> ControlDefinition {
+    let mut def = control_rain();
+    def.wire_hints = Some(match brand {
+        Brand::Furuno | Brand::Navico | Brand::Raymarine | Brand::Garmin => WireProtocolHint {
+            scale_factor: Some(255.0),
+            ..Default::default()
+        },
+    });
+    def
+}
+
+/// Bearing alignment control with brand-specific wire hints
+pub fn control_bearing_alignment_for_brand(brand: Brand) -> ControlDefinition {
+    let mut def = control_bearing_alignment();
+    def.wire_hints = Some(match brand {
+        Brand::Furuno => WireProtocolHint {
+            // Furuno: no-transmit zones use -1.0 offset, bearing alignment unknown
+            ..Default::default()
+        },
+        Brand::Navico | Brand::Raymarine => WireProtocolHint {
+            scale_factor: Some(1800.0), // 0.1 degree precision
+            offset: Some(-1.0),
+            step: Some(0.1),
+            ..Default::default()
+        },
+        Brand::Garmin => WireProtocolHint {
+            ..Default::default()
+        },
+    });
+    def
+}
+
+/// Antenna height control with brand-specific wire hints
+pub fn control_antenna_height_for_brand(brand: Brand) -> ControlDefinition {
+    let mut def = control_antenna_height();
+    def.wire_hints = Some(match brand {
+        Brand::Navico => WireProtocolHint {
+            scale_factor: Some(99000.0), // cm to mm conversion
+            ..Default::default()
+        },
+        Brand::Furuno | Brand::Raymarine | Brand::Garmin => WireProtocolHint {
+            ..Default::default()
+        },
+    });
+    def
+}
+
+/// Sidelobe suppression control with brand-specific wire hints
+pub fn control_sidelobe_suppression_for_brand(brand: Brand) -> ControlDefinition {
+    let mut def = control_sidelobe_suppression();
+    def.wire_hints = Some(match brand {
+        Brand::Navico => WireProtocolHint {
+            scale_factor: Some(255.0),
+            has_auto: true,
+            ..Default::default()
+        },
+        Brand::Furuno | Brand::Raymarine | Brand::Garmin => WireProtocolHint {
+            ..Default::default()
+        },
+    });
+    def
+}
+
+/// Tune control with brand-specific wire hints
+pub fn control_tune_for_brand(brand: Brand) -> ControlDefinition {
+    let mut def = control_tune();
+    def.wire_hints = Some(match brand {
+        Brand::Raymarine => WireProtocolHint {
+            scale_factor: Some(255.0),
+            has_auto: true,
+            ..Default::default()
+        },
+        Brand::Furuno | Brand::Navico | Brand::Garmin => WireProtocolHint {
+            ..Default::default()
+        },
+    });
+    def
+}
+
+/// Color gain control with brand-specific wire hints
+pub fn control_color_gain_for_brand(brand: Brand) -> ControlDefinition {
+    let mut def = control_color_gain();
+    def.wire_hints = Some(match brand {
+        Brand::Raymarine => WireProtocolHint {
+            scale_factor: Some(100.0),
+            has_auto: true,
+            ..Default::default()
+        },
+        Brand::Furuno | Brand::Navico | Brand::Garmin => WireProtocolHint {
+            ..Default::default()
+        },
+    });
+    def
+}
+
+/// FTC control with brand-specific wire hints
+pub fn control_ftc_for_brand(brand: Brand) -> ControlDefinition {
+    let mut def = control_ftc();
+    def.wire_hints = Some(match brand {
+        Brand::Raymarine => WireProtocolHint {
+            scale_factor: Some(100.0),
+            has_enabled: true,
+            ..Default::default()
+        },
+        Brand::Garmin => WireProtocolHint {
+            has_enabled: true,
+            ..Default::default()
+        },
+        Brand::Furuno | Brand::Navico => WireProtocolHint {
+            ..Default::default()
+        },
+    });
+    def
+}
+
+/// Doppler speed control with brand-specific wire hints
+pub fn control_doppler_speed_for_brand(brand: Brand) -> ControlDefinition {
+    let mut def = control_doppler_speed();
+    def.wire_hints = Some(match brand {
+        Brand::Navico => WireProtocolHint {
+            scale_factor: Some(99.0 * 16.0), // cm/s units
+            step: Some(0.5),
+            ..Default::default()
+        },
+        Brand::Furuno | Brand::Raymarine | Brand::Garmin => WireProtocolHint {
+            ..Default::default()
+        },
+    });
+    def
+}
+
+/// Get base control with brand-specific wire hints
+pub fn get_base_control_for_brand(id: &str, brand: Brand) -> Option<ControlDefinition> {
+    match id {
+        "power" => Some(control_power()),
+        "gain" => Some(control_gain_for_brand(brand)),
+        "sea" => Some(control_sea_for_brand(brand)),
+        "rain" => Some(control_rain_for_brand(brand)),
+        "serialNumber" => Some(control_serial_number()),
+        "firmwareVersion" => Some(control_firmware_version()),
+        "operatingHours" => Some(control_operating_hours()),
+        _ => None,
+    }
+}
+
+/// Get extended control with brand-specific wire hints
+pub fn get_extended_control_for_brand(id: &str, brand: Brand) -> Option<ControlDefinition> {
+    match id {
+        // Controls with brand-specific wire hints
+        "bearingAlignment" => Some(control_bearing_alignment_for_brand(brand)),
+        "antennaHeight" => Some(control_antenna_height_for_brand(brand)),
+        "sidelobeSuppression" => Some(control_sidelobe_suppression_for_brand(brand)),
+        "tune" => Some(control_tune_for_brand(brand)),
+        "colorGain" => Some(control_color_gain_for_brand(brand)),
+        "ftc" => Some(control_ftc_for_brand(brand)),
+        "dopplerSpeed" => Some(control_doppler_speed_for_brand(brand)),
+        // Controls without brand-specific hints (use generic)
+        _ => get_extended_control(id),
+    }
+}
+
+/// Get any control (base or extended) with brand-specific wire hints
+pub fn get_control_for_brand(id: &str, brand: Brand) -> Option<ControlDefinition> {
+    get_base_control_for_brand(id, brand).or_else(|| get_extended_control_for_brand(id, brand))
 }

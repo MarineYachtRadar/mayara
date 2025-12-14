@@ -10,6 +10,26 @@ use std::collections::HashMap;
 pub mod builder;
 pub mod controls;
 
+/// Optional features a radar provider may implement.
+///
+/// These indicate what API features are available (provider capabilities),
+/// NOT hardware capabilities (those are in `Characteristics`).
+///
+/// Example: A radar may have Doppler hardware (`characteristics.has_doppler = true`)
+/// but the provider might not implement the trails API endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SupportedFeature {
+    /// ARPA target tracking (GET/POST/DELETE /targets, WS /targets)
+    Arpa,
+    /// Guard zone alerting (GET/PUT /guardZones)
+    GuardZones,
+    /// Target history/trail data (GET /trails)
+    Trails,
+    /// Dual-range simultaneous display
+    DualRange,
+}
+
 /// Capability manifest returned by GET /radars/{id}/capabilities
 ///
 /// This is the complete schema for a radar, including hardware characteristics
@@ -47,6 +67,16 @@ pub struct CapabilityManifest {
     /// Control dependencies and constraints
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<ControlConstraint>,
+
+    /// Optional features this provider implements
+    ///
+    /// Indicates which optional API features are available:
+    /// - `arpa`: ARPA target tracking (GET /targets, POST /targets, etc.)
+    /// - `guardZones`: Guard zone alerting (GET /guardZones, etc.)
+    /// - `trails`: Target trails/history (GET /trails)
+    /// - `dualRange`: Dual-range simultaneous display
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_features: Vec<SupportedFeature>,
 }
 
 /// Hardware characteristics of the radar
@@ -136,6 +166,10 @@ pub struct ControlDefinition {
     /// Default value
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
+
+    /// Wire protocol hints for server implementation (not serialized to API)
+    #[serde(skip)]
+    pub wire_hints: Option<WireProtocolHint>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -287,6 +321,49 @@ pub struct ConstraintEffect {
     /// Human-readable reason for the constraint
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Wire protocol hints for server implementation
+///
+/// This is NOT part of the SignalK API - it's internal metadata used by
+/// mayara-server to correctly encode/decode control values for the wire protocol.
+/// Each radar brand may use different wire encodings for the same control.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireProtocolHint {
+    /// Scale factor: wire_value * (max / scale_factor) = user_value
+    /// e.g., 255.0 for 8-bit values, 100.0 for percentage, 1800.0 for 0.1° precision
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale_factor: Option<f32>,
+
+    /// Offset applied before scaling (for signed values like bearing alignment)
+    /// e.g., -1.0 maps values > max to negative range
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<f32>,
+
+    /// Step for rounding (0.1 for bearings, 1.0 for most controls)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<f32>,
+
+    /// Whether this control supports auto mode
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_auto: bool,
+
+    /// Whether auto mode value can be adjusted (e.g., HALO sea clutter)
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_auto_adjustable: bool,
+
+    /// Min adjustment for auto mode (e.g., -50)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_adjust_min: Option<f32>,
+
+    /// Max adjustment for auto mode (e.g., +50)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_adjust_max: Option<f32>,
+
+    /// Whether this control has an enabled/disabled toggle
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_enabled: bool,
 }
 
 /// Radar state returned by GET /radars/{id}/state

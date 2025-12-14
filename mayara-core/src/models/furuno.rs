@@ -114,7 +114,7 @@ pub static MODELS: &[ModelInfo] = &[
         max_range: 88896,  // 48 NM
         min_range: 116,    // 1/16 NM
         range_table: RANGE_TABLE_NXT,
-        spokes_per_revolution: 2048,
+        spokes_per_revolution: 8192,
         max_spoke_length: 1024,  // Actual spokes can be up to ~900 samples
         has_doppler: true,
         has_dual_range: true,
@@ -130,7 +130,7 @@ pub static MODELS: &[ModelInfo] = &[
         max_range: 88896,
         min_range: 116,
         range_table: RANGE_TABLE_NXT,
-        spokes_per_revolution: 2048,
+        spokes_per_revolution: 8192,
         max_spoke_length: 1024,  // Actual spokes can be up to ~900 samples
         has_doppler: true,
         has_dual_range: true,
@@ -146,7 +146,7 @@ pub static MODELS: &[ModelInfo] = &[
         max_range: 133344,  // 72 NM
         min_range: 116,
         range_table: RANGE_TABLE_NXT,
-        spokes_per_revolution: 2048,
+        spokes_per_revolution: 8192,
         max_spoke_length: 1024,  // Actual spokes can be up to ~900 samples
         has_doppler: true,
         has_dual_range: true,
@@ -162,7 +162,7 @@ pub static MODELS: &[ModelInfo] = &[
         max_range: 177792,  // 96 NM
         min_range: 116,
         range_table: RANGE_TABLE_NXT,
-        spokes_per_revolution: 2048,
+        spokes_per_revolution: 8192,
         max_spoke_length: 1024,  // Actual spokes can be up to ~900 samples
         has_doppler: true,
         has_dual_range: true,
@@ -180,7 +180,7 @@ pub static MODELS: &[ModelInfo] = &[
         max_range: 66672,  // 36 NM
         min_range: 116,
         range_table: RANGE_TABLE_DRS,
-        spokes_per_revolution: 2048,
+        spokes_per_revolution: 8192,
         max_spoke_length: 512,
         has_doppler: false,
         has_dual_range: false,
@@ -196,7 +196,7 @@ pub static MODELS: &[ModelInfo] = &[
         max_range: 44448,  // 24 NM
         min_range: 116,
         range_table: RANGE_TABLE_DRS,
-        spokes_per_revolution: 2048,
+        spokes_per_revolution: 8192,
         max_spoke_length: 512,
         has_doppler: false,
         has_dual_range: false,
@@ -212,7 +212,7 @@ pub static MODELS: &[ModelInfo] = &[
         max_range: 66672,
         min_range: 116,
         range_table: RANGE_TABLE_DRS,
-        spokes_per_revolution: 2048,
+        spokes_per_revolution: 8192,
         max_spoke_length: 512,
         has_doppler: false,
         has_dual_range: false,
@@ -228,7 +228,7 @@ pub static MODELS: &[ModelInfo] = &[
         max_range: 133344,
         min_range: 116,
         range_table: RANGE_TABLE_DRS,
-        spokes_per_revolution: 2048,
+        spokes_per_revolution: 8192,
         max_spoke_length: 512,
         has_doppler: false,
         has_dual_range: false,
@@ -244,7 +244,7 @@ pub static MODELS: &[ModelInfo] = &[
         max_range: 177792,
         min_range: 116,
         range_table: RANGE_TABLE_DRS,
-        spokes_per_revolution: 2048,
+        spokes_per_revolution: 8192,
         max_spoke_length: 512,
         has_doppler: false,
         has_dual_range: false,
@@ -262,7 +262,7 @@ pub static MODELS: &[ModelInfo] = &[
         max_range: 120000,
         min_range: 125,
         range_table: RANGE_TABLE_FAR,
-        spokes_per_revolution: 2048,
+        spokes_per_revolution: 8192,
         max_spoke_length: 1024,
         has_doppler: false,
         has_dual_range: false,
@@ -278,7 +278,7 @@ pub static MODELS: &[ModelInfo] = &[
         max_range: 120000,
         min_range: 125,
         range_table: RANGE_TABLE_FAR,
-        spokes_per_revolution: 2048,
+        spokes_per_revolution: 8192,
         max_spoke_length: 1024,
         has_doppler: false,
         has_dual_range: false,

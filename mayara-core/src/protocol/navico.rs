@@ -578,6 +578,7 @@ pub struct ParsedBeacon {
     pub serial_no: String,
     pub radar_addr: String,
     pub is_dual_range: bool,
+    pub is_br24: bool,  // True for BR24/old 3G beacons (different spoke format)
     pub radars: Vec<ParsedRadarEndpoints>,
 }
 
@@ -622,6 +623,45 @@ pub struct ParsedModelInfo {
     pub operating_hours: u32,
     pub firmware_date: String,
     pub firmware_time: String,
+}
+
+/// Parsed Report 04 (installation settings)
+#[derive(Debug, Clone)]
+pub struct ParsedInstallation {
+    pub bearing_alignment: i16,
+    pub antenna_height: u16,
+    pub accent_light: u8,
+}
+
+/// Parsed sector blanking entry
+#[derive(Debug, Clone)]
+pub struct ParsedSectorBlanking {
+    pub enabled: bool,
+    pub start_angle: i16,
+    pub end_angle: i16,
+}
+
+/// Parsed Report 06 (blanking/name settings)
+#[derive(Debug, Clone)]
+pub struct ParsedBlanking {
+    pub name: Option<String>,
+    pub sectors: Vec<ParsedSectorBlanking>,
+}
+
+/// Parsed Report 08 (advanced settings)
+#[derive(Debug, Clone)]
+pub struct ParsedAdvancedSettings {
+    pub sea_state: u8,
+    pub local_interference_rejection: u8,
+    pub scan_speed: u8,
+    pub sidelobe_suppression_auto: bool,
+    pub sidelobe_suppression: u8,
+    pub noise_rejection: u8,
+    pub target_separation: u8,
+    pub sea_clutter: u8,
+    pub auto_sea_clutter: i8,
+    pub doppler_state: Option<u8>,
+    pub doppler_speed: Option<u16>,
 }
 
 // =============================================================================
@@ -780,6 +820,7 @@ pub fn parse_beacon_endpoints(data: &[u8]) -> Result<ParsedBeacon, ParseError> {
             serial_no,
             radar_addr: beacon.header.radar_addr.as_string(),
             is_dual_range: true,
+            is_br24: false,
             radars: vec![
                 ParsedRadarEndpoints {
                     suffix: Some("A".into()),
@@ -804,6 +845,7 @@ pub fn parse_beacon_endpoints(data: &[u8]) -> Result<ParsedBeacon, ParseError> {
             serial_no,
             radar_addr: beacon.header.radar_addr.as_string(),
             is_dual_range: false,
+            is_br24: false,
             radars: vec![
                 ParsedRadarEndpoints {
                     suffix: None,
@@ -822,6 +864,7 @@ pub fn parse_beacon_endpoints(data: &[u8]) -> Result<ParsedBeacon, ParseError> {
             serial_no,
             radar_addr: beacon.radar_addr.as_string(),
             is_dual_range: false,
+            is_br24: true,
             radars: vec![
                 ParsedRadarEndpoints {
                     suffix: None,
@@ -921,6 +964,135 @@ pub fn parse_report_03(data: &[u8]) -> Result<ParsedModelInfo, ParseError> {
         operating_hours: u32::from_le_bytes(report.hours),
         firmware_date,
         firmware_time,
+    })
+}
+
+/// Parse Report 04 (installation settings)
+pub fn parse_report_04(data: &[u8]) -> Result<ParsedInstallation, ParseError> {
+    if data.len() < REPORT_04_SIZE {
+        return Err(ParseError::TooShort {
+            expected: REPORT_04_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    let report: Report04 = bincode::deserialize(&data[..REPORT_04_SIZE])?;
+
+    if report.what != 0x04 || report.command != 0xC4 {
+        return Err(ParseError::InvalidHeader {
+            expected: vec![0x04, 0xC4],
+            actual: vec![report.what, report.command],
+        });
+    }
+
+    Ok(ParsedInstallation {
+        bearing_alignment: i16::from_le_bytes(report.bearing_alignment),
+        antenna_height: u16::from_le_bytes(report.antenna_height),
+        accent_light: report.accent_light,
+    })
+}
+
+/// Parse Report 06 (blanking/name settings) - 68 byte variant (HALO 2006)
+pub fn parse_report_06_68(data: &[u8]) -> Result<ParsedBlanking, ParseError> {
+    const REPORT_06_68_SIZE: usize = 68;
+    if data.len() < REPORT_06_68_SIZE {
+        return Err(ParseError::TooShort {
+            expected: REPORT_06_68_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    let report: Report06_68 = bincode::deserialize(&data[..REPORT_06_68_SIZE])?;
+
+    if report.what != 0x06 || report.command != 0xC4 {
+        return Err(ParseError::InvalidHeader {
+            expected: vec![0x06, 0xC4],
+            actual: vec![report.what, report.command],
+        });
+    }
+
+    let name = c_string(&report.name);
+    let sectors = report.blanking.iter().map(|b| ParsedSectorBlanking {
+        enabled: b.enabled > 0,
+        start_angle: i16::from_le_bytes(b.start_angle),
+        end_angle: i16::from_le_bytes(b.end_angle),
+    }).collect();
+
+    Ok(ParsedBlanking { name, sectors })
+}
+
+/// Parse Report 06 (blanking/name settings) - 74 byte variant (HALO 24 2023+)
+pub fn parse_report_06_74(data: &[u8]) -> Result<ParsedBlanking, ParseError> {
+    const REPORT_06_74_SIZE: usize = 74;
+    if data.len() < REPORT_06_74_SIZE {
+        return Err(ParseError::TooShort {
+            expected: REPORT_06_74_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    let report: Report06_74 = bincode::deserialize(&data[..REPORT_06_74_SIZE])?;
+
+    if report.what != 0x06 || report.command != 0xC4 {
+        return Err(ParseError::InvalidHeader {
+            expected: vec![0x06, 0xC4],
+            actual: vec![report.what, report.command],
+        });
+    }
+
+    let name = c_string(&report.name);
+    let sectors = report.blanking.iter().map(|b| ParsedSectorBlanking {
+        enabled: b.enabled > 0,
+        start_angle: i16::from_le_bytes(b.start_angle),
+        end_angle: i16::from_le_bytes(b.end_angle),
+    }).collect();
+
+    Ok(ParsedBlanking { name, sectors })
+}
+
+/// Parse Report 08 (advanced settings)
+///
+/// Handles both 18-byte base version and 21-byte extended version with Doppler.
+pub fn parse_report_08(data: &[u8]) -> Result<ParsedAdvancedSettings, ParseError> {
+    if data.len() < REPORT_08_BASE_SIZE {
+        return Err(ParseError::TooShort {
+            expected: REPORT_08_BASE_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    let report: Report08Base = bincode::deserialize(&data[..REPORT_08_BASE_SIZE])?;
+
+    if report.what != 0x08 || report.command != 0xC4 {
+        return Err(ParseError::InvalidHeader {
+            expected: vec![0x08, 0xC4],
+            actual: vec![report.what, report.command],
+        });
+    }
+
+    // Check if we have the extended version with Doppler data
+    let (doppler_state, doppler_speed) = if data.len() >= REPORT_08_EXTENDED_SIZE {
+        let extended: Report08Extended = bincode::deserialize(&data[..REPORT_08_EXTENDED_SIZE])?;
+        (
+            Some(extended.doppler_state),
+            Some(u16::from_le_bytes(extended.doppler_speed)),
+        )
+    } else {
+        (None, None)
+    };
+
+    Ok(ParsedAdvancedSettings {
+        sea_state: report.sea_state,
+        local_interference_rejection: report.interference_rejection,
+        scan_speed: report.scan_speed,
+        sidelobe_suppression_auto: report.sls_auto > 0,
+        sidelobe_suppression: report.side_lobe_suppression,
+        noise_rejection: report.noise_rejection,
+        target_separation: report.target_sep,
+        sea_clutter: report.sea_clutter,
+        auto_sea_clutter: report.auto_sea_clutter,
+        doppler_state,
+        doppler_speed,
     })
 }
 
@@ -1269,5 +1441,88 @@ mod tests {
         assert!(BEACON_BR24_SIZE > 0);
         assert!(BEACON_SINGLE_SIZE > BEACON_BR24_SIZE);
         assert!(BEACON_DUAL_SIZE > BEACON_SINGLE_SIZE);
+    }
+
+    #[test]
+    fn test_parse_report_04() {
+        // Report 04 packet: 0x04 0xC4 + data
+        let mut data = vec![0x04, 0xC4];
+        data.extend_from_slice(&[0; 4]); // _u00
+        data.extend_from_slice(&(-50i16).to_le_bytes()); // bearing_alignment = -50
+        data.extend_from_slice(&[0; 2]); // _u01
+        data.extend_from_slice(&100u16.to_le_bytes()); // antenna_height = 100
+        data.extend_from_slice(&[0; 7]); // _u02
+        data.push(3); // accent_light = 3
+        data.extend_from_slice(&[0; 46]); // _u03
+
+        let result = parse_report_04(&data);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.bearing_alignment, -50);
+        assert_eq!(parsed.antenna_height, 100);
+        assert_eq!(parsed.accent_light, 3);
+    }
+
+    #[test]
+    fn test_parse_report_08() {
+        // Report 08 base packet: 0x08 0xC4 + data
+        let data = vec![
+            0x08, 0xC4, // what, command
+            0x01,       // sea_state = 1
+            0x02,       // interference_rejection = 2
+            0x01,       // scan_speed = 1
+            0x01,       // sls_auto = 1 (true)
+            0x00, 0x00, 0x00, // fields 6-8
+            0x50,       // side_lobe_suppression = 80
+            0x00, 0x00, // field10
+            0x01,       // noise_rejection = 1
+            0x02,       // target_sep = 2
+            0x30,       // sea_clutter = 48
+            0x05,       // auto_sea_clutter = 5
+            0x00, 0x00, // fields 16-17
+        ];
+
+        let result = parse_report_08(&data);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.sea_state, 1);
+        assert_eq!(parsed.local_interference_rejection, 2);
+        assert_eq!(parsed.scan_speed, 1);
+        assert!(parsed.sidelobe_suppression_auto);
+        assert_eq!(parsed.sidelobe_suppression, 80);
+        assert_eq!(parsed.noise_rejection, 1);
+        assert_eq!(parsed.target_separation, 2);
+        assert_eq!(parsed.sea_clutter, 48);
+        assert_eq!(parsed.auto_sea_clutter, 5);
+        assert!(parsed.doppler_state.is_none());
+        assert!(parsed.doppler_speed.is_none());
+    }
+
+    #[test]
+    fn test_parse_report_08_with_doppler() {
+        // Report 08 extended packet with Doppler
+        let mut data = vec![
+            0x08, 0xC4, // what, command
+            0x01,       // sea_state
+            0x00,       // interference_rejection
+            0x02,       // scan_speed
+            0x00,       // sls_auto
+            0x00, 0x00, 0x00,
+            0x40,       // side_lobe_suppression
+            0x00, 0x00,
+            0x01,       // noise_rejection
+            0x01,       // target_sep
+            0x20,       // sea_clutter
+            0x03i8 as u8, // auto_sea_clutter = 3
+            0x00, 0x00,
+            0x01,       // doppler_state = 1 (Both)
+        ];
+        data.extend_from_slice(&500u16.to_le_bytes()); // doppler_speed = 500
+
+        let result = parse_report_08(&data);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.doppler_state, Some(1));
+        assert_eq!(parsed.doppler_speed, Some(500));
     }
 }

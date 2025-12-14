@@ -24,17 +24,43 @@ The code shall:
 * Make it as simple as possible to add more radars. Our experience with `radar_pi` tells us that there are hardly any folks out there cruising with the right skillset to make this happen.
 * Be robust and error-free. Again, C++ allows you to be doing stuff illegally and for many years we had race conditions and other bugs in `radar_pi`. Writing the new server in Rust will hopefully make this an easy thing to do.
 
-## Radar support
+## Radar Support
 
-The following radars are fully supported right now:
+| Brand | Status | Models |
+|-------|--------|--------|
+| **Furuno** | ✅ Working | DRS4D-NXT, DRS6A-NXT, DRS12A-NXT, FAR series |
+| **Navico** | ✅ Working | BR24, 3G, 4G, HALO20, HALO24, HALO3/4/6, HALO3000+ |
+| **Raymarine** | 🚧 Partial | Quantum 2, RD series (untested) |
+| **Garmin** | 📋 Planned | xHD series |
 
-* Navico: all digital models e.g. BR24, 3G, 4G, HALO20, HALO24, HALO3/4/6, HALO3000+. 
+## Deployment Modes
 
-Full support is planned for:
+Mayara can run in two modes:
 
-* Furuno, many models, but certainly and primarily DRS4D-NXT.
-* Raymarine Quantum 2 and older digital radars.
-* Garmin (x)HD.
+### SignalK Plugin (mayara-signalk-wasm)
+- Runs as a WASM plugin inside SignalK server
+- Integrates with SignalK's data model and notification system
+- Best for boats already running SignalK
+
+### Standalone Server (mayara-server)
+- Self-contained binary with built-in web server
+- No SignalK dependency required
+- Same API as SignalK mode - GUIs work unchanged
+
+## API
+
+Mayara implements the [SignalK Radar API](https://github.com/SignalK/signalk-radar-api):
+
+```
+GET  /radars                      - List discovered radars
+GET  /radars/{id}/capabilities    - Get capabilities manifest
+GET  /radars/{id}/state           - Get current state
+PUT  /radars/{id}/state           - Update controls
+WS   /radars/{id}/spokes          - WebSocket spoke stream
+
+GET  /radars/{id}/targets         - List ARPA targets
+POST /radars/{id}/targets         - Manual target acquisition
+```
 
 ## Important Notes
 

@@ -4,16 +4,27 @@ Platform-independent radar protocol library for the Mayara project.
 
 ## Purpose
 
-This crate contains pure parsing logic for marine radar protocols. It has **no I/O dependencies** and can be compiled for any target including WebAssembly.
+This crate contains pure parsing logic and computation for marine radar systems. It has **no I/O dependencies** and can be compiled for any target including WebAssembly.
+
+## Features
+
+| Module | Description | Status |
+|--------|-------------|--------|
+| **protocol/** | Radar protocol parsing (Furuno, Navico, Raymarine, Garmin) | ✅ Working |
+| **models/** | Radar model database with specs | ✅ Complete |
+| **capabilities/** | SignalK Radar API v5 capability manifests | ✅ Complete |
+| **arpa/** | ARPA target tracking with Kalman filter | ✅ Complete |
+| **trails/** | Target position history | ✅ Complete |
+| **guard_zones/** | Zone alerting logic | ✅ Complete |
 
 ## Supported Radars
 
-| Brand | Models | Status |
-|-------|--------|--------|
-| **Furuno** | DRS4D-NXT, DRS6A-NXT, DRS12A-NXT, FAR series | ✅ Implemented |
-| **Navico** | BR24, 3G, 4G, HALO series | 🚧 TODO |
-| **Raymarine** | Quantum, RD series | 🚧 TODO |
-| **Garmin** | xHD series | 🚧 TODO |
+| Brand | Models | Protocol Status |
+|-------|--------|-----------------|
+| **Furuno** | DRS4D-NXT, DRS6A-NXT, DRS12A-NXT, FAR series | ✅ Complete |
+| **Navico** | BR24, 3G, 4G, HALO series | ✅ Complete |
+| **Raymarine** | Quantum, RD series | 🚧 Partial |
+| **Garmin** | xHD series | 📋 Stub |
 
 ## Usage
 
@@ -53,12 +64,16 @@ mayara-core/
 │   ├── brand.rs         # Brand enum (Furuno, Navico, etc.)
 │   ├── error.rs         # ParseError types
 │   ├── radar.rs         # RadarDiscovery, RadarState, etc.
-│   └── protocol/
-│       ├── mod.rs       # Protocol module, helpers
-│       ├── furuno.rs    # Furuno protocol constants & parsing
-│       ├── navico.rs    # Navico protocol (TODO)
-│       ├── raymarine.rs # Raymarine protocol (TODO)
-│       └── garmin.rs    # Garmin protocol (TODO)
+│   ├── protocol/
+│   │   ├── furuno.rs    # Furuno protocol parsing
+│   │   ├── navico.rs    # Navico protocol parsing
+│   │   ├── raymarine.rs # Raymarine protocol parsing
+│   │   └── garmin.rs    # Garmin protocol parsing
+│   ├── models/          # Radar model database
+│   ├── capabilities/    # v5 API capability manifests
+│   ├── arpa/            # ARPA target tracking
+│   ├── trails/          # Position history
+│   └── guard_zones/     # Zone alerting
 ```
 
 ## Feature Flags
@@ -79,13 +94,11 @@ Available features:
 ## Relationship to Other Crates
 
 ```
-mayara-core     # This crate - protocol parsing
+mayara-core                 # This crate - protocol parsing + ARPA
     ↑
-    ├── mayara-lib    # Native runtime (tokio, real sockets)
-    │       ↑
-    │       └── mayara-server  # Standalone HTTP/WebSocket server
+    ├── mayara-server       # Standalone HTTP/WebSocket server
     │
-    └── mayara-wasm   # SignalK WASM plugin (uses SignalK FFI sockets)
+    └── mayara-signalk-wasm # SignalK WASM plugin
 ```
 
 ## License

@@ -5,16 +5,21 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+use mayara_core::arpa::{ArpaEvent, ArpaProcessor, ArpaSettings, ArpaTarget};
 use mayara_core::capabilities::{
-    builder::build_capabilities, CapabilityManifest, ControlError, RadarStateV5,
+    builder::build_capabilities, CapabilityManifest, ControlError, RadarStateV5, SupportedFeature,
 };
+use mayara_core::dual_range::{DualRangeConfig, DualRangeController, DualRangeState};
+use mayara_core::guard_zones::{GuardZone, GuardZoneProcessor, GuardZoneStatus};
 use mayara_core::radar::RadarDiscovery;
+use mayara_core::trails::{TrailData, TrailSettings, TrailStore};
 use mayara_core::Brand;
 
 use crate::furuno_controller::FurunoController;
 use crate::locator::RadarLocator;
 use crate::signalk_ffi::{debug, emit_json, read_config, save_config};
 use crate::spoke_receiver::{SpokeReceiver, FURUNO_OUTPUT_SPOKES};
+use crate::wasm_io::WasmIoProvider;
 
 /// Custom deserializer for antenna height that accepts both float and int
 /// Handles migration from old category values (0, 1, 2) to meters (0-100)
@@ -211,10 +216,20 @@ impl From<&RadarDiscovery> for RadarState {
 
 /// Radar Provider implementation
 pub struct RadarProvider {
+    /// I/O provider for platform-independent socket operations
+    io: WasmIoProvider,
     locator: RadarLocator,
     spoke_receiver: SpokeReceiver,
     /// TCP controllers for Furuno radars (keyed by radar ID)
     furuno_controllers: BTreeMap<String, FurunoController>,
+    /// ARPA processors for each radar (keyed by radar ID)
+    arpa_processors: BTreeMap<String, ArpaProcessor>,
+    /// Guard zone processors for each radar (keyed by radar ID)
+    guard_zone_processors: BTreeMap<String, GuardZoneProcessor>,
+    /// Trail stores for each radar (keyed by radar ID)
+    trail_stores: BTreeMap<String, TrailStore>,
+    /// Dual-range controllers for each radar (keyed by radar ID)
+    dual_range_controllers: BTreeMap<String, DualRangeController>,
     poll_count: u64,
     /// Plugin configuration (installation settings per radar)
     config: PluginConfig,
@@ -223,17 +238,23 @@ pub struct RadarProvider {
 impl RadarProvider {
     /// Create a new radar provider
     pub fn new() -> Self {
+        let mut io = WasmIoProvider::new();
         let mut locator = RadarLocator::new();
-        locator.start();
+        locator.start(&mut io);
 
         // Load saved configuration
         let config = Self::load_config();
         debug(&format!("Loaded config: {} radars configured", config.radars.len()));
 
         Self {
+            io,
             locator,
             spoke_receiver: SpokeReceiver::new(),
             furuno_controllers: BTreeMap::new(),
+            arpa_processors: BTreeMap::new(),
+            guard_zone_processors: BTreeMap::new(),
+            trail_stores: BTreeMap::new(),
+            dual_range_controllers: BTreeMap::new(),
             poll_count: 0,
             config,
         }
@@ -272,6 +293,7 @@ impl RadarProvider {
     }
 
     /// Get installation config for a radar
+    #[allow(dead_code)]
     pub fn get_installation_config(&self, radar_id: &str) -> Option<&RadarInstallationConfig> {
         self.config.radars.get(radar_id)
     }
@@ -287,10 +309,10 @@ impl RadarProvider {
         self.poll_count += 1;
 
         // Update timestamp (in a real implementation, get from host)
-        self.locator.current_time_ms = self.poll_count * 100;
+        self.io.set_time(self.poll_count * 100);
 
         // Poll for new radars
-        let new_radars = self.locator.poll();
+        let new_radars = self.locator.poll(&mut self.io);
 
         // Emit delta for each new radar
         for discovery in &new_radars {
@@ -403,7 +425,7 @@ impl RadarProvider {
 
     /// Shutdown the provider
     pub fn shutdown(&mut self) {
-        self.locator.shutdown();
+        self.locator.shutdown(&mut self.io);
         self.spoke_receiver.shutdown();
     }
 
@@ -463,7 +485,7 @@ impl RadarProvider {
 
             // Send announce packets immediately before TCP connection attempt
             // The radar only accepts TCP from clients that have recently announced
-            self.locator.send_furuno_announce();
+            self.locator.send_furuno_announce(&mut self.io);
 
             controller.set_transmit(transmit);
             return true;
@@ -496,7 +518,7 @@ impl RadarProvider {
             debug(&format!("Using FurunoController for {} (range={}m)", radar_id, range));
 
             // Send announce packets immediately before TCP connection attempt
-            self.locator.send_furuno_announce();
+            self.locator.send_furuno_announce(&mut self.io);
 
             controller.set_range(range);
             return true;
@@ -529,7 +551,7 @@ impl RadarProvider {
             debug(&format!("Using FurunoController for {} (gain={}, auto={})", radar_id, val, auto));
 
             // Send announce packets immediately before TCP connection attempt
-            self.locator.send_furuno_announce();
+            self.locator.send_furuno_announce(&mut self.io);
 
             controller.set_gain(val, auto);
             return true;
@@ -563,7 +585,7 @@ impl RadarProvider {
             debug(&format!("Using FurunoController for {} (sea={}, auto={})", radar_id, val, auto));
 
             // Send announce packets immediately before TCP connection attempt
-            self.locator.send_furuno_announce();
+            self.locator.send_furuno_announce(&mut self.io);
 
             controller.set_sea(val, auto);
             return true;
@@ -597,7 +619,7 @@ impl RadarProvider {
             debug(&format!("Using FurunoController for {} (rain={}, auto={})", radar_id, val, auto));
 
             // Send announce packets immediately before TCP connection attempt
-            self.locator.send_furuno_announce();
+            self.locator.send_furuno_announce(&mut self.io);
 
             controller.set_rain(val, auto);
             return true;
@@ -693,7 +715,23 @@ impl RadarProvider {
             }
         }
 
-        Some(build_capabilities(&discovery, radar_id))
+        // WASM plugin implements ARPA, Guard Zones, Trails, and conditionally DualRange
+        let mut supported_features = vec![
+            SupportedFeature::Arpa,
+            SupportedFeature::GuardZones,
+            SupportedFeature::Trails,
+        ];
+
+        // Check if radar supports dual-range based on model
+        if let Some(model_name) = &discovery.model {
+            if let Some(model_info) = mayara_core::models::get_model(discovery.brand, model_name) {
+                if model_info.has_dual_range {
+                    supported_features.push(SupportedFeature::DualRange);
+                }
+            }
+        }
+
+        Some(build_capabilities(&discovery, radar_id, supported_features))
     }
 
     /// Get current state in v5 format
@@ -1113,7 +1151,7 @@ impl RadarProvider {
         value: &serde_json::Value,
     ) -> Result<(), ControlError> {
         // Send announce packets before control attempt
-        self.locator.send_furuno_announce();
+        self.locator.send_furuno_announce(&mut self.io);
 
         if let Some(controller) = self.furuno_controllers.get_mut(radar_id) {
             match control_id {
@@ -1291,6 +1329,317 @@ impl RadarProvider {
                 radar_id, control_id
             ));
             Err(ControlError::ControllerNotAvailable)
+        }
+    }
+
+    // =========================================================================
+    // v6 ARPA Target Methods
+    // =========================================================================
+
+    /// Get or create ARPA processor for a radar
+    fn get_or_create_arpa(&mut self, radar_id: &str) -> &mut ArpaProcessor {
+        if !self.arpa_processors.contains_key(radar_id) {
+            debug(&format!("Creating ARPA processor for {}", radar_id));
+            let settings = ArpaSettings::default();
+            self.arpa_processors.insert(radar_id.to_string(), ArpaProcessor::new(settings));
+        }
+        self.arpa_processors.get_mut(radar_id).unwrap()
+    }
+
+    /// Get all tracked ARPA targets for a radar
+    pub fn get_targets(&self, radar_id: &str) -> Option<Vec<ArpaTarget>> {
+        self.arpa_processors.get(radar_id).map(|p| p.get_targets())
+    }
+
+    /// Manually acquire a target at the specified position
+    pub fn acquire_target(&mut self, radar_id: &str, bearing: f64, distance: f64) -> Result<u32, String> {
+        // Validate inputs
+        if bearing < 0.0 || bearing >= 360.0 {
+            return Err("bearing must be 0-360".to_string());
+        }
+        if distance <= 0.0 {
+            return Err("distance must be positive".to_string());
+        }
+
+        let timestamp = self.poll_count * 100;  // Approximate timestamp
+        let arpa = self.get_or_create_arpa(radar_id);
+
+        match arpa.acquire_target(bearing, distance, timestamp) {
+            Some(id) => {
+                debug(&format!("Acquired target {} at bearing={}, distance={}", id, bearing, distance));
+                Ok(id)
+            }
+            None => Err("max targets reached".to_string()),
+        }
+    }
+
+    /// Cancel tracking of a target
+    pub fn cancel_target(&mut self, radar_id: &str, target_id: u32) -> bool {
+        if let Some(arpa) = self.arpa_processors.get_mut(radar_id) {
+            let result = arpa.cancel_target(target_id);
+            if result {
+                debug(&format!("Cancelled target {} on radar {}", target_id, radar_id));
+            }
+            result
+        } else {
+            false
+        }
+    }
+
+    /// Get ARPA settings for a radar
+    pub fn get_arpa_settings(&self, radar_id: &str) -> Option<ArpaSettings> {
+        self.arpa_processors.get(radar_id).map(|p| p.settings().clone())
+    }
+
+    /// Update ARPA settings for a radar
+    pub fn set_arpa_settings(&mut self, radar_id: &str, settings: ArpaSettings) -> Result<(), String> {
+        let arpa = self.get_or_create_arpa(radar_id);
+        arpa.update_settings(settings);
+        debug(&format!("Updated ARPA settings for {}", radar_id));
+        Ok(())
+    }
+
+    /// Process ARPA events and emit collision notifications
+    #[allow(dead_code)]
+    pub fn process_arpa_events(&self, radar_id: &str, events: &[ArpaEvent]) {
+        use crate::signalk_ffi::publish_collision_warning;
+
+        for event in events {
+            match event {
+                ArpaEvent::CollisionWarning { target_id, state, cpa, tcpa } => {
+                    let state_str = state.as_signalk_state();
+                    publish_collision_warning(radar_id, *target_id, state_str, *cpa, *tcpa);
+                    debug(&format!(
+                        "Published collision warning: radar={}, target={}, state={}, cpa={:.0}m, tcpa={:.0}s",
+                        radar_id, target_id, state_str, cpa, tcpa
+                    ));
+                }
+                ArpaEvent::TargetAcquired { target } => {
+                    debug(&format!("Target acquired: {} on radar {}", target.id, radar_id));
+                }
+                ArpaEvent::TargetLost { target_id, .. } => {
+                    // Clear the notification when target is lost
+                    publish_collision_warning(radar_id, *target_id, "normal", 0.0, 0.0);
+                    debug(&format!("Target lost: {} on radar {}", target_id, radar_id));
+                }
+                ArpaEvent::TargetUpdate { .. } => {
+                    // Regular updates don't need notifications
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Guard Zone Methods
+    // =========================================================================
+
+    /// Get or create guard zone processor for a radar
+    fn get_or_create_guard_zone_processor(&mut self, radar_id: &str) -> &mut GuardZoneProcessor {
+        if !self.guard_zone_processors.contains_key(radar_id) {
+            debug(&format!("Creating guard zone processor for {}", radar_id));
+            self.guard_zone_processors.insert(radar_id.to_string(), GuardZoneProcessor::new());
+        }
+        self.guard_zone_processors.get_mut(radar_id).unwrap()
+    }
+
+    /// Get all guard zones for a radar
+    pub fn get_guard_zones(&self, radar_id: &str) -> Vec<GuardZoneStatus> {
+        self.guard_zone_processors
+            .get(radar_id)
+            .map(|p| p.get_all_zone_status())
+            .unwrap_or_default()
+    }
+
+    /// Get a specific guard zone
+    pub fn get_guard_zone(&self, radar_id: &str, zone_id: u32) -> Option<GuardZoneStatus> {
+        self.guard_zone_processors
+            .get(radar_id)
+            .and_then(|p| p.get_zone_status(zone_id))
+    }
+
+    /// Create or update a guard zone
+    pub fn set_guard_zone(&mut self, radar_id: &str, zone: GuardZone) {
+        let processor = self.get_or_create_guard_zone_processor(radar_id);
+        processor.add_zone(zone.clone());
+        debug(&format!("Set guard zone {} on radar {}", zone.id, radar_id));
+    }
+
+    /// Delete a guard zone
+    pub fn delete_guard_zone(&mut self, radar_id: &str, zone_id: u32) -> bool {
+        if let Some(processor) = self.guard_zone_processors.get_mut(radar_id) {
+            let result = processor.remove_zone(zone_id);
+            if result {
+                debug(&format!("Deleted guard zone {} on radar {}", zone_id, radar_id));
+            }
+            result
+        } else {
+            false
+        }
+    }
+
+    // =========================================================================
+    // Trail Methods
+    // =========================================================================
+
+    /// Get or create trail store for a radar
+    fn get_or_create_trail_store(&mut self, radar_id: &str) -> &mut TrailStore {
+        if !self.trail_stores.contains_key(radar_id) {
+            debug(&format!("Creating trail store for {}", radar_id));
+            self.trail_stores.insert(radar_id.to_string(), TrailStore::new(TrailSettings::default()));
+        }
+        self.trail_stores.get_mut(radar_id).unwrap()
+    }
+
+    /// Get all trails for a radar
+    pub fn get_all_trails(&self, radar_id: &str) -> Vec<TrailData> {
+        self.trail_stores
+            .get(radar_id)
+            .map(|s| s.get_all_trail_data())
+            .unwrap_or_default()
+    }
+
+    /// Get trail for a specific target
+    pub fn get_trail(&self, radar_id: &str, target_id: u32) -> Option<TrailData> {
+        self.trail_stores
+            .get(radar_id)
+            .and_then(|s| s.get_trail_data(target_id))
+    }
+
+    /// Clear all trails for a radar
+    pub fn clear_all_trails(&mut self, radar_id: &str) {
+        if let Some(store) = self.trail_stores.get_mut(radar_id) {
+            store.clear_all();
+            debug(&format!("Cleared all trails on radar {}", radar_id));
+        }
+    }
+
+    /// Clear trail for a specific target
+    pub fn clear_trail(&mut self, radar_id: &str, target_id: u32) {
+        if let Some(store) = self.trail_stores.get_mut(radar_id) {
+            store.clear_trail(target_id);
+            debug(&format!("Cleared trail for target {} on radar {}", target_id, radar_id));
+        }
+    }
+
+    /// Get trail settings for a radar
+    pub fn get_trail_settings(&self, radar_id: &str) -> TrailSettings {
+        self.trail_stores
+            .get(radar_id)
+            .map(|s| s.settings().clone())
+            .unwrap_or_default()
+    }
+
+    /// Update trail settings for a radar
+    pub fn set_trail_settings(&mut self, radar_id: &str, settings: TrailSettings) {
+        let store = self.get_or_create_trail_store(radar_id);
+        store.update_settings(settings);
+        debug(&format!("Updated trail settings for {}", radar_id));
+    }
+
+    // =========================================================================
+    // Dual-Range Methods
+    // =========================================================================
+
+    /// Get or create dual-range controller for a radar
+    fn get_or_create_dual_range_controller(&mut self, radar_id: &str) -> Option<&mut DualRangeController> {
+        // Get model info to determine max secondary range
+        let radar = self.find_radar(radar_id)?;
+        let model_name = radar.discovery.model.as_ref()?;
+        let model_info = mayara_core::models::get_model(radar.discovery.brand, model_name)?;
+
+        if !model_info.has_dual_range {
+            return None;
+        }
+
+        if !self.dual_range_controllers.contains_key(radar_id) {
+            debug(&format!("Creating dual-range controller for {}", radar_id));
+            let controller = DualRangeController::new(
+                model_info.max_dual_range,
+                model_info.range_table.to_vec(),
+            );
+            self.dual_range_controllers.insert(radar_id.to_string(), controller);
+        }
+        self.dual_range_controllers.get_mut(radar_id)
+    }
+
+    /// Check if a radar supports dual-range
+    pub fn supports_dual_range(&self, radar_id: &str) -> bool {
+        if let Some(radar) = self.find_radar(radar_id) {
+            if let Some(model_name) = &radar.discovery.model {
+                if let Some(model_info) = mayara_core::models::get_model(radar.discovery.brand, model_name) {
+                    return model_info.has_dual_range;
+                }
+            }
+        }
+        false
+    }
+
+    /// Get dual-range state for a radar
+    pub fn get_dual_range_state(&self, radar_id: &str) -> Option<DualRangeState> {
+        self.dual_range_controllers
+            .get(radar_id)
+            .map(|c| c.state().clone())
+    }
+
+    /// Get available secondary ranges for dual-range mode
+    pub fn get_dual_range_available_ranges(&self, radar_id: &str) -> Vec<u32> {
+        self.dual_range_controllers
+            .get(radar_id)
+            .map(|c| c.available_ranges().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Set dual-range configuration
+    pub fn set_dual_range_config(&mut self, radar_id: &str, config: DualRangeConfig) -> Result<(), String> {
+        // First check if radar supports dual-range
+        if !self.supports_dual_range(radar_id) {
+            return Err("Radar does not support dual-range".to_string());
+        }
+
+        // Get or create controller
+        if let Some(controller) = self.get_or_create_dual_range_controller(radar_id) {
+            if !controller.apply_config(&config) {
+                return Err(format!(
+                    "Secondary range {} exceeds maximum",
+                    config.secondary_range
+                ));
+            }
+            debug(&format!("Set dual-range config for {}: enabled={}", radar_id, config.enabled));
+            Ok(())
+        } else {
+            Err("Failed to create dual-range controller".to_string())
+        }
+    }
+
+    /// Enable or disable dual-range mode
+    pub fn set_dual_range_enabled(&mut self, radar_id: &str, enabled: bool) -> Result<(), String> {
+        if !self.supports_dual_range(radar_id) {
+            return Err("Radar does not support dual-range".to_string());
+        }
+
+        if let Some(controller) = self.get_or_create_dual_range_controller(radar_id) {
+            controller.set_enabled(enabled);
+            debug(&format!("Set dual-range enabled={} for {}", enabled, radar_id));
+            Ok(())
+        } else {
+            Err("Failed to create dual-range controller".to_string())
+        }
+    }
+
+    /// Set secondary range in meters
+    pub fn set_secondary_range(&mut self, radar_id: &str, range: u32) -> Result<(), String> {
+        if !self.supports_dual_range(radar_id) {
+            return Err("Radar does not support dual-range".to_string());
+        }
+
+        if let Some(controller) = self.get_or_create_dual_range_controller(radar_id) {
+            if !controller.set_secondary_range(range) {
+                return Err("Range exceeds maximum for dual-range mode".to_string());
+            }
+            debug(&format!("Set secondary range to {} for {}", range, radar_id));
+            Ok(())
+        } else {
+            Err("Failed to create dual-range controller".to_string())
         }
     }
 }

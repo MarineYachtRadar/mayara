@@ -4,6 +4,8 @@
 //! No I/O operations - just `&[u8]` → `Result<T>` functions.
 
 pub mod command;
+pub mod dispatch;
+pub mod report;
 
 use serde::Deserialize;
 use crate::error::ParseError;

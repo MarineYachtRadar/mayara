@@ -2,21 +2,15 @@ extern crate tokio;
 
 use clap::Parser;
 use env_logger::Env;
-//use locator::Locator;
 use log::{info, warn};
 use miette::Result;
-//use once_cell::sync::Lazy;
-//use radar::SharedRadars;
-//use serde::{Serialize, Serializer};
 use std::time::Duration;
-//use tokio::sync::{broadcast, mpsc};
 use tokio_graceful_shutdown::{SubsystemBuilder, Toplevel};
 use web::Web;
 
 mod web;
 
-use mayara;
-use mayara::{network, Cli, Session};
+use mayara_server::{network, Cli, Session, VERSION};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,7 +26,7 @@ async fn main() -> Result<()> {
 
     network::set_replay(args.replay);
 
-    info!("Mayara {} loglevel {}", mayara::VERSION, log_level);
+    info!("Mayara {} loglevel {}", VERSION, log_level);
     if args.replay {
         warn!("Replay mode activated, this does the following:");
         warn!(" * A circle is drawn at the last two pixels in each spoke");

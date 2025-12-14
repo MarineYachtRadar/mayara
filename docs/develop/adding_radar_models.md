@@ -287,9 +287,106 @@ Before submitting:
 | `docs/radar protocols/{brand}/protocol.md` | Protocol documentation |
 | `mayara-core/src/models/mod.rs` | Model database entry point |
 | `mayara-core/src/models/{brand}.rs` | Brand-specific model definitions |
+| `mayara-core/src/capabilities/mod.rs` | CapabilityManifest and SupportedFeature types |
 | `mayara-core/src/capabilities/controls.rs` | Control definitions |
 | `mayara-core/src/capabilities/builder.rs` | Capability manifest builder |
 | `docs/radar API/signalk_radar_api_naming.md` | Naming conventions |
+
+## Understanding CapabilityManifest and SupportedFeatures
+
+When clients connect to a radar, they request its **CapabilityManifest** - a complete schema describing what the radar can do. This is built automatically from the model database, but there's an important distinction between **hardware capabilities** and **provider features**.
+
+### Hardware Capabilities vs Provider Features
+
+The `CapabilityManifest` contains two different types of capability information:
+
+1. **`characteristics`** - What the **hardware** can do (from ModelInfo)
+2. **`supportedFeatures`** - What the **provider** implements (passed at runtime)
+
+```rust
+// Hardware capabilities (from model database)
+characteristics: Characteristics {
+    has_doppler: true,      // Hardware supports Doppler
+    has_dual_range: true,   // Hardware supports dual-range
+    // ...
+}
+
+// Provider features (what API endpoints are implemented)
+supported_features: vec![
+    SupportedFeature::Arpa,        // Provider implements /targets endpoint
+    SupportedFeature::GuardZones,  // Provider implements /guardZones endpoint
+]
+```
+
+**Why the distinction?**
+
+A radar may have Doppler hardware (`has_doppler: true`), but the provider might not implement the `/trails` endpoint. Clients need to know both:
+- Can the hardware do it? → Check `characteristics`
+- Did the provider implement it? → Check `supportedFeatures`
+
+### Available SupportedFeature Values
+
+```rust
+pub enum SupportedFeature {
+    Arpa,        // ARPA target tracking (GET/POST/DELETE /targets)
+    GuardZones,  // Guard zone alerting (GET/PUT /guardZones)
+    Trails,      // Target history/trails (GET /trails)
+    DualRange,   // Dual-range simultaneous display
+}
+```
+
+### How Capabilities Are Built
+
+The capability manifest is built by the `build_capabilities()` or `build_capabilities_from_model()` functions:
+
+```rust
+use mayara_core::capabilities::{builder::build_capabilities, SupportedFeature};
+
+// Build capabilities with supported features
+let caps = build_capabilities(
+    &discovery,           // RadarDiscovery from network
+    radar_id,             // Radar identifier
+    vec![                 // Features this provider implements
+        SupportedFeature::Arpa,
+    ],
+);
+```
+
+The builder:
+1. Looks up the radar model in the database
+2. Copies hardware characteristics from `ModelInfo`
+3. Builds control definitions based on `ModelInfo.controls`
+4. Adds the `supported_features` you pass in
+
+### When Adding a New Model
+
+When you add a new model, you only need to:
+
+1. **Add the ModelInfo** with correct hardware capabilities (`has_doppler`, `has_dual_range`, etc.)
+2. **List the controls** the model supports
+
+You do **not** need to specify `supportedFeatures` in the model - that's determined by the provider at runtime based on what API endpoints it implements.
+
+### For Provider Developers
+
+If you're building a new provider (not just adding a model), you decide which features to announce:
+
+```rust
+// mayara-server standalone - announces ARPA support
+let supported_features = vec![SupportedFeature::Arpa];
+
+// A minimal provider might not implement any optional features
+let supported_features = vec![];
+
+// A full-featured provider might implement everything
+let supported_features = vec![
+    SupportedFeature::Arpa,
+    SupportedFeature::GuardZones,
+    SupportedFeature::Trails,
+];
+```
+
+See `mayara-server/src/web.rs` and `mayara-signalk-wasm/src/radar_provider.rs` for examples.
 
 ## Examples
 

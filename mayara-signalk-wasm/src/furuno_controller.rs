@@ -144,6 +144,7 @@ impl FurunoController {
     }
 
     /// Get current state
+    #[allow(dead_code)]
     pub fn state(&self) -> ControllerState {
         self.state
     }

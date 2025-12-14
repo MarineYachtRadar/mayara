@@ -1,11 +1,11 @@
 {
   "name": "@mayara/signalk-radar",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MaYaRa Radar - Multi-brand marine radar integration for SignalK",
   "scripts": {
     "build": "node build.js",
     "build:test": "node build.js --test",
-    "pack": "node build.js --pack",
+    "build:no-pack": "node build.js --no-pack",
     "test": "cargo test -p mayara-core"
   },
   "wasmManifest": "plugin.wasm",

@@ -1,8 +1,12 @@
 [package]
 name = "mayara-server"
-version = "0.3.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.80.1"
+
+[lib]
+name = "mayara_server"
+path = "src/lib.rs"
 
 [[bin]]
 name = "mayara-server"
@@ -17,7 +21,8 @@ raymarine = []
 default = ["navico", "furuno", "raymarine"]
 
 [dependencies]
-mayara-lib = { path = "../mayara-lib" }
+mayara-core = { path = "../mayara-core" }
+ctor = "0.1"
 anyhow = "1.0.86"
 async-trait = "0.1.81"
 atomic_float = "1.1.0"
@@ -92,3 +97,6 @@ protobuf-codegen = "3.5.1"
 openssl = { version = "0.10", features = ["vendored"] }
 reqwest = { version = "0.12.7", default-features = false, features = ["rustls-tls", "blocking"] }
 rust-embed = { version = "8.5.0", features = ["axum","interpolate-folder-path"] }
+
+[dev-dependencies]
+tempfile = "3"

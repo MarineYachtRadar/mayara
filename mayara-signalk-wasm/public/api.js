@@ -7,8 +7,8 @@
 
 // API endpoints for different modes
 const SIGNALK_RADARS_API = "/signalk/v2/api/vessels/self/radars";
-const STANDALONE_RADARS_API = "/v1/api/radars";
-const STANDALONE_INTERFACES_API = "/v1/api/interfaces";
+const STANDALONE_RADARS_API = "/radars";
+const STANDALONE_INTERFACES_API = "/interfaces";
 
 // Detected mode (null = not detected yet)
 let detectedMode = null;
@@ -25,11 +25,22 @@ export async function detectMode() {
     return detectedMode;
   }
 
-  // Try SignalK first
+  // Try standalone first by checking if /radars works
+  try {
+    const response = await fetch(STANDALONE_RADARS_API, { method: 'HEAD' });
+    if (response.ok) {
+      detectedMode = 'standalone';
+      console.log("Detected standalone mode");
+      return detectedMode;
+    }
+  } catch (e) {
+    // Standalone not available
+  }
+
+  // Try SignalK
   try {
     const response = await fetch(SIGNALK_RADARS_API, { method: 'HEAD' });
-    if (response.ok || response.status === 404) {
-      // SignalK server responds (even 404 means it exists)
+    if (response.ok) {
       detectedMode = 'signalk';
       console.log("Detected SignalK mode");
       return detectedMode;
@@ -38,9 +49,9 @@ export async function detectMode() {
     // SignalK not available
   }
 
-  // Fall back to standalone
+  // Default to standalone if neither works (will show errors)
   detectedMode = 'standalone';
-  console.log("Detected standalone mode");
+  console.log("Defaulting to standalone mode");
   return detectedMode;
 }
 

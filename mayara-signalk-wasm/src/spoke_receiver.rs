@@ -2,9 +2,17 @@
 //!
 //! Receives spoke data from discovered radars and emits to SignalK stream.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use mayara_core::protocol::furuno::{self, ParsedSpoke};
 use crate::signalk_ffi::{debug, UdpSocket, emit_radar_spokes};
 use crate::protobuf::encode_radar_message;
+
+// Atomic counters for logging (Rust 2024 safe)
+static POLL_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAST_LOG: AtomicU64 = AtomicU64::new(0);
+static FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
+static EMIT_SUCCESS: AtomicU64 = AtomicU64::new(0);
+static EMIT_FAIL: AtomicU64 = AtomicU64::new(0);
 
 /// Furuno sends 8192 spokes per revolution
 /// Set to 1 for full resolution, 4 for reduced (2048 spokes)
@@ -106,12 +114,7 @@ impl SpokeReceiver {
     /// Returns number of spokes emitted.
     pub fn poll(&mut self) -> u32 {
         let mut total_emitted = 0;
-        static mut POLL_COUNT: u64 = 0;
-        static mut LAST_LOG: u64 = 0;
-
-        unsafe {
-            POLL_COUNT += 1;
-        }
+        let poll_count = POLL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Collect frames first to avoid borrow conflicts
         let mut frames: Vec<(Vec<u8>, usize)> = Vec::new();
@@ -128,31 +131,28 @@ impl SpokeReceiver {
                 } else {
                     unknown_packets += 1;
                     // Log first unknown packet or periodically
-                    unsafe {
-                        if POLL_COUNT - LAST_LOG > 100 {
-                            debug(&format!("Spoke packet from unknown IP {} (len={}), tracking: {:?}",
-                                addr, len,
-                                self.furuno_radars.iter().map(|r| r.source_ip.as_str()).collect::<Vec<_>>()
-                            ));
-                            LAST_LOG = POLL_COUNT;
-                        }
+                    let last_log = LAST_LOG.load(Ordering::Relaxed);
+                    if poll_count - last_log > 100 {
+                        debug(&format!("Spoke packet from unknown IP {} (len={}), tracking: {:?}",
+                            addr, len,
+                            self.furuno_radars.iter().map(|r| r.source_ip.as_str()).collect::<Vec<_>>()
+                        ));
+                        LAST_LOG.store(poll_count, Ordering::Relaxed);
                     }
                 }
             }
         }
 
         // Log periodically
-        unsafe {
-            if POLL_COUNT % 500 == 0 {
-                debug(&format!(
-                    "SpokeReceiver poll #{}: socket={}, tracking {} radars, frames={}, unknown={}",
-                    POLL_COUNT,
-                    self.furuno_socket.is_some(),
-                    self.furuno_radars.len(),
-                    frames.len(),
-                    unknown_packets
-                ));
-            }
+        if poll_count % 500 == 0 {
+            debug(&format!(
+                "SpokeReceiver poll #{}: socket={}, tracking {} radars, frames={}, unknown={}",
+                poll_count,
+                self.furuno_socket.is_some(),
+                self.furuno_radars.len(),
+                frames.len(),
+                unknown_packets
+            ));
         }
 
         // Process collected frames
@@ -201,17 +201,11 @@ impl SpokeReceiver {
 
     /// Process a Furuno spoke frame
     fn process_furuno_frame(&mut self, data: &[u8], radar_idx: usize) -> u32 {
-        static mut FRAME_COUNT: u64 = 0;
-        static mut EMIT_SUCCESS: u64 = 0;
-        static mut EMIT_FAIL: u64 = 0;
-
-        unsafe { FRAME_COUNT += 1; }
+        let frame_count = FRAME_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
         if !furuno::is_spoke_frame(data) {
-            unsafe {
-                if FRAME_COUNT % 100 == 0 {
-                    debug(&format!("Frame #{} not a spoke frame (len={})", FRAME_COUNT, data.len()));
-                }
+            if frame_count % 100 == 0 {
+                debug(&format!("Frame #{} not a spoke frame (len={})", frame_count, data.len()));
             }
             return 0;
         }
@@ -261,28 +255,26 @@ impl SpokeReceiver {
                 let protobuf_data = encode_radar_message(numeric_id, &combined_spokes, range);
 
                 // Log periodically
-                unsafe {
-                    if FRAME_COUNT % 500 == 0 {
-                        debug(&format!(
-                            "Frame #{}: {} combined spokes (from {}), range={}m, protobuf={} bytes, emit success/fail={}/{}",
-                            FRAME_COUNT, combined_spokes.len(), combined_spokes.len() * FURUNO_SPOKE_REDUCTION,
-                            range, protobuf_data.len(),
-                            EMIT_SUCCESS, EMIT_FAIL
-                        ));
-                    }
+                if frame_count % 500 == 0 {
+                    let emit_success = EMIT_SUCCESS.load(Ordering::Relaxed);
+                    let emit_fail = EMIT_FAIL.load(Ordering::Relaxed);
+                    debug(&format!(
+                        "Frame #{}: {} combined spokes (from {}), range={}m, protobuf={} bytes, emit success/fail={}/{}",
+                        frame_count, combined_spokes.len(), combined_spokes.len() * FURUNO_SPOKE_REDUCTION,
+                        range, protobuf_data.len(),
+                        emit_success, emit_fail
+                    ));
                 }
 
                 // Emit to SignalK
                 if emit_radar_spokes(&radar_id, &protobuf_data) {
-                    unsafe { EMIT_SUCCESS += 1; }
+                    EMIT_SUCCESS.fetch_add(1, Ordering::Relaxed);
                     combined_spokes.len() as u32
                 } else {
-                    unsafe { EMIT_FAIL += 1; }
+                    let emit_fail = EMIT_FAIL.fetch_add(1, Ordering::Relaxed) + 1;
                     // Log emit failures
-                    unsafe {
-                        if EMIT_FAIL <= 5 || EMIT_FAIL % 100 == 0 {
-                            debug(&format!("emit_radar_spokes failed for {} (fail #{})", radar_id, EMIT_FAIL));
-                        }
+                    if emit_fail <= 5 || emit_fail % 100 == 0 {
+                        debug(&format!("emit_radar_spokes failed for {} (fail #{})", radar_id, emit_fail));
                     }
                     0
                 }
