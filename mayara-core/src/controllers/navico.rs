@@ -121,6 +121,11 @@ impl NavicoController {
         self.model
     }
 
+    /// Set radar model (called when model is detected from reports)
+    pub fn set_model(&mut self, model: NavicoModel) {
+        self.model = model;
+    }
+
     /// Poll the controller
     pub fn poll<I: IoProvider>(&mut self, io: &mut I) -> bool {
         self.poll_count += 1;
@@ -198,13 +203,13 @@ impl NavicoController {
 
         // Send periodic report requests
         if self.poll_count - self.last_report_request > Self::REPORT_REQUEST_INTERVAL {
-            self.send_report_requests(io);
+            self.request_reports(io);
             self.last_report_request = self.poll_count;
         }
 
         // Send stay-on command
         if self.poll_count - self.last_stay_on > Self::STAY_ON_INTERVAL {
-            self.send_stay_on(io);
+            self.stay_on(io);
             self.last_stay_on = self.poll_count;
         }
 
@@ -230,14 +235,14 @@ impl NavicoController {
         // etc.
     }
 
-    fn send_report_requests<I: IoProvider>(&self, io: &mut I) {
+    fn request_reports<I: IoProvider>(&self, io: &mut I) {
         // Request report 03 (model/firmware)
         self.send_command(io, &navico::REQUEST_03_REPORT);
         // Request multiple reports
         self.send_command(io, &navico::REQUEST_MANY2_REPORT);
     }
 
-    fn send_stay_on<I: IoProvider>(&self, io: &mut I) {
+    fn stay_on<I: IoProvider>(&self, io: &mut I) {
         self.send_command(io, &navico::COMMAND_STAY_ON_A);
     }
 
@@ -378,6 +383,90 @@ impl NavicoController {
             self.send_command(io, &cmd);
             io.debug(&format!("[{}] Set mode: {}", self.radar_id, mode));
         }
+    }
+
+    /// Set sidelobe suppression (0-255 scale)
+    pub fn set_sidelobe_suppression<I: IoProvider>(&mut self, io: &mut I, value: u8, auto: bool) {
+        let auto_val: u8 = if auto { 1 } else { 0 };
+        let cmd = [0x06, 0xC1, 0x05, 0x00, 0x00, 0x00, auto_val, 0x00, 0x00, 0x00, value];
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set sidelobe suppression: {} auto={}", self.radar_id, value, auto));
+    }
+
+    /// Set sea state (HALO only, 0=calm, 1=moderate, 2=rough)
+    pub fn set_sea_state<I: IoProvider>(&mut self, io: &mut I, state: u8) {
+        let cmd = [0x0B, 0xC1, state];
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set sea state: {}", self.radar_id, state));
+    }
+
+    /// Set local interference rejection (0-3)
+    pub fn set_local_interference_rejection<I: IoProvider>(&mut self, io: &mut I, level: u8) {
+        let cmd = [0x0E, 0xC1, level];
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set local IR: {}", self.radar_id, level));
+    }
+
+    /// Set noise rejection (0-3)
+    pub fn set_noise_rejection<I: IoProvider>(&mut self, io: &mut I, level: u8) {
+        let cmd = [0x21, 0xC1, level];
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set noise rejection: {}", self.radar_id, level));
+    }
+
+    /// Set target separation (0-3)
+    pub fn set_target_separation<I: IoProvider>(&mut self, io: &mut I, level: u8) {
+        let cmd = [0x22, 0xC1, level];
+        self.send_command(io, &cmd);
+        io.debug(&format!("[{}] Set target separation: {}", self.radar_id, level));
+    }
+
+    /// Set accent light (HALO only, 0-3)
+    pub fn set_accent_light<I: IoProvider>(&mut self, io: &mut I, level: u8) {
+        if self.model == NavicoModel::Halo {
+            let cmd = [0x31, 0xC1, level];
+            self.send_command(io, &cmd);
+            io.debug(&format!("[{}] Set accent light: {}", self.radar_id, level));
+        }
+    }
+
+    /// Set no-transmit zone (sector 0-3)
+    /// Start and end angles are in deci-degrees (0-3599)
+    pub fn set_no_transmit_zone<I: IoProvider>(
+        &mut self,
+        io: &mut I,
+        sector: u8,
+        start_angle: i16,
+        end_angle: i16,
+        enabled: bool,
+    ) {
+        let enabled_val: u8 = if enabled { 1 } else { 0 };
+
+        // Send enable/disable command first
+        let cmd1 = [0x0D, 0xC1, sector, 0x00, 0x00, 0x00, enabled_val];
+        self.send_command(io, &cmd1);
+
+        // Send zone angles
+        let mut cmd2 = vec![0xC0, 0xC1, sector, 0x00, 0x00, 0x00, enabled_val];
+        cmd2.extend_from_slice(&start_angle.to_le_bytes());
+        cmd2.extend_from_slice(&end_angle.to_le_bytes());
+        self.send_command(io, &cmd2);
+
+        io.debug(&format!(
+            "[{}] Set no-transmit zone {}: {}° to {}° enabled={}",
+            self.radar_id,
+            sector,
+            start_angle as f32 / 10.0,
+            end_angle as f32 / 10.0,
+            enabled
+        ));
+    }
+
+    /// Send report requests to the radar
+    pub fn send_report_requests<I: IoProvider>(&mut self, io: &mut I) {
+        self.send_command(io, &navico::REQUEST_03_REPORT);
+        self.send_command(io, &navico::REQUEST_MANY2_REPORT);
+        self.send_command(io, &navico::COMMAND_STAY_ON_A);
     }
 
     /// Shutdown the controller

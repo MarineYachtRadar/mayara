@@ -6,6 +6,7 @@ use mayara_core::protocol::raymarine::{
     decompress_rd_spoke, parse_rd_frame_header, parse_rd_status, RD_FRAME_HEADER_SIZE,
 };
 
+use mayara_core::controllers::{RaymarineController, RaymarineVariant};
 use crate::brand::raymarine::{hd_to_pixel_values, settings, RaymarineModel};
 use crate::protos::RadarMessage::RadarMessage;
 use crate::radar::range::{Range, Ranges};
@@ -452,6 +453,24 @@ pub(super) fn process_info_report(receiver: &mut RaymarineReportReceiver, data: 
 
     receiver.info.set_doppler(model.doppler);
     receiver.radars.update(&receiver.info);
+
+    // Create the unified controller if not in replay mode
+    if !receiver.replay {
+        log::debug!("{}: Starting unified controller (RD)", receiver.key);
+        let controller = RaymarineController::new(
+            &receiver.key,
+            &receiver.info.send_command_addr.ip().to_string(),
+            receiver.info.send_command_addr.port(),
+            &receiver.info.report_addr.ip().to_string(),
+            receiver.info.report_addr.port(),
+            RaymarineVariant::RD,
+            model.doppler,
+        );
+        receiver.controller = Some(controller);
+    } else {
+        log::debug!("{}: No controller, replay mode", receiver.key);
+    }
+    receiver.base_model = Some(model.model.clone());
     receiver.model = Some(model);
     receiver.state = ReceiverState::InfoRequestReceived;
 }

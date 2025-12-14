@@ -12,11 +12,14 @@ use crate::network::create_udp_multicast_listen;
 use crate::radar::range::Ranges;
 use crate::radar::trail::TrailBuffer;
 use crate::radar::{Legend, RadarError, RadarInfo, SharedRadars, Statistics, BYTE_LOOKUP_LENGTH};
-use crate::settings::{ControlUpdate, DataUpdate};
+use crate::settings::{ControlUpdate, ControlValue, DataUpdate};
+use crate::tokio_io::TokioIoProvider;
 use crate::Session;
 
-// use super::command::Command;
-use super::command::Command;
+// Use unified controller from mayara-core
+use mayara_core::controllers::RaymarineController;
+
+use super::BaseModel;
 
 mod quantum;
 mod rd;
@@ -65,7 +68,11 @@ pub(crate) struct RaymarineReportReceiver {
     radars: SharedRadars,
     state: ReceiverState,
     model: Option<RaymarineModel>,
-    command_sender: Option<Command>,
+    base_model: Option<BaseModel>,
+    /// Unified controller from mayara-core
+    controller: Option<RaymarineController>,
+    /// I/O provider for the controller
+    io: TokioIoProvider,
     #[allow(dead_code)]
     data_update_tx: broadcast::Sender<DataUpdate>,
     control_update_rx: broadcast::Receiver<ControlUpdate>,
@@ -98,7 +105,10 @@ impl RaymarineReportReceiver {
             key,
             args
         );
-        let command_sender = None; // Only known after we receive the model info
+
+        // Controller is created when we know the model (from info report)
+        let controller = None;
+        let io = TokioIoProvider::new();
 
         let control_update_rx = info.controls.control_update_subscribe();
         let data_update_tx = info.controls.get_data_update_tx();
@@ -115,7 +125,9 @@ impl RaymarineReportReceiver {
             radars,
             state: ReceiverState::Initial,
             model: None, // We don't know this yet, it will be set when we receive the first info report
-            command_sender,
+            base_model: None,
+            controller,
+            io,
             info_request_timeout: now,
             report_request_timeout: now,
             data_update_tx,
@@ -212,23 +224,127 @@ impl RaymarineReportReceiver {
         let cv = control_update.control_value;
         let reply_tx = control_update.reply_tx;
 
-        if let Some(command_sender) = &mut self.command_sender {
-            if let Err(e) = command_sender.set_control(&cv, &self.info.controls).await {
-                return self
-                    .info
-                    .controls
-                    .send_error_to_client(reply_tx, &cv, &e)
-                    .await;
-            } else {
-                self.info.controls.set_refresh(&cv.id);
+        if let Err(e) = self.send_control_to_radar(&cv).await {
+            return self
+                .info
+                .controls
+                .send_error_to_client(reply_tx, &cv, &e)
+                .await;
+        } else {
+            self.info.controls.set_refresh(&cv.id);
+        }
+
+        Ok(())
+    }
+
+    /// Send control command to radar via the unified controller
+    async fn send_control_to_radar(&mut self, cv: &ControlValue) -> Result<(), RadarError> {
+        let controller = match &mut self.controller {
+            Some(c) => c,
+            None => return Err(RadarError::CannotSetControlType("Controller not initialized".to_string())),
+        };
+
+        let value: f32 = cv
+            .value
+            .parse()
+            .map_err(|_| RadarError::MissingValue(cv.id.clone()))?;
+        let auto = cv.auto.unwrap_or(false);
+        let enabled = cv.enabled.unwrap_or(false);
+        let v = Self::scale_100_to_byte(value);
+
+        log::debug!("{}: set_control {} = {} auto={} enabled={}", self.key, cv.id, value, auto, enabled);
+
+        match cv.id.as_str() {
+            "power" => {
+                // Look up power value using enum
+                let transmit = if let Some(control) = self.info.controls.get("power") {
+                    let index = control.enum_value_to_index(&cv.value).unwrap_or(1);
+                    index == 2 // transmit is index 2
+                } else {
+                    cv.value.to_lowercase() == "transmit"
+                };
+                controller.set_power(&mut self.io, transmit);
+            }
+            "range" => {
+                let value = value as i32;
+                let ranges = &self.info.ranges;
+                let index = if value < ranges.len() as i32 {
+                    value as u8
+                } else {
+                    let mut i = 0u8;
+                    for r in ranges.all.iter() {
+                        if r.distance() >= value {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    i
+                };
+                controller.set_range(&mut self.io, index);
+            }
+            "gain" => {
+                controller.set_gain(&mut self.io, v, auto);
+            }
+            "sea" => {
+                controller.set_sea(&mut self.io, v, auto);
+            }
+            "rain" => {
+                controller.set_rain(&mut self.io, v, enabled);
+            }
+            "colorGain" => {
+                controller.set_color_gain(&mut self.io, v, auto);
+            }
+            "interferenceRejection" => {
+                controller.set_interference_rejection(&mut self.io, v);
+            }
+            "targetExpansion" => {
+                controller.set_target_expansion(&mut self.io, v);
+            }
+            "bearingAlignment" => {
+                controller.set_bearing_alignment(&mut self.io, value);
+            }
+            "mode" => {
+                controller.set_mode(&mut self.io, v);
+            }
+            "ftc" => {
+                // FTC enabled is inverted from auto
+                let ftc_enabled = !auto;
+                controller.set_ftc(&mut self.io, v, ftc_enabled);
+            }
+            "mainBangSuppression" => {
+                // Main bang suppression enabled is inverted from auto
+                let mbs_enabled = !auto;
+                controller.set_main_bang_suppression(&mut self.io, mbs_enabled);
+            }
+            "displayTiming" => {
+                controller.set_display_timing(&mut self.io, v);
+            }
+            "tune" => {
+                controller.set_tune(&mut self.io, v, auto);
+            }
+            _ => {
+                return Err(RadarError::CannotSetControlType(cv.id.clone()));
             }
         }
 
         Ok(())
     }
 
+    fn scale_100_to_byte(a: f32) -> u8 {
+        // Map range 0..100 to 0..255
+        let mut r = a * 255.0 / 100.0;
+        if r > 255.0 {
+            r = 255.0;
+        } else if r < 0.0 {
+            r = 0.0;
+        }
+        r as u8
+    }
+
     async fn send_report_requests(&mut self) -> Result<(), RadarError> {
-        // self.command_sender.send_report_requests().await?;
+        if let Some(controller) = &mut self.controller {
+            controller.send_report_requests(&mut self.io);
+        }
         self.report_request_timeout += REPORT_REQUEST_INTERVAL;
         Ok(())
     }

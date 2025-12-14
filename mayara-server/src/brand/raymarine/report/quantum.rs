@@ -5,8 +5,8 @@ use mayara_core::protocol::raymarine::{
     QUANTUM_FRAME_HEADER_SIZE,
 };
 
-use crate::brand::raymarine::command::Command;
 use crate::brand::raymarine::report::LookupDoppler;
+use mayara_core::controllers::{RaymarineController, RaymarineVariant};
 use crate::brand::raymarine::{hd_to_pixel_values, settings, RaymarineModel};
 use crate::protos::RadarMessage::RadarMessage;
 use crate::radar::range::{Range, Ranges};
@@ -222,15 +222,23 @@ pub(super) fn process_info_report(receiver: &mut RaymarineReportReceiver, data: 
             receiver.info.set_doppler(model.doppler);
             receiver.radars.update(&receiver.info);
 
-            // If we are in replay mode, we don't need a command sender, as we will not send any commands
-            let command_sender = if !receiver.replay {
-                log::debug!("{}: Starting command sender", receiver.key);
-                Some(Command::new(receiver.info.clone(), model.model.clone()))
+            // Create the unified controller if not in replay mode
+            if !receiver.replay {
+                log::debug!("{}: Starting unified controller (Quantum)", receiver.key);
+                let controller = RaymarineController::new(
+                    &receiver.key,
+                    &receiver.info.send_command_addr.ip().to_string(),
+                    receiver.info.send_command_addr.port(),
+                    &receiver.info.report_addr.ip().to_string(),
+                    receiver.info.report_addr.port(),
+                    RaymarineVariant::Quantum,
+                    model.doppler,
+                );
+                receiver.controller = Some(controller);
             } else {
-                log::debug!("{}: No command sender, replay mode", receiver.key);
-                None
+                log::debug!("{}: No controller, replay mode", receiver.key);
             };
-            receiver.command_sender = command_sender;
+            receiver.base_model = Some(model.model.clone());
             receiver.model = Some(model);
             receiver.state = ReceiverState::InfoRequestReceived;
         }

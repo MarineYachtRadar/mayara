@@ -17,9 +17,12 @@ use crate::radar::range::{RangeDetection, RangeDetectionResult};
 use crate::radar::target::MS_TO_KN;
 use crate::radar::{DopplerMode, RadarError, RadarInfo, SharedRadars};
 use crate::settings::{ControlUpdate, ControlValue, DataUpdate};
+use crate::tokio_io::TokioIoProvider;
 use crate::Session;
 
-use super::command::Command;
+// Use unified controller from mayara-core
+use mayara_core::controllers::{NavicoController, NavicoModel};
+
 use super::Model;
 
 use crate::radar::Status;
@@ -44,7 +47,10 @@ pub struct NavicoReportReceiver {
     speed_socket: Option<UdpSocket>,
     radars: SharedRadars,
     model: Model,
-    command_sender: Option<Command>,
+    /// Unified controller from mayara-core
+    controller: Option<NavicoController>,
+    /// I/O provider for the controller
+    io: TokioIoProvider,
     info_sender: Option<Information>,
     data_tx: broadcast::Sender<DataUpdate>,
     control_update_rx: broadcast::Receiver<ControlUpdate>,
@@ -94,14 +100,33 @@ impl NavicoReportReceiver {
             key,
             args
         );
-        // If we are in replay mode, we don't need a command sender, as we will not send any commands
-        let command_sender = if !replay {
-            log::debug!("{}: Starting command sender", key);
-            Some(Command::new(session.clone(), info.clone(), model.clone()))
+
+        // Convert server Model to core NavicoModel
+        let core_model = match model {
+            Model::BR24 => NavicoModel::BR24,
+            Model::Gen3 => NavicoModel::Gen3,
+            Model::Gen4 => NavicoModel::Gen4,
+            Model::HALO => NavicoModel::Halo,
+            Model::Unknown => NavicoModel::Gen4, // Default
+        };
+
+        // If we are in replay mode, we don't need a controller
+        let controller = if !replay {
+            log::debug!("{}: Starting controller (unified)", key);
+            Some(NavicoController::new(
+                &key,
+                &info.send_command_addr.ip().to_string(),
+                info.send_command_addr.port(),
+                &info.report_addr.ip().to_string(),
+                info.report_addr.port(),
+                core_model,
+            ))
         } else {
-            log::debug!("{}: No command sender, replay mode", key);
+            log::debug!("{}: No controller, replay mode", key);
             None
         };
+        let io = TokioIoProvider::new();
+
         let info_sender = if !replay {
             log::debug!("{}: Starting info sender", key);
             Some(Information::new(key.clone(), &info))
@@ -127,7 +152,8 @@ impl NavicoReportReceiver {
             speed_socket: None,
             radars,
             model,
-            command_sender,
+            controller,
+            io,
             info_sender,
             range_timeout: now + FAR_FUTURE,
             info_request_timeout: now,
@@ -318,24 +344,173 @@ impl NavicoReportReceiver {
         let cv = control_update.control_value;
         let reply_tx = control_update.reply_tx;
 
-        if let Some(command_sender) = &mut self.command_sender {
-            if let Err(e) = command_sender.set_control(&cv, &self.info.controls).await {
+        match self.send_control_to_radar(&cv) {
+            Ok(()) => {
+                self.info.controls.set_refresh(&cv.id);
+            }
+            Err(e) => {
                 return self
                     .info
                     .controls
                     .send_error_to_client(reply_tx, &cv, &e)
                     .await;
-            } else {
-                self.info.controls.set_refresh(&cv.id);
             }
         }
 
         Ok(())
     }
 
+    /// Send a control command to the radar via the unified controller
+    fn send_control_to_radar(&mut self, cv: &ControlValue) -> Result<(), RadarError> {
+        let controller = match &mut self.controller {
+            Some(c) => c,
+            None => return Ok(()), // Replay mode, no controller
+        };
+        let value = cv
+            .value
+            .parse::<f32>()
+            .map_err(|_| RadarError::MissingValue(cv.id.clone()))?;
+        let auto = cv.auto.unwrap_or(false);
+        let enabled = cv.enabled.unwrap_or(false);
+
+        // Scale 0-100 to 0-255 for controls that use byte values
+        fn scale_100_to_byte(a: f32) -> u8 {
+            let r = a * 255.0 / 100.0;
+            r.clamp(0.0, 255.0) as u8
+        }
+
+        fn mod_deci_degrees(a: i32) -> i16 {
+            ((a + 7200) % 3600) as i16
+        }
+
+        fn get_angle_value(id: &str, controls: &crate::settings::SharedControls) -> i16 {
+            if let Some(control) = controls.get(id) {
+                if let Some(value) = control.value {
+                    return mod_deci_degrees((value * 10.0) as i32);
+                }
+            }
+            0
+        }
+
+        let deci_value = (value * 10.0) as i32;
+
+        match cv.id.as_str() {
+            "power" => {
+                // Convert to transmit/standby
+                let transmit = if let Some(control) = self.info.controls.get("power") {
+                    let index = control.enum_value_to_index(&cv.value).unwrap_or(1);
+                    index == 2 // transmit is index 2
+                } else {
+                    cv.value.to_lowercase() == "transmit"
+                };
+                controller.set_power(&mut self.io, transmit);
+            }
+            "range" => {
+                controller.set_range(&mut self.io, deci_value);
+            }
+            "bearingAlignment" => {
+                controller.set_bearing_alignment(&mut self.io, mod_deci_degrees(deci_value));
+            }
+            "gain" => {
+                controller.set_gain(&mut self.io, scale_100_to_byte(value), auto);
+            }
+            "sea" => {
+                controller.set_sea(&mut self.io, scale_100_to_byte(value), auto);
+            }
+            "rain" => {
+                controller.set_rain(&mut self.io, scale_100_to_byte(value));
+            }
+            "sidelobeSuppression" => {
+                controller.set_sidelobe_suppression(&mut self.io, scale_100_to_byte(value), auto);
+            }
+            "interferenceRejection" => {
+                controller.set_interference_rejection(&mut self.io, value as u8);
+            }
+            "targetExpansion" => {
+                controller.set_target_expansion(&mut self.io, value as u8);
+            }
+            "targetBoost" => {
+                controller.set_target_boost(&mut self.io, value as u8);
+            }
+            "seaState" => {
+                controller.set_sea_state(&mut self.io, value as u8);
+            }
+            "localInterferenceRejection" => {
+                controller.set_local_interference_rejection(&mut self.io, value as u8);
+            }
+            "scanSpeed" => {
+                controller.set_scan_speed(&mut self.io, value as u8 > 0);
+            }
+            "mode" => {
+                controller.set_mode(&mut self.io, value as u8);
+            }
+            "noiseRejection" => {
+                controller.set_noise_rejection(&mut self.io, value as u8);
+            }
+            "targetSeparation" => {
+                controller.set_target_separation(&mut self.io, value as u8);
+            }
+            "dopplerMode" => {
+                controller.set_doppler_mode(&mut self.io, value as u8);
+            }
+            "dopplerSpeed" => {
+                controller.set_doppler_speed(&mut self.io, (value as u16) * 16);
+            }
+            "antennaHeight" => {
+                controller.set_antenna_height(&mut self.io, deci_value as u16);
+            }
+            "accentLight" => {
+                controller.set_accent_light(&mut self.io, value as u8);
+            }
+            "noTransmitStart1" => {
+                let start = mod_deci_degrees(deci_value);
+                let end = get_angle_value("noTransmitEnd1", &self.info.controls);
+                controller.set_no_transmit_zone(&mut self.io, 0, start, end, enabled);
+            }
+            "noTransmitEnd1" => {
+                let start = get_angle_value("noTransmitStart1", &self.info.controls);
+                let end = mod_deci_degrees(deci_value);
+                controller.set_no_transmit_zone(&mut self.io, 0, start, end, enabled);
+            }
+            "noTransmitStart2" => {
+                let start = mod_deci_degrees(deci_value);
+                let end = get_angle_value("noTransmitEnd2", &self.info.controls);
+                controller.set_no_transmit_zone(&mut self.io, 1, start, end, enabled);
+            }
+            "noTransmitEnd2" => {
+                let start = get_angle_value("noTransmitStart2", &self.info.controls);
+                let end = mod_deci_degrees(deci_value);
+                controller.set_no_transmit_zone(&mut self.io, 1, start, end, enabled);
+            }
+            "noTransmitStart3" => {
+                let start = mod_deci_degrees(deci_value);
+                let end = get_angle_value("noTransmitEnd3", &self.info.controls);
+                controller.set_no_transmit_zone(&mut self.io, 2, start, end, enabled);
+            }
+            "noTransmitEnd3" => {
+                let start = get_angle_value("noTransmitStart3", &self.info.controls);
+                let end = mod_deci_degrees(deci_value);
+                controller.set_no_transmit_zone(&mut self.io, 2, start, end, enabled);
+            }
+            "noTransmitStart4" => {
+                let start = mod_deci_degrees(deci_value);
+                let end = get_angle_value("noTransmitEnd4", &self.info.controls);
+                controller.set_no_transmit_zone(&mut self.io, 3, start, end, enabled);
+            }
+            "noTransmitEnd4" => {
+                let start = get_angle_value("noTransmitStart4", &self.info.controls);
+                let end = mod_deci_degrees(deci_value);
+                controller.set_no_transmit_zone(&mut self.io, 3, start, end, enabled);
+            }
+            _ => return Err(RadarError::CannotSetControlType(cv.id.clone())),
+        }
+
+        Ok(())
+    }
+
     async fn send_report_requests(&mut self) -> Result<(), RadarError> {
-        if let Some(command_sender) = &mut self.command_sender {
-            command_sender.send_report_requests().await?;
+        if let Some(controller) = &mut self.controller {
+            controller.send_report_requests(&mut self.io);
         }
         self.report_request_timeout += REPORT_REQUEST_INTERVAL;
         Ok(())
@@ -505,22 +680,18 @@ impl NavicoReportReceiver {
     }
 
     async fn send_status(&mut self, status: Status) -> Result<(), RadarError> {
-        let cv = ControlValue::new("power", (status as i32).to_string());
-        self.command_sender
-            .as_mut()
-            .unwrap() // Safe, as we only create a range detection when replay is false
-            .set_control(&cv, &self.info.controls)
-            .await?;
+        if let Some(controller) = &mut self.controller {
+            let transmit = status == Status::Transmit;
+            controller.set_power(&mut self.io, transmit);
+        }
         Ok(())
     }
 
     async fn send_range(&mut self, range: i32) -> Result<(), RadarError> {
-        let cv = ControlValue::new("range", range.to_string());
-        self.command_sender
-            .as_mut()
-            .unwrap() // Safe, as we only create a range detection when replay is false
-            .set_control(&cv, &self.info.controls)
-            .await?;
+        if let Some(controller) = &mut self.controller {
+            // Range is in decimeters (range * 10)
+            controller.set_range(&mut self.io, range * 10);
+        }
         Ok(())
     }
 
@@ -726,6 +897,19 @@ impl NavicoReportReceiver {
                     log::info!("{}: Radar is model {}", self.key, model);
                     let info2 = self.info.clone();
                     self.model = model;
+
+                    // Update the controller's model
+                    if let Some(controller) = &mut self.controller {
+                        let core_model = match model {
+                            Model::BR24 => NavicoModel::BR24,
+                            Model::Gen3 => NavicoModel::Gen3,
+                            Model::Gen4 => NavicoModel::Gen4,
+                            Model::HALO => NavicoModel::Halo,
+                            Model::Unknown => NavicoModel::Gen4,
+                        };
+                        controller.set_model(core_model);
+                    }
+
                     super::settings::update_when_model_known(
                         &mut self.info.controls,
                         model,

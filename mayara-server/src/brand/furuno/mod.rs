@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 use async_trait::async_trait;
 use log::log_enabled;
 use std::collections::HashMap;
@@ -18,10 +17,7 @@ use crate::radar::{RadarInfo, SharedRadars};
 use crate::util::PrintableSlice;
 use crate::{Brand, Session};
 
-// Re-export CommandMode from mayara-core
-pub(crate) use mayara_core::protocol::furuno::command::CommandMode;
-
-mod command;
+// Modules - command.rs removed, now using unified controller from mayara-core
 mod data;
 mod report;
 mod settings;
@@ -44,10 +40,8 @@ const FURUNO_DATA_BROADCAST_ADDRESS: SocketAddrV4 =
 
 // Packet constants are now imported from mayara-core
 
-// CommandMode is now imported from mayara_core::protocol::furuno::command
-
-#[allow(dead_code)]
-enum RadarModel {
+/// Radar model enum for Furuno radars
+pub(crate) enum RadarModel {
     Unknown,
     FAR21x7,
     DRS,

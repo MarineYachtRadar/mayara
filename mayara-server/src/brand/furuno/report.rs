@@ -1,126 +1,90 @@
-use anyhow::Error;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::BufReader;
+//! Furuno report receiver using unified mayara-core controller
+//!
+//! This module wraps the platform-independent `FurunoController` from mayara-core,
+//! polling it in an async loop and applying state updates to the server's control system.
 
 use std::time::Duration;
-use tokio::io::WriteHalf;
-use tokio::net::{TcpSocket, TcpStream};
-use tokio::time::{sleep, sleep_until, Instant};
+use tokio::time::sleep;
 use tokio_graceful_shutdown::SubsystemHandle;
 
-// Use mayara-core for parsing (pure, WASM-compatible)
-use mayara_core::protocol::furuno::report::{
-    parse_report, model_from_modules, version_from_modules,
-    FurunoReport, RadarState as CoreRadarState,
-};
-use mayara_core::protocol::furuno::dispatch::{
-    parse_control_response, ControlUpdate as CoreControlUpdate,
-};
+// Use unified controller from mayara-core
+use mayara_core::controllers::FurunoController;
 
 use super::settings;
 use super::RadarModel;
 use crate::radar::{RadarError, RadarInfo, Status};
 use crate::settings::ControlUpdate;
+use crate::tokio_io::TokioIoProvider;
 use crate::Session;
 
-use super::command::Command;
-
+/// Furuno report receiver that uses the unified core controller
 pub struct FurunoReportReceiver {
-    session: Session,
+    #[allow(dead_code)]
+    session: Session, // Kept for potential future use
     info: RadarInfo,
     key: String,
-    command_sender: Command,
-    stream: Option<TcpStream>,
-    report_request_interval: Duration,
+    /// Unified controller from mayara-core
+    controller: FurunoController,
+    /// I/O provider for the controller
+    io: TokioIoProvider,
+    /// Poll interval for the controller
+    poll_interval: Duration,
+    /// Whether model info has been received
     model_known: bool,
 }
 
 impl FurunoReportReceiver {
     pub fn new(session: Session, info: RadarInfo) -> FurunoReportReceiver {
         let key = info.key();
+        let radar_addr = info.addr.ip().to_string();
 
-        let command_sender = Command::new(&info);
+        // Create the unified controller from mayara-core
+        let controller = FurunoController::new(&key, &radar_addr);
+        let io = TokioIoProvider::new();
 
         FurunoReportReceiver {
             session,
             info,
             key,
-            command_sender,
-            stream: None,
-            report_request_interval: Duration::from_millis(5000),
+            controller,
+            io,
+            poll_interval: Duration::from_millis(100), // 10Hz polling
             model_known: false,
         }
     }
 
-    async fn start_stream(&mut self) -> Result<(), RadarError> {
-        if self.info.send_command_addr.port() == 0 {
-            // Port not set yet, we need to login to the radar first.
-            return Err(RadarError::InvalidPort);
-        }
-        let sock = TcpSocket::new_v4().map_err(|e| RadarError::Io(e))?;
-        self.stream = Some(
-            sock.connect(std::net::SocketAddr::V4(self.info.send_command_addr))
-                .await
-                .map_err(|e| RadarError::Io(e))?,
-        );
-        Ok(())
-    }
+    /// Main run loop - polls the core controller and handles commands
+    pub async fn run(mut self, subsys: SubsystemHandle) -> Result<(), RadarError> {
+        log::info!("{}: report receiver starting (unified controller)", self.key);
 
-    //
-    // Process reports coming in from the radar on self.sock and commands from the
-    // controller (= user) on self.info.command_tx.
-    //
-    async fn data_loop(&mut self, subsys: &SubsystemHandle) -> Result<(), RadarError> {
-        log::debug!("{}: listening for reports", self.key);
         let mut command_rx = self.info.control_update_subscribe();
-
-        let stream = self.stream.take().unwrap();
-        let (reader, mut writer) = tokio::io::split(stream);
-        // self.command_sender.init(&mut writer).await?;
-
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        let mut deadline = Instant::now() + self.report_request_interval;
-        let mut first_report_received = false;
 
         loop {
             tokio::select! {
                 _ = subsys.on_shutdown_requested() => {
                     log::info!("{}: shutdown", self.key);
-                    return Err(RadarError::Shutdown);
+                    self.controller.shutdown(&mut self.io);
+                    return Ok(());
                 },
 
-                _ = sleep_until(deadline) => {
-                    self.command_sender.send_report_requests(&mut writer).await?;
-                    deadline = Instant::now() + self.report_request_interval;
-                },
+                _ = sleep(self.poll_interval) => {
+                    // Poll the controller
+                    self.controller.poll(&mut self.io);
 
-                r = reader.read_line(&mut line) => {
-                    match r {
-                        Ok(len) => {
-                            if len > 2 {
-                                if let Err(e) = self.process_report(&line) {
-                                    log::error!("{}: {}", self.key, e);
-                                } else if !first_report_received {
-                                    self.command_sender.init(&mut writer).await?;
-                                    first_report_received = true;
-                                }
-                            }
-                            line.clear();
-                        }
-                        Err(e) => {
-                            log::error!("{}: receive error: {}", self.key, e);
-                            return Err(RadarError::Io(e));
-                        }
-                    }
+                    // Apply state updates from controller to server controls
+                    self.apply_controller_state();
+
+                    // Check for model info
+                    self.check_model_info();
                 },
 
                 r = command_rx.recv() => {
                     match r {
                         Err(_) => {},
-                        Ok(cv) => {
-                            if let Err(e) = self.process_control_update(&mut writer, cv).await {
-                                return Err(e);
+                        Ok(update) => {
+                            if let Err(e) = self.process_control_update(update).await {
+                                log::error!("{}: control update error: {:?}", self.key, e);
+                                // Don't return on control errors, keep running
                             }
                         },
                     }
@@ -129,70 +93,151 @@ impl FurunoReportReceiver {
         }
     }
 
-    async fn process_control_update(
-        &mut self,
-        write: &mut WriteHalf<TcpStream>,
-        control_update: ControlUpdate,
-    ) -> Result<(), RadarError> {
-        let cv = control_update.control_value;
-        let reply_tx = control_update.reply_tx;
+    /// Apply controller state to server controls
+    fn apply_controller_state(&mut self) {
+        // Clone state to avoid borrow checker issues with self.set_* methods
+        let state = self.controller.radar_state().clone();
 
-        if let Err(e) = self.command_sender.set_control(write, &cv).await {
-            self.info
-                .controls
-                .send_error_to_client(reply_tx, &cv, &e)
-                .await?;
-            match &e {
-                RadarError::Io(_) => {
-                    return Err(e);
-                }
-                _ => {}
-            }
-        } else {
-            self.info.controls.set_refresh(&cv.id);
-        }
-
-        Ok(())
-    }
-
-    pub async fn run(mut self, subsys: SubsystemHandle) -> Result<(), RadarError> {
-        self.start_stream().await?;
-        loop {
-            if self.stream.is_some() {
-                match self.data_loop(&subsys).await {
-                    Err(RadarError::Shutdown) => {
-                        return Ok(());
-                    }
-                    _ => {
-                        // Ignore, reopen socket
-                    }
-                }
-                self.stream = None;
-            } else {
-                sleep(Duration::from_millis(1000)).await;
-                self.login_to_radar()?;
-                self.start_stream().await?;
-            }
-        }
-    }
-
-    fn login_to_radar(&mut self) -> Result<(), RadarError> {
-        // Furuno radars use a single TCP/IP connection to send commands and
-        // receive status reports, so report_addr and send_command_addr are identical.
-        // Only one of these would be enough for Furuno.
-        let port: u16 = match super::login_to_radar(self.session.clone(), self.info.addr) {
-            Err(e) => {
-                log::error!("{}: Unable to connect for login: {}", self.info.key(), e);
-                return Err(RadarError::LoginFailed);
-            }
-            Ok(p) => p,
+        // Apply power state
+        let power_status = match state.power {
+            mayara_core::state::PowerState::Off => Status::Off,
+            mayara_core::state::PowerState::Standby => Status::Standby,
+            mayara_core::state::PowerState::Transmit => Status::Transmit,
+            mayara_core::state::PowerState::Warming => Status::Preparing,
         };
-        if port != self.info.send_command_addr.port() {
-            self.info.send_command_addr.set_port(port);
-            self.info.report_addr.set_port(port);
+        self.set_value("power", power_status as i32 as f32);
+
+        // Apply range
+        if state.range > 0 {
+            self.set_value("range", state.range as f32);
         }
+
+        // Apply gain, sea, rain with auto mode
+        self.set_value_auto("gain", state.gain.value as f32, state.gain.mode == "auto");
+        self.set_value_auto("sea", state.sea.value as f32, state.sea.mode == "auto");
+        self.set_value_auto("rain", state.rain.value as f32, state.rain.mode == "auto");
+
+        // Apply signal processing controls
+        self.set_value("noiseReduction", if state.noise_reduction { 1.0 } else { 0.0 });
+        self.set_value("interferenceRejection", if state.interference_rejection { 1.0 } else { 0.0 });
+
+        // Apply extended controls
+        self.set_value("beamSharpening", state.beam_sharpening as f32);
+        self.set_value("birdMode", state.bird_mode as f32);
+        self.set_value("scanSpeed", state.scan_speed as f32);
+        self.set_value("mainBangSuppression", state.main_bang_suppression as f32);
+        self.set_value("txChannel", state.tx_channel as f32);
+
+        // Apply Doppler mode (mode is "target" or "rain" string)
+        let doppler_mode_value = match state.doppler_mode.mode.as_str() {
+            "off" => 0.0,
+            "target" | "targets" => 1.0,
+            "rain" => 2.0,
+            _ => 0.0,
+        };
+        self.set("dopplerMode", doppler_mode_value, Some(state.doppler_mode.enabled));
+
+        // Apply no-transmit zones
+        if !state.no_transmit_zones.zones.is_empty() {
+            if let Some(z1) = state.no_transmit_zones.zones.first() {
+                self.set_value("noTransmitStart1", z1.start as f32);
+                self.set_value("noTransmitEnd1", z1.end as f32);
+            }
+            if let Some(z2) = state.no_transmit_zones.zones.get(1) {
+                self.set_value("noTransmitStart2", z2.start as f32);
+                self.set_value("noTransmitEnd2", z2.end as f32);
+            }
+        }
+    }
+
+    /// Check for model info from controller
+    fn check_model_info(&mut self) {
+        if self.model_known {
+            return;
+        }
+
+        if let Some(model_name) = self.controller.model() {
+            self.model_known = true;
+
+            // Convert to RadarModel
+            let model = Self::model_name_to_radar_model(model_name);
+            let version = self.controller.firmware_version().unwrap_or("unknown");
+
+            log::info!(
+                "{}: Radar model {} version {}",
+                self.key,
+                model.to_str(),
+                version
+            );
+
+            settings::update_when_model_known(&mut self.info, model, version);
+        }
+
+        // Apply operating hours if available
+        if let Some(hours) = self.controller.operating_hours() {
+            self.set_value("operatingHours", hours as f32);
+        }
+    }
+
+    /// Process control update from REST API
+    async fn process_control_update(&mut self, update: ControlUpdate) -> Result<(), RadarError> {
+        let cv = update.control_value;
+        let reply_tx = update.reply_tx;
+
+        log::debug!("{}: set_control {} = {}", self.key, cv.id, cv.value);
+
+        let result = self.send_control_to_radar(&cv.id, &cv.value, cv.auto.unwrap_or(false));
+
+        match result {
+            Ok(()) => {
+                self.info.controls.set_refresh(&cv.id);
+                Ok(())
+            }
+            Err(e) => {
+                self.info.controls.send_error_to_client(reply_tx, &cv, &e).await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Send a control command to the radar via the unified controller
+    fn send_control_to_radar(&mut self, id: &str, value: &str, auto: bool) -> Result<(), RadarError> {
+        // Handle power separately (enum value)
+        if id == "power" {
+            let transmit = value == "transmit" || value == "Transmit";
+            self.controller.set_transmit(&mut self.io, transmit);
+            return Ok(());
+        }
+
+        // Parse numeric value
+        let num_value: i32 = value
+            .parse::<f32>()
+            .map(|v| v as i32)
+            .map_err(|_| RadarError::MissingValue(id.to_string()))?;
+
+        // Dispatch to appropriate controller method
+        match id {
+            "range" => self.controller.set_range(&mut self.io, num_value as u32),
+            "gain" => self.controller.set_gain(&mut self.io, num_value, auto),
+            "sea" => self.controller.set_sea(&mut self.io, num_value, auto),
+            "rain" => self.controller.set_rain(&mut self.io, num_value, auto),
+            "beamSharpening" => self.controller.set_rezboost(&mut self.io, num_value),
+            "interferenceRejection" => self.controller.set_interference_rejection(&mut self.io, num_value != 0),
+            "noiseReduction" => self.controller.set_noise_reduction(&mut self.io, num_value != 0),
+            "scanSpeed" => self.controller.set_scan_speed(&mut self.io, num_value),
+            "birdMode" => self.controller.set_bird_mode(&mut self.io, num_value),
+            "mainBangSuppression" => self.controller.set_main_bang_suppression(&mut self.io, num_value),
+            "txChannel" => self.controller.set_tx_channel(&mut self.io, num_value),
+            "bearingAlignment" => self.controller.set_bearing_alignment(&mut self.io, num_value as f64),
+            "antennaHeight" => self.controller.set_antenna_height(&mut self.io, num_value),
+            "autoAcquire" => self.controller.set_auto_acquire(&mut self.io, num_value != 0),
+            _ => return Err(RadarError::CannotSetControlType(id.to_string())),
+        }
+
         Ok(())
     }
+
+    // Helper methods for setting control values
 
     fn set(&mut self, control_type: &str, value: f32, auto: Option<bool>) {
         match self.info.controls.set(control_type, value, auto) {
@@ -200,7 +245,7 @@ impl FurunoReportReceiver {
                 log::error!("{}: {}", self.key, e.to_string());
             }
             Ok(Some(())) => {
-                if log::log_enabled!(log::Level::Debug) {
+                if log::log_enabled!(log::Level::Trace) {
                     let control = self.info.controls.get(control_type).unwrap();
                     log::trace!(
                         "{}: Control '{}' new value {} enabled {:?}",
@@ -219,19 +264,15 @@ impl FurunoReportReceiver {
         self.set(control_type, value, None)
     }
 
-    fn set_value_auto(&mut self, control_type: &str, value: f32, auto: u8) {
-        match self
-            .info
-            .controls
-            .set_value_auto(control_type, auto > 0, value)
-        {
+    fn set_value_auto(&mut self, control_type: &str, value: f32, auto: bool) {
+        match self.info.controls.set_value_auto(control_type, auto, value) {
             Err(e) => {
                 log::error!("{}: {}", self.key, e.to_string());
             }
             Ok(Some(())) => {
-                if log::log_enabled!(log::Level::Debug) {
+                if log::log_enabled!(log::Level::Trace) {
                     let control = self.info.controls.get(control_type).unwrap();
-                    log::debug!(
+                    log::trace!(
                         "{}: Control '{}' new value {} auto {}",
                         self.key,
                         control_type,
@@ -244,280 +285,22 @@ impl FurunoReportReceiver {
         };
     }
 
-    #[allow(dead_code)]
-    fn set_value_with_many_auto(
-        &mut self,
-        control_type: &str,
-        value: f32,
-        auto_value: f32,
-    ) {
-        match self
-            .info
-            .controls
-            .set_value_with_many_auto(control_type, value, auto_value)
-        {
-            Err(e) => {
-                log::error!("{}: {}", self.key, e.to_string());
-            }
-            Ok(Some(())) => {
-                if log::log_enabled!(log::Level::Debug) {
-                    let control = self.info.controls.get(control_type).unwrap();
-                    log::debug!(
-                        "{}: Control '{}' new value {} auto_value {:?} auto {:?}",
-                        self.key,
-                        control_type,
-                        control.value(),
-                        control.auto_value,
-                        control.auto
-                    );
-                }
-            }
-            Ok(None) => {}
-        };
-    }
-
-    #[allow(dead_code)]
-    fn set_string(&mut self, control: &str, value: String) {
-        match self.info.controls.set_string(control, value) {
-            Err(e) => {
-                log::error!("{}: {}", self.key, e.to_string());
-            }
-            Ok(Some(v)) => {
-                log::debug!("{}: Control '{}' new value '{}'", self.key, control, v);
-            }
-            Ok(None) => {}
-        };
-    }
-
-    /// Process a TCP report line using mayara-core parsing
-    #[inline(never)]
-    fn process_report(&mut self, line: &str) -> Result<(), Error> {
-        // First try dispatch parsing for extended controls (beamSharpening, birdMode, etc.)
-        // These are $NEE, $NED, $NEF, $N67 format responses
-        if let Some(update) = parse_control_response(line) {
-            log::trace!("{}: dispatch parsed control update", self.key);
-            self.apply_control_update(update);
-            return Ok(());
-        }
-
-        // Fall back to FurunoReport parsing for base controls and other reports
-        let report = match parse_report(line) {
-            Ok(r) => r,
-            Err(e) => {
-                log::debug!("{}: Failed to parse report: {}", self.key, e);
-                return Ok(()); // Ignore unparseable reports
-            }
-        };
-
-        log::trace!("{}: parsed report {:?}", self.key, report);
-
-        // Apply the parsed report to server state
-        self.apply_report(report)
-    }
-
-    /// Apply a parsed FurunoReport to server state
-    #[inline(never)]
-    fn apply_report(&mut self, report: FurunoReport) -> Result<(), Error> {
-        match report {
-            FurunoReport::Status(s) => {
-                let generic_state = match s.state {
-                    CoreRadarState::Preparing => Status::Preparing,
-                    CoreRadarState::Standby => Status::Standby,
-                    CoreRadarState::Transmit => Status::Transmit,
-                    CoreRadarState::Off => Status::Off,
-                };
-                self.set_value("power", generic_state as i32 as f32);
-            }
-
-            FurunoReport::Gain(g) => {
-                log::trace!(
-                    "Gain: {} auto {} auto_value={}",
-                    g.value,
-                    g.auto,
-                    g.auto_value
-                );
-                self.set_value_auto("gain", g.value, if g.auto { 1 } else { 0 });
-            }
-
-            FurunoReport::Sea(s) => {
-                self.set_value_auto("sea", s.value, if s.auto { 1 } else { 0 });
-            }
-
-            FurunoReport::Rain(r) => {
-                self.set_value_auto("rain", r.value, if r.auto { 1 } else { 0 });
-            }
-
-            FurunoReport::Range(r) => {
-                // range_meters is already converted from wire index by mayara-core
-                self.set_value("range", r.range_meters as f32);
-            }
-
-            FurunoReport::OnTime(o) => {
-                self.set_value("operatingHours", o.hours);
-            }
-
-            FurunoReport::Modules(m) => {
-                self.handle_modules_report(&m);
-            }
-
-            FurunoReport::AliveCheck => {
-                // No action needed for keepalive response
-            }
-
-            FurunoReport::CustomPictureAll(_) => {
-                // TODO: Handle custom picture settings
-                log::trace!("{}: CustomPictureAll received (not yet implemented)", self.key);
-            }
-
-            FurunoReport::AntennaType(_) => {
-                // TODO: Handle antenna type
-                log::trace!("{}: AntennaType received (not yet implemented)", self.key);
-            }
-
-            FurunoReport::BlindSector(b) => {
-                // TODO: Apply blind sector settings
-                log::trace!("{}: BlindSector received: {:?} (not yet implemented)", self.key, b);
-            }
-
-            FurunoReport::MainBangSize(m) => {
-                // Convert 0-255 to 0-100%
-                let percent = (m.value * 100) / 255;
-                self.set_value("mainBangSuppression", percent as f32);
-            }
-
-            FurunoReport::AntennaHeight(h) => {
-                self.set_value("antennaHeight", h.meters as f32);
-            }
-
-            FurunoReport::NearSTC(v) => {
-                log::trace!("{}: NearSTC = {} (not yet implemented)", self.key, v);
-            }
-
-            FurunoReport::MiddleSTC(v) => {
-                log::trace!("{}: MiddleSTC = {} (not yet implemented)", self.key, v);
-            }
-
-            FurunoReport::FarSTC(v) => {
-                log::trace!("{}: FarSTC = {} (not yet implemented)", self.key, v);
-            }
-
-            FurunoReport::WakeUpCount(v) => {
-                log::trace!("{}: WakeUpCount = {} (not yet implemented)", self.key, v);
-            }
-
-            FurunoReport::Unknown { command_id, values } => {
-                log::debug!(
-                    "{}: Unknown command {:02X} with values {:?}",
-                    self.key,
-                    command_id,
-                    values
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Apply a control update from dispatch parsing (for extended controls)
-    #[inline(never)]
-    fn apply_control_update(&mut self, update: CoreControlUpdate) {
-        match update {
-            CoreControlUpdate::Power(transmitting) => {
-                let value = if transmitting { Status::Transmit } else { Status::Standby };
-                self.set_value("power", value as i32 as f32);
-            }
-            CoreControlUpdate::Range(range_meters) => {
-                // range_meters is already converted from wire index by mayara-core
-                self.set_value("range", range_meters as f32);
-            }
-            CoreControlUpdate::Gain { auto, value } => {
-                self.set_value_auto("gain", value as f32, if auto { 1 } else { 0 });
-            }
-            CoreControlUpdate::Sea { auto, value } => {
-                self.set_value_auto("sea", value as f32, if auto { 1 } else { 0 });
-            }
-            CoreControlUpdate::Rain { auto, value } => {
-                self.set_value_auto("rain", value as f32, if auto { 1 } else { 0 });
-            }
-            CoreControlUpdate::NoiseReduction(enabled) => {
-                self.set_value("noiseReduction", if enabled { 1.0 } else { 0.0 });
-            }
-            CoreControlUpdate::InterferenceRejection(enabled) => {
-                self.set_value("interferenceRejection", if enabled { 1.0 } else { 0.0 });
-            }
-            CoreControlUpdate::BeamSharpening(level) => {
-                self.set_value("beamSharpening", level as f32);
-            }
-            CoreControlUpdate::BirdMode(level) => {
-                self.set_value("birdMode", level as f32);
-            }
-            CoreControlUpdate::DopplerMode { enabled, mode } => {
-                // Store as compound: enabled flag and mode value
-                self.set("dopplerMode", mode as f32, Some(enabled));
-            }
-            CoreControlUpdate::ScanSpeed(mode) => {
-                self.set_value("scanSpeed", mode as f32);
-            }
-            CoreControlUpdate::MainBangSuppression(percent) => {
-                self.set_value("mainBangSuppression", percent as f32);
-            }
-            CoreControlUpdate::TxChannel(channel) => {
-                self.set_value("txChannel", channel as f32);
-            }
-            CoreControlUpdate::BlindSector(state) => {
-                // Apply all four sector values (end is calculated from start + width)
-                self.set_value("noTransmitStart1", state.sector1_start as f32);
-                self.set_value("noTransmitEnd1", state.sector1_end() as f32);
-                self.set_value("noTransmitStart2", state.sector2_start as f32);
-                self.set_value("noTransmitEnd2", state.sector2_end() as f32);
-            }
-            CoreControlUpdate::OperatingTime(seconds) => {
-                self.set_value("operatingHours", seconds as f32 / 3600.0);
-            }
+    /// Convert model name string to RadarModel enum
+    fn model_name_to_radar_model(name: &str) -> RadarModel {
+        match name {
+            "FAR-21x7" => RadarModel::FAR21x7,
+            "DRS" => RadarModel::DRS,
+            "FAR-14x7" => RadarModel::FAR14x7,
+            "DRS4DL" => RadarModel::DRS4DL,
+            "FAR-3000" => RadarModel::FAR3000,
+            "DRS4D-NXT" => RadarModel::DRS4DNXT,
+            "DRS6A-NXT" => RadarModel::DRS6ANXT,
+            "DRS6A-XCLASS" => RadarModel::DRS6AXCLASS,
+            "FAR-15x3" => RadarModel::FAR15x3,
+            "FAR-14x6" => RadarModel::FAR14x6,
+            "DRS12A-NXT" => RadarModel::DRS12ANXT,
+            "DRS25A-NXT" => RadarModel::DRS25ANXT,
+            _ => RadarModel::Unknown,
         }
     }
-
-    /// Handle the Modules report using mayara-core model lookup
-    fn handle_modules_report(&mut self, modules: &mayara_core::protocol::furuno::report::ModulesReport) {
-        if self.model_known {
-            return;
-        }
-        self.model_known = true;
-
-        // Use mayara-core's firmware_to_model mapping
-        let core_model = model_from_modules(modules);
-        let version = version_from_modules(modules).unwrap_or_default();
-
-        // Convert core Model to server RadarModel
-        let model = Self::core_model_to_radar_model(core_model);
-
-        log::info!(
-            "{}: Radar model {} version {}",
-            self.key,
-            model.to_str(),
-            version
-        );
-        settings::update_when_model_known(&mut self.info, model, &version);
-        self.command_sender.set_ranges(self.info.ranges.clone());
-    }
-
-    /// Convert mayara-core Model to server RadarModel
-    fn core_model_to_radar_model(core: mayara_core::protocol::furuno::Model) -> RadarModel {
-        use mayara_core::protocol::furuno::Model as CoreModel;
-        match core {
-            CoreModel::Unknown => RadarModel::Unknown,
-            CoreModel::FAR21x7 => RadarModel::FAR21x7,
-            CoreModel::DRS => RadarModel::DRS,
-            CoreModel::FAR14x7 => RadarModel::FAR14x7,
-            CoreModel::DRS4DL => RadarModel::DRS4DL,
-            CoreModel::FAR3000 => RadarModel::FAR3000,
-            CoreModel::DRS4DNXT => RadarModel::DRS4DNXT,
-            CoreModel::DRS6ANXT => RadarModel::DRS6ANXT,
-            CoreModel::DRS6AXCLASS => RadarModel::DRS6AXCLASS,
-            CoreModel::FAR15x3 => RadarModel::FAR15x3,
-            CoreModel::FAR14x6 => RadarModel::FAR14x6,
-            CoreModel::DRS12ANXT => RadarModel::DRS12ANXT,
-            CoreModel::DRS25ANXT => RadarModel::DRS25ANXT,
-        }
-    }
-
 }

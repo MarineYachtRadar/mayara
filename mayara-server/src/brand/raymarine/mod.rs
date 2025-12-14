@@ -15,7 +15,6 @@ use crate::radar::{RadarInfo, SharedRadars};
 use crate::util::PrintableSlice;
 use crate::{Brand, Session};
 
-mod command;
 mod report;
 mod settings;
 

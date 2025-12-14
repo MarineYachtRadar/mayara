@@ -333,7 +333,7 @@ impl CoreLocatorAdapter {
 | **ConnectionManager** | mayara-core/connection.rs | State machine, backoff, Furuno login |
 | **RadarState types** | mayara-core/state.rs | Control values, update_from_response() |
 | **Dispatch functions** | mayara-core/protocol/furuno/dispatch.rs | Control ID → wire command routing |
-| **Unified Controllers** | mayara-core/controllers/ | Furuno, Navico, Raymarine, Garmin (all brands!) |
+| **Unified Controllers** | mayara-core/controllers/ | All 4 brands: FurunoController, NavicoController, RaymarineController, GarminController |
 | **ARPA tracking** | mayara-core/arpa/ | Kalman filter, CPA/TCPA, contour detection |
 | **Trails history** | mayara-core/trails/ | Target position storage |
 | **Guard zones** | mayara-core/guard_zones/ | Zone alerting logic |
@@ -345,12 +345,22 @@ impl CoreLocatorAdapter {
 | **Web GUI** | mayara-gui/ | Shared between WASM and Standalone |
 | **Local storage API** | mayara-server/storage.rs | SignalK-compatible applicationData |
 
-### 🚧 In Progress / Partial
+### Server Brand Controller Integration
 
-| Component | Location | Status |
-|-----------|----------|--------|
-| Raymarine support | mayara-server/brand/raymarine/ | Partial (untested) |
-| Garmin support | mayara-server/brand/garmin/ | Stub only |
+The server's brand modules now delegate to unified core controllers:
+
+| Brand | Core Controller | Server Integration | Status |
+|-------|-----------------|-------------------|--------|
+| **Furuno** | `FurunoController` (TCP login + commands) | `brand/furuno/report.rs` uses core | ✅ Complete |
+| **Navico** | `NavicoController` (UDP multicast) | `brand/navico/report.rs` uses core | ✅ Complete |
+| **Raymarine** | `RaymarineController` (Quantum/RD) | `brand/raymarine/report.rs` uses core | ✅ Complete |
+| **Garmin** | `GarminController` (UDP) | Core ready, server uses legacy locator | 🚧 Partial |
+
+The server's `brand/` modules still handle:
+- Async spoke data reception (tokio streams)
+- Radar discovery and lifecycle management
+- Control value caching and broadcasting
+- WebSocket spoke streaming to clients
 
 ### ❌ Not Yet Implemented
 
@@ -358,6 +368,7 @@ impl CoreLocatorAdapter {
 |-----------|-------|
 | mayara_opencpn plugin | OpenCPN integration (see Future section) |
 | SignalK Provider Mode | Standalone → SignalK provider registration |
+| Garmin server controller | Server still uses old locator-based approach |
 
 ---
 
@@ -527,6 +538,35 @@ Each controller manages its own connection state:
 | **Raymarine** | UDP | Report multicast | Quantum (solid-state) vs RD (magnetron) |
 | **Garmin** | UDP multicast | Report multicast | xHD series, simple protocol |
 
+### RaymarineController Variants
+
+Raymarine radars come in two fundamentally different types with incompatible command formats:
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                        RaymarineController                                  │
+│  (mayara-core/controllers/raymarine.rs)                                    │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  RaymarineVariant::Quantum (Solid-State)                                   │
+│  ├── Command format: [opcode_lo, opcode_hi, 0x28, 0x00, 0x00, value, ...]  │
+│  ├── One-byte values: quantum_one_byte_command(opcode, value)              │
+│  ├── Two-byte values: quantum_two_byte_command(opcode, value)              │
+│  └── Models: Quantum, Quantum 2                                            │
+│                                                                             │
+│  RaymarineVariant::RD (Magnetron)                                          │
+│  ├── Command format: [0x00, 0xc1, lead_bytes..., value, 0x00, ...]        │
+│  ├── Standard: rd_standard_command(lead, value)                            │
+│  ├── On/Off: rd_on_off_command(lead, on_off)                              │
+│  └── Models: RD418D, RD418HD, RD424D, RD424HD, RD848                       │
+│                                                                             │
+│  The server creates the correct variant when model is detected:            │
+│    RaymarineController::new(..., RaymarineVariant::Quantum, ...)           │
+│    RaymarineController::new(..., RaymarineVariant::RD, ...)                │
+│                                                                             │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
 ### Usage Example (WASM)
 
 ```rust
@@ -567,6 +607,60 @@ impl RadarProvider {
     }
 }
 ```
+
+### Server Integration Pattern
+
+The server's `brand/` modules wrap core controllers with async/tokio integration:
+
+```rust
+// mayara-server/src/brand/raymarine/report.rs (simplified)
+
+use mayara_core::controllers::{RaymarineController, RaymarineVariant};
+use crate::tokio_io::TokioIoProvider;
+
+pub struct RaymarineReportReceiver {
+    controller: Option<RaymarineController>,  // Core controller
+    io: TokioIoProvider,                       // Platform I/O adapter
+    // ... other fields for spoke data, trails, etc.
+}
+
+impl RaymarineReportReceiver {
+    // When model is detected, create the appropriate variant
+    fn on_model_detected(&mut self, model: &RaymarineModel) {
+        self.controller = Some(RaymarineController::new(
+            &self.key,
+            &self.info.send_command_addr.ip().to_string(),
+            self.info.send_command_addr.port(),
+            &self.info.report_addr.ip().to_string(),
+            self.info.report_addr.port(),
+            if model.is_quantum() { RaymarineVariant::Quantum }
+            else { RaymarineVariant::RD },
+            model.doppler,
+        ));
+    }
+
+    // Control requests come through ControlValue channel
+    async fn send_control_to_radar(&mut self, cv: &ControlValue) -> Result<(), RadarError> {
+        let controller = self.controller.as_mut()
+            .ok_or_else(|| RadarError::CannotSetControlType("Controller not initialized".into()))?;
+
+        match cv.id.as_str() {
+            "power" => controller.set_power(&mut self.io, cv.value as u8),
+            "range" => controller.set_range(&mut self.io, cv.value as u32),
+            "gain" => controller.set_gain(&mut self.io, cv.value as u32, cv.auto.unwrap_or(false)),
+            // ... 20+ more controls
+            _ => return Err(RadarError::CannotSetControlType(cv.id.clone())),
+        }
+        Ok(())
+    }
+}
+```
+
+**Key insight:** The server's brand modules are now thin dispatchers that:
+1. Create core controllers when radar model is detected
+2. Route control requests to the appropriate core controller method
+3. Handle async spoke data reception (still server-specific)
+4. Manage WebSocket broadcasting to clients
 
 ### Benefits of Unified Controllers
 
@@ -729,6 +823,140 @@ pub fn format_control_command(control_id: &str, value: i32, auto: bool) -> Optio
 
 ---
 
+## Architecture Evolution
+
+The architecture evolved through several phases to achieve maximum code reuse:
+
+### Phase 1: Server-Only (Historical)
+- Each brand had its own locator, command, report, and data modules
+- No sharing between brands or platforms
+- Code duplication between brands (~2000+ lines per brand)
+
+### Phase 2: Protocol Extraction
+- Wire protocol parsing moved to mayara-core
+- Model database (ranges, capabilities) centralized
+- Control definitions unified across brands
+- Server still had brand-specific controllers
+
+### Phase 3: IoProvider Abstraction
+- `IoProvider` trait created for platform-independent I/O
+- `RadarLocator` moved to core (discovery logic shared)
+- `TokioIoProvider` for server, `WasmIoProvider` for WASM
+- Both platforms use identical discovery code
+
+### Phase 4: Unified Controllers (Current)
+- Brand controllers moved to mayara-core:
+  - `FurunoController` - TCP login + command protocol
+  - `NavicoController` - UDP multicast commands
+  - `RaymarineController` - Quantum/RD variant handling
+  - `GarminController` - UDP commands
+- Server's brand modules become thin dispatchers
+- WASM and server share identical control logic
+
+### Remaining Work
+- Garmin server integration (core controller exists, server still uses legacy)
+- SignalK provider mode (standalone → SignalK registration)
+- OpenCPN plugin (HTTP/WebSocket client)
+
+---
+
+## Data Flow Diagrams
+
+### Control Command Flow
+
+When a user changes a control (e.g., sets gain to 50):
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Control Flow                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  WebGUI                                                                      │
+│    │ PUT /radars/{id}/controls/gain {value: 50, auto: false}                │
+│    ▼                                                                         │
+│  Axum Handler (web.rs)                                                       │
+│    │ Sends ControlValue to brand module via channel                         │
+│    ▼                                                                         │
+│  Brand Report Receiver (e.g., raymarine/report.rs)                          │
+│    │ Receives ControlValue from channel                                     │
+│    │ Calls send_control_to_radar(&cv)                                       │
+│    ▼                                                                         │
+│  Core Controller (controllers/raymarine.rs)                                  │
+│    │ controller.set_gain(&mut io, 50, false)                                │
+│    │ Builds command bytes for Quantum or RD variant                         │
+│    ▼                                                                         │
+│  TokioIoProvider                                                             │
+│    │ io.udp_send_to(&socket, command_bytes, &radar_addr, port)              │
+│    ▼                                                                         │
+│  UDP Socket → Radar Hardware                                                 │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Spoke Data Flow
+
+When radar sends spoke data:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Spoke Data Flow                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Radar Hardware                                                              │
+│    │ UDP multicast spoke packets                                            │
+│    ▼                                                                         │
+│  Brand Data Receiver (e.g., raymarine/data.rs)                              │
+│    │ Async tokio::net::UdpSocket.recv()                                     │
+│    │ Parses frame header, decompresses spoke data                           │
+│    │ Uses mayara-core protocol parsing                                       │
+│    ▼                                                                         │
+│  Spoke Processing                                                            │
+│    │ Apply trails (mayara-core/trails/)                                     │
+│    │ Convert to protobuf spoke format                                        │
+│    ▼                                                                         │
+│  RadarInfo.broadcast_radar_message()                                         │
+│    │ Sends to all connected WebSocket clients                               │
+│    ▼                                                                         │
+│  WebSocket Stream                                                            │
+│    │ Binary protobuf message                                                │
+│    ▼                                                                         │
+│  WebGUI (viewer.js)                                                          │
+│    │ Decodes protobuf, renders on canvas                                    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Discovery Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Discovery Flow                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  RadarLocator (mayara-core/locator.rs)                                       │
+│    │ Poll-based, runs in CoreLocatorAdapter (server) or directly (WASM)     │
+│    ▼                                                                         │
+│  Brand-specific beacon detection                                             │
+│    │ Furuno: broadcast request → unicast response                           │
+│    │ Navico: multicast join → beacon packets                                │
+│    │ Raymarine: multicast join → info packets                               │
+│    │ Garmin: multicast join → beacon packets                                │
+│    ▼                                                                         │
+│  RadarDiscovery struct created                                               │
+│    │ Contains: brand, model, address, capabilities                          │
+│    ▼                                                                         │
+│  Server: Spawns brand-specific receiver task                                 │
+│    │ Creates FurunoReportReceiver / NavicoReportReceiver / etc.             │
+│    │ Receiver creates Core Controller when model confirmed                  │
+│    ▼                                                                         │
+│  Radar registered in Radars collection                                       │
+│    │ Available via REST API /radars                                         │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Future: OpenCPN Integration (mayara_opencpn)
 
 > Create a standalone OpenCPN plugin that connects to Mayara Standalone via HTTP/WebSocket.
@@ -766,3 +994,85 @@ pub fn format_control_command(control_id: &str, value: i32, auto: bool) -> Optio
 - ARPA logic already in mayara-core
 - No reimplementation needed in OpenCPN plugin
 - Plugin is just a thin rendering client
+
+---
+
+## Testing Strategy
+
+The unified architecture enables effective testing at multiple levels:
+
+### Unit Tests (mayara-core)
+
+Core logic can be tested without real hardware using mock IoProvider:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockIoProvider {
+        sent_data: Vec<(String, u16, Vec<u8>)>,
+    }
+
+    impl IoProvider for MockIoProvider {
+        fn udp_send_to(&mut self, _socket: &UdpSocketHandle, data: &[u8],
+                       addr: &str, port: u16) -> Result<usize, IoError> {
+            self.sent_data.push((addr.to_string(), port, data.to_vec()));
+            Ok(data.len())
+        }
+        // ... other methods
+    }
+
+    #[test]
+    fn test_gain_command_quantum() {
+        let mut io = MockIoProvider { sent_data: vec![] };
+        let mut controller = RaymarineController::new(
+            "test", "192.168.1.100", 50100, "239.0.0.1", 50100,
+            RaymarineVariant::Quantum, false
+        );
+
+        controller.set_gain(&mut io, 50, false);
+
+        assert_eq!(io.sent_data.len(), 1);
+        let (addr, port, data) = &io.sent_data[0];
+        assert_eq!(addr, "192.168.1.100");
+        // Verify Quantum command format
+        assert_eq!(data[2], 0x28);  // Quantum magic byte
+    }
+}
+```
+
+### Integration Tests (mayara-server)
+
+Test REST API endpoints with mock radar:
+
+```rust
+#[tokio::test]
+async fn test_radar_capabilities_endpoint() {
+    // Start server with test radar registered
+    let app = create_test_app();
+
+    let response = app
+        .oneshot(Request::get("/v1/api/radars/test-radar/capabilities").body(Body::empty())?)
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes(response).await)?;
+    assert!(body["controls"].is_array());
+}
+```
+
+### Replay Testing
+
+Recorded radar data can be replayed to test parsing and processing:
+
+```bash
+# Record live radar traffic
+tcpdump -i eth0 -w capture.pcap port 50100 or port 50102
+
+# Replay in test mode
+mayara-server --replay capture.pcap
+```
+
+The `receiver.replay` flag prevents controller creation during replay,
+allowing spoke processing to be tested independently.

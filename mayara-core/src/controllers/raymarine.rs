@@ -239,19 +239,54 @@ impl RaymarineController {
         cmd
     }
 
+    // Quantum one byte command: [opcode_lo, opcode_hi, 0x28, 0x00, 0x00, value, 0x00, 0x00]
+    fn quantum_one_byte_command(&self, opcode: u16, value: u8) -> Vec<u8> {
+        let mut cmd = Vec::with_capacity(8);
+        cmd.extend_from_slice(&opcode.to_le_bytes());
+        cmd.extend_from_slice(&[0x28, 0x00, 0x00, value, 0x00, 0x00]);
+        cmd
+    }
+
+    // Quantum two byte command: [opcode_lo, opcode_hi, 0x28, 0x00, value_lo, value_hi, 0x00, 0x00]
+    fn quantum_two_byte_command(&self, opcode: u16, value: u16) -> Vec<u8> {
+        let mut cmd = Vec::with_capacity(8);
+        cmd.extend_from_slice(&opcode.to_le_bytes());
+        cmd.extend_from_slice(&[0x28, 0x00]);
+        cmd.extend_from_slice(&value.to_le_bytes());
+        cmd.extend_from_slice(&[0x00, 0x00]);
+        cmd
+    }
+
+    // RD standard command format
+    fn rd_standard_command(&self, lead: &[u8], value: u8) -> Vec<u8> {
+        let mut cmd = Vec::with_capacity(26);
+        cmd.extend_from_slice(lead);
+        cmd.extend_from_slice(&[
+            0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, value, 0x00, 0x00, 0x00,
+        ]);
+        cmd
+    }
+
+    // RD on/off command format
+    fn rd_on_off_command(&self, lead: &[u8], on_off: u8) -> Vec<u8> {
+        let mut cmd = Vec::with_capacity(26);
+        cmd.extend_from_slice(lead);
+        cmd.extend_from_slice(&[
+            0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, on_off,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        cmd
+    }
+
     // Control methods
 
     /// Set power state (transmit/standby)
     pub fn set_power<I: IoProvider>(&mut self, io: &mut I, transmit: bool) {
         let value = if transmit { 0x01u8 } else { 0x00u8 };
-        let cmd = match self.variant {
-            RaymarineVariant::Quantum => {
-                self.quantum_command(0x0100, &[value, 0x00, 0x00, 0x00])
-            }
-            RaymarineVariant::RD => {
-                self.rd_command(0x8101, &[0x01, 0x00, 0x00, 0x00, value, 0x00, 0x00, 0x00])
-            }
-        };
+        // Both variants use the same power command format
+        let mut cmd = Vec::with_capacity(8);
+        cmd.extend_from_slice(&[0x01, 0x80, 0x01, 0x00, value, 0x00, 0x00, 0x00]);
         self.send_command(io, &cmd);
         io.debug(&format!("[{}] Set power: {}", self.radar_id, transmit));
     }
@@ -260,10 +295,14 @@ impl RaymarineController {
     pub fn set_range<I: IoProvider>(&mut self, io: &mut I, range_index: u8) {
         let cmd = match self.variant {
             RaymarineVariant::Quantum => {
-                self.quantum_command(0x0101, &[0x00, range_index, 0x00, 0x00])
+                self.quantum_one_byte_command(0x0101, range_index)
             }
             RaymarineVariant::RD => {
-                self.rd_command(0x8101, &[0x01, 0x00, 0x00, 0x00, range_index, 0x00, 0x00, 0x00])
+                // RD: [0x01, 0x81, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, range_index, 0x00, 0x00, 0x00]
+                let mut cmd = Vec::with_capacity(12);
+                cmd.extend_from_slice(&[0x01, 0x81, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+                    range_index, 0x00, 0x00, 0x00]);
+                cmd
             }
         };
         self.send_command(io, &cmd);
@@ -272,71 +311,85 @@ impl RaymarineController {
 
     /// Set gain (0-255)
     pub fn set_gain<I: IoProvider>(&mut self, io: &mut I, value: u8, auto: bool) {
-        let cmd = match self.variant {
+        let auto_byte = if auto { 0x01u8 } else { 0x00u8 };
+        match self.variant {
             RaymarineVariant::Quantum => {
-                let auto_byte = if auto { 0x01 } else { 0x00 };
-                self.quantum_command(0x0106, &[auto_byte, value, 0x00, 0x00])
+                // Send auto mode first
+                let cmd = self.quantum_one_byte_command(0x0301, auto_byte);
+                self.send_command(io, &cmd);
+                // If manual, send value
+                if !auto {
+                    let cmd = self.quantum_one_byte_command(0x8302, value);
+                    self.send_command(io, &cmd);
+                }
             }
             RaymarineVariant::RD => {
-                // RD uses two commands for auto and value
-                let auto_byte = if auto { 0x01 } else { 0x00 };
-                self.rd_command(0x8301, &[
-                    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    auto_byte, 0x00, 0x00, 0x00,
-                ])
+                // RD: on_off command for auto
+                let cmd = self.rd_on_off_command(&[0x01, 0x83], auto_byte);
+                self.send_command(io, &cmd);
+                // If manual, send standard command for value
+                if !auto {
+                    let cmd = self.rd_standard_command(&[0x01, 0x83], value);
+                    self.send_command(io, &cmd);
+                }
             }
-        };
-        self.send_command(io, &cmd);
-
-        // For RD, send value separately if manual
-        if self.variant == RaymarineVariant::RD && !auto {
-            let value_cmd = self.rd_command(0x8301, &[
-                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                value, 0x00, 0x00, 0x00,
-            ]);
-            self.send_command(io, &value_cmd);
         }
-
         io.debug(&format!("[{}] Set gain: {} auto={}", self.radar_id, value, auto));
     }
 
     /// Set sea clutter (0-255)
     pub fn set_sea<I: IoProvider>(&mut self, io: &mut I, value: u8, auto: bool) {
-        let cmd = match self.variant {
+        let auto_byte = if auto { 0x01u8 } else { 0x00u8 };
+        match self.variant {
             RaymarineVariant::Quantum => {
-                let auto_byte = if auto { 0x01 } else { 0x00 };
-                self.quantum_command(0x0107, &[auto_byte, value, 0x00, 0x00])
+                // Send auto mode first
+                let cmd = self.quantum_one_byte_command(0x0305, auto_byte);
+                self.send_command(io, &cmd);
+                // If manual, send value
+                if !auto {
+                    let cmd = self.quantum_one_byte_command(0x0306, value);
+                    self.send_command(io, &cmd);
+                }
             }
             RaymarineVariant::RD => {
-                let auto_byte = if auto { 0x01 } else { 0x00 };
-                self.rd_command(0x8401, &[
-                    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    auto_byte, 0x00, 0x00, 0x00, value, 0x00, 0x00, 0x00,
-                ])
+                // RD: on_off command for auto
+                let cmd = self.rd_on_off_command(&[0x02, 0x83], auto_byte);
+                self.send_command(io, &cmd);
+                // If manual, send standard command for value
+                if !auto {
+                    let cmd = self.rd_standard_command(&[0x02, 0x83], value);
+                    self.send_command(io, &cmd);
+                }
             }
-        };
-        self.send_command(io, &cmd);
+        }
         io.debug(&format!("[{}] Set sea: {} auto={}", self.radar_id, value, auto));
     }
 
     /// Set rain clutter (0-255)
     pub fn set_rain<I: IoProvider>(&mut self, io: &mut I, value: u8, enabled: bool) {
-        let cmd = match self.variant {
+        let enabled_byte = if enabled { 0x01u8 } else { 0x00u8 };
+        match self.variant {
             RaymarineVariant::Quantum => {
-                let enabled_byte = if enabled { 0x01 } else { 0x00 };
-                self.quantum_command(0x0108, &[enabled_byte, value, 0x00, 0x00])
+                // Send enabled first
+                let cmd = self.quantum_one_byte_command(0x030b, enabled_byte);
+                self.send_command(io, &cmd);
+                // If enabled, send value
+                if enabled {
+                    let cmd = self.quantum_one_byte_command(0x030c, value);
+                    self.send_command(io, &cmd);
+                }
             }
             RaymarineVariant::RD => {
-                let enabled_byte = if enabled { 0x01 } else { 0x00 };
-                self.rd_command(0x8501, &[
-                    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    enabled_byte, 0x00, 0x00, 0x00, value, 0x00, 0x00, 0x00,
-                ])
+                // RD: on_off command for enabled
+                let cmd = self.rd_on_off_command(&[0x03, 0x83], enabled_byte);
+                self.send_command(io, &cmd);
+                // If enabled, send standard command for value
+                if enabled {
+                    let cmd = self.rd_standard_command(&[0x03, 0x83], value);
+                    self.send_command(io, &cmd);
+                }
             }
-        };
-        self.send_command(io, &cmd);
+        }
         io.debug(&format!("[{}] Set rain: {} enabled={}", self.radar_id, value, enabled));
     }
 
@@ -344,12 +397,13 @@ impl RaymarineController {
     pub fn set_interference_rejection<I: IoProvider>(&mut self, io: &mut I, level: u8) {
         let cmd = match self.variant {
             RaymarineVariant::Quantum => {
-                self.quantum_command(0x0109, &[level, 0x00, 0x00, 0x00])
+                self.quantum_one_byte_command(0x0311, level)
             }
             RaymarineVariant::RD => {
-                self.rd_command(0x8A01, &[
-                    0x01, 0x00, 0x00, 0x00, level, 0x00, 0x00, 0x00,
-                ])
+                // RD: [0x07, 0x83, 0x01, 0x00, level, 0x00, 0x00, 0x00]
+                let mut cmd = Vec::with_capacity(8);
+                cmd.extend_from_slice(&[0x07, 0x83, 0x01, 0x00, level, 0x00, 0x00, 0x00]);
+                cmd
             }
         };
         self.send_command(io, &cmd);
@@ -360,12 +414,14 @@ impl RaymarineController {
     pub fn set_target_expansion<I: IoProvider>(&mut self, io: &mut I, level: u8) {
         let cmd = match self.variant {
             RaymarineVariant::Quantum => {
-                self.quantum_command(0x010A, &[level, 0x00, 0x00, 0x00])
+                self.quantum_one_byte_command(0x030f, level)
             }
             RaymarineVariant::RD => {
-                self.rd_command(0x8901, &[
-                    0x01, 0x00, 0x00, 0x00, level, 0x00, 0x00, 0x00,
-                ])
+                // RD doesn't have target expansion, use target separation instead
+                let mut cmd = Vec::with_capacity(8);
+                cmd.extend_from_slice(&[0x09, 0x83, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00]);
+                cmd.extend_from_slice(&[level, 0x00, 0x00, 0x00]);
+                cmd
             }
         };
         self.send_command(io, &cmd);
@@ -374,18 +430,18 @@ impl RaymarineController {
 
     /// Set bearing alignment in degrees (-180 to 180)
     pub fn set_bearing_alignment<I: IoProvider>(&mut self, io: &mut I, degrees: f32) {
-        // Convert to wire format (varies by model)
-        let wire_value = (degrees * 10.0) as i16;
+        // Convert to wire format (deci-degrees)
+        let deci_value = (degrees * 10.0) as i16;
         let cmd = match self.variant {
             RaymarineVariant::Quantum => {
-                let bytes = wire_value.to_le_bytes();
-                self.quantum_command(0x010B, &[bytes[0], bytes[1], 0x00, 0x00])
+                self.quantum_two_byte_command(0x0401, deci_value as u16)
             }
             RaymarineVariant::RD => {
-                let bytes = wire_value.to_le_bytes();
-                self.rd_command(0x8B01, &[
-                    0x01, 0x00, 0x00, 0x00, bytes[0], bytes[1], 0x00, 0x00,
-                ])
+                // RD: [0x07, 0x82, 0x01, 0x00, value_bytes...]
+                let mut cmd = Vec::with_capacity(8);
+                cmd.extend_from_slice(&[0x07, 0x82, 0x01, 0x00]);
+                cmd.extend_from_slice(&(deci_value as u32).to_le_bytes());
+                cmd
             }
         };
         self.send_command(io, &cmd);
@@ -395,12 +451,16 @@ impl RaymarineController {
     /// Set FTC (RD only, 0-255)
     pub fn set_ftc<I: IoProvider>(&mut self, io: &mut I, value: u8, enabled: bool) {
         if self.variant == RaymarineVariant::RD {
-            let enabled_byte = if enabled { 0x01 } else { 0x00 };
-            let cmd = self.rd_command(0x8601, &[
-                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                enabled_byte, 0x00, 0x00, 0x00, value, 0x00, 0x00, 0x00,
-            ]);
+            // FTC is inverted: auto=true means FTC off, auto=false means FTC on
+            let on_off = if enabled { 0x01u8 } else { 0x00u8 };
+            // on_off command for enabled/disabled
+            let cmd = self.rd_on_off_command(&[0x04, 0x83], on_off);
             self.send_command(io, &cmd);
+            // If enabled, send standard command for value
+            if enabled {
+                let cmd = self.rd_standard_command(&[0x04, 0x83], value);
+                self.send_command(io, &cmd);
+            }
             io.debug(&format!("[{}] Set FTC: {} enabled={}", self.radar_id, value, enabled));
         }
     }
@@ -421,7 +481,7 @@ impl RaymarineController {
     /// Set mode (Quantum only, 0=Harbor, 1=Coastal, 2=Offshore, 3=Weather)
     pub fn set_mode<I: IoProvider>(&mut self, io: &mut I, mode: u8) {
         if self.variant == RaymarineVariant::Quantum {
-            let cmd = self.quantum_command(0x010C, &[mode, 0x00, 0x00, 0x00]);
+            let cmd = self.quantum_one_byte_command(0x0314, mode);
             self.send_command(io, &cmd);
             io.debug(&format!("[{}] Set mode: {}", self.radar_id, mode));
         }
@@ -430,11 +490,46 @@ impl RaymarineController {
     /// Set color gain (Quantum only, 0-255)
     pub fn set_color_gain<I: IoProvider>(&mut self, io: &mut I, value: u8, auto: bool) {
         if self.variant == RaymarineVariant::Quantum {
+            // Set auto mode first
             let auto_byte = if auto { 0x01 } else { 0x00 };
-            let cmd = self.quantum_command(0x010D, &[auto_byte, value, 0x00, 0x00]);
+            let cmd = self.quantum_one_byte_command(0x0303, auto_byte);
             self.send_command(io, &cmd);
+            // If manual, send value
+            if !auto {
+                let cmd = self.quantum_one_byte_command(0x0304, value);
+                self.send_command(io, &cmd);
+            }
             io.debug(&format!("[{}] Set color gain: {} auto={}", self.radar_id, value, auto));
         }
+    }
+
+    /// Set main bang suppression (RD only, on/off)
+    pub fn set_main_bang_suppression<I: IoProvider>(&mut self, io: &mut I, enabled: bool) {
+        if self.variant == RaymarineVariant::RD {
+            // Main bang suppression uses inverted logic: auto=true means off
+            let on_off = if enabled { 0x01u8 } else { 0x00u8 };
+            let cmd = self.rd_standard_command(&[0x01, 0x82], on_off);
+            self.send_command(io, &cmd);
+            io.debug(&format!("[{}] Set main bang suppression: {}", self.radar_id, enabled));
+        }
+    }
+
+    /// Set display timing (RD only, 0-255)
+    pub fn set_display_timing<I: IoProvider>(&mut self, io: &mut I, value: u8) {
+        if self.variant == RaymarineVariant::RD {
+            // [0x02, 0x82, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, value, 0x00, 0x00, 0x00]
+            let mut cmd = Vec::with_capacity(12);
+            cmd.extend_from_slice(&[0x02, 0x82, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+                value, 0x00, 0x00, 0x00]);
+            self.send_command(io, &cmd);
+            io.debug(&format!("[{}] Set display timing: {}", self.radar_id, value));
+        }
+    }
+
+    /// Send report requests (both variants)
+    pub fn send_report_requests<I: IoProvider>(&mut self, _io: &mut I) {
+        // Raymarine radars don't require explicit report requests like Navico
+        // Reports are sent continuously once connected
     }
 
     /// Shutdown the controller
