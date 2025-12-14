@@ -7,29 +7,38 @@
 // Still, we use this location method for all radars so the process is uniform.
 //
 
-use std::collections::{HashMap, HashSet};
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::time::Duration;
+// deprecated_marked_for_delete: Legacy imports - commented out with legacy locator code
+// use std::collections::{HashMap, HashSet};
+// use std::collections::HashSet;
+// use std::io;
+// use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+// use std::time::Duration;
 
-use miette::Result;
-use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+// use miette::Result;
+// use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use serde::Serialize;
-use tokio::sync::{broadcast, mpsc};
-use tokio::{net::UdpSocket, sync::mpsc::Sender, task::JoinSet, time::sleep};
+// use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
+// use tokio::{net::UdpSocket, sync::mpsc::Sender, task::JoinSet, time::sleep};
+// use tokio::net::UdpSocket;
 use tokio_graceful_shutdown::SubsystemHandle;
 
-#[cfg(feature = "furuno")]
-use crate::brand::furuno;
-#[cfg(feature = "navico")]
-use crate::brand::navico;
-#[cfg(feature = "raymarine")]
-use crate::brand::raymarine;
+// deprecated_marked_for_delete: Legacy brand imports - used only by legacy locator
+// #[cfg(feature = "furuno")]
+// use crate::brand::furuno;
+// #[cfg(feature = "navico")]
+// use crate::brand::navico;
+// #[cfg(feature = "raymarine")]
+// use crate::brand::raymarine;
 
 use crate::radar::{RadarError, SharedRadars};
-use crate::{network, Brand, Cli, InterfaceApi, InterfaceId, RadarInterfaceApi, Session};
+// deprecated_marked_for_delete: Legacy imports
+// use crate::{network, Brand, Cli, InterfaceApi, InterfaceId, RadarInterfaceApi, Session};
+// use crate::{Brand, Cli, InterfaceApi, Session};
+use crate::Session;
 
-const LOCATOR_PACKET_BUFFER_LEN: usize = 300; // Long enough for any location packet
+// deprecated_marked_for_delete: Legacy constant - used only by legacy locator
+// const LOCATOR_PACKET_BUFFER_LEN: usize = 300; // Long enough for any location packet
 
 #[derive(PartialEq, Eq, Copy, Clone, Serialize, Debug)]
 pub enum LocatorId {
@@ -51,6 +60,8 @@ impl LocatorId {
     }
 }
 
+// deprecated_marked_for_delete: Only used by legacy locator
+/*
 pub struct LocatorAddress {
     pub id: LocatorId,
     pub address: SocketAddr,
@@ -80,13 +91,19 @@ impl LocatorAddress {
         }
     }
 }
+*/
 
+// deprecated_marked_for_delete: Only used by legacy locator
+/*
 struct LocatorSocket {
     sock: UdpSocket,
     nic_addr: Ipv4Addr,
     state: Box<dyn RadarLocatorState>,
 }
+*/
 
+// deprecated_marked_for_delete: Only used by legacy locator
+/*
 pub trait RadarLocatorState: Send {
     fn process(
         &mut self,
@@ -116,23 +133,34 @@ enum ResultType {
     Locator(LocatorSocket, SocketAddrV4, Vec<u8>),
     InterfaceRequest(mpsc::Sender<InterfaceApi>),
 }
+*/
 
 pub(crate) struct Locator {
     pub session: Session,
     pub radars: SharedRadars,
-    pub args: Cli,
+    // deprecated_marked_for_delete: Only used by legacy locator
+    // pub args: Cli,
 }
 
 impl Locator {
     pub fn new(session: Session, radars: SharedRadars) -> Self {
-        let args = session.clone().args(); // session.args();
+        // deprecated_marked_for_delete: args was only used by legacy locator
+        // let args = session.clone().args();
         Locator {
             session,
             radars,
-            args,
         }
     }
 
+    // =========================================================================
+    // DEPRECATED LEGACY CODE - COMMENTED OUT FOR BUILD VERIFICATION
+    // =========================================================================
+    // The following code has been replaced by run_with_core_locator()
+    // Keeping as comments to verify nothing references it. Delete after verification.
+    // =========================================================================
+    /*
+    /// deprecated_marked_for_delete: Legacy locator using brand-specific RadarLocatorState.
+    /// Use `run_with_core_locator` instead (now the default).
     pub async fn run(
         self,
         subsys: SubsystemHandle,
@@ -141,7 +169,7 @@ impl Locator {
     ) -> Result<(), RadarError> {
         let radars = &self.radars;
 
-        log::debug!("Entering loop, listening for radars");
+        log::debug!("deprecated_marked_for_delete: Entering legacy locator loop");
         let mut interface_state = InterfaceState {
             active_nic_addresses: Vec::new(),
             inactive_nic_names: HashSet::new(),
@@ -299,7 +327,86 @@ impl Locator {
             }
         }
     }
+    */
+    // =========================================================================
+    // END DEPRECATED LEGACY CODE (run method)
+    // =========================================================================
 
+    /// Run the locator using the unified CoreLocatorAdapter.
+    ///
+    /// This is a simpler implementation that uses mayara-core's RadarLocator
+    /// for beacon parsing and model detection. It replaces the brand-specific
+    /// RadarLocatorState implementations with a unified discovery flow.
+    pub async fn run_with_core_locator(
+        self,
+        subsys: SubsystemHandle,
+    ) -> Result<(), RadarError> {
+        use crate::core_locator::{create_locator_subsystem, dispatch_discovery, LocatorMessage};
+        use tokio_graceful_shutdown::SubsystemBuilder;
+
+        log::info!("Starting locator with CoreLocatorAdapter");
+
+        let (discovery_tx, mut discovery_rx) = mpsc::channel(32);
+        let radars = self.radars.clone();
+        let session = self.session.clone();
+
+        // Spawn the core locator subsystem
+        subsys.start(SubsystemBuilder::new("CoreLocator", move |s| {
+            create_locator_subsystem(discovery_tx, s)
+        }));
+
+        // Process discoveries from the core locator
+        loop {
+            tokio::select! {
+                _ = subsys.on_shutdown_requested() => {
+                    log::info!("Locator shutdown requested");
+                    break;
+                }
+                msg = discovery_rx.recv() => {
+                    match msg {
+                        Some(LocatorMessage::RadarDiscovered(discovery)) => {
+                            log::info!(
+                                "Core locator discovered {} radar: {} at {}",
+                                discovery.brand,
+                                discovery.name,
+                                discovery.address
+                            );
+
+                            // Dispatch to brand-specific processor
+                            if let Err(e) = dispatch_discovery(
+                                session.clone(),
+                                &discovery,
+                                &radars,
+                                &subsys,
+                            ) {
+                                log::error!(
+                                    "Failed to process {} discovery: {}",
+                                    discovery.brand,
+                                    e
+                                );
+                            }
+                        }
+                        Some(LocatorMessage::Shutdown) => {
+                            log::info!("Core locator shutdown");
+                            break;
+                        }
+                        None => {
+                            log::warn!("Discovery channel closed");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        log::info!("Locator finished");
+        Ok(())
+    }
+
+    // =========================================================================
+    // DEPRECATED LEGACY CODE - HELPER METHODS
+    // =========================================================================
+    /*
     async fn reply_with_interface_state(
         &self,
         interface_state: &InterfaceState,
@@ -529,8 +636,16 @@ impl Locator {
             Err(_) => Err(RadarError::EnumerationFailed),
         }
     }
+    */
+    // =========================================================================
+    // END DEPRECATED LEGACY CODE (helper methods)
+    // =========================================================================
 }
 
+// =========================================================================
+// DEPRECATED LEGACY CODE - STANDALONE FUNCTIONS
+// =========================================================================
+/*
 fn spawn_interface_request_handler(
     set: &mut JoinSet<std::result::Result<ResultType, RadarError>>,
     tx_interface_request: &broadcast::Sender<Option<Sender<InterfaceApi>>>,
@@ -628,3 +743,7 @@ async fn send_beacon_request(
     }
     Ok(())
 }
+*/
+// =========================================================================
+// END DEPRECATED LEGACY CODE (standalone functions)
+// =========================================================================

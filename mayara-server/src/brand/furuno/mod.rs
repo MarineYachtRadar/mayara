@@ -1,26 +1,16 @@
-use async_trait::async_trait;
-use log::log_enabled;
-use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::Duration;
 use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 
-// Use mayara-core for beacon parsing (pure, WASM-compatible)
-use mayara_core::protocol::furuno::{
-    is_beacon_response, is_model_report, parse_beacon_response, parse_model_report,
-    ANNOUNCE_PACKET, REQUEST_BEACON_PACKET, REQUEST_MODEL_PACKET,
-};
-
-use crate::locator::{LocatorAddress, LocatorId, RadarLocator, RadarLocatorState};
+use crate::locator::LocatorId;
 use crate::radar::{RadarInfo, SharedRadars};
-use crate::util::PrintableSlice;
 use crate::{Brand, Session};
 
 // Modules - command.rs removed, now using unified controller from mayara-core
 mod data;
 mod report;
-mod settings;
+pub(crate) mod settings;
 
 const FURUNO_SPOKES: usize = 8192;
 
@@ -31,16 +21,20 @@ const FURUNO_BASE_PORT: u16 = 10000;
 const FURUNO_BEACON_PORT: u16 = FURUNO_BASE_PORT + 10;
 const FURUNO_DATA_PORT: u16 = FURUNO_BASE_PORT + 24;
 
-const FURUNO_BEACON_ADDRESS: SocketAddr = SocketAddr::new(
-    IpAddr::V4(Ipv4Addr::new(172, 31, 255, 255)),
-    FURUNO_BEACON_PORT,
-);
+// deprecated_marked_for_delete: Only used by legacy locator
+// const FURUNO_BEACON_ADDRESS: SocketAddr = SocketAddr::new(
+//     IpAddr::V4(Ipv4Addr::new(172, 31, 255, 255)),
+//     FURUNO_BEACON_PORT,
+// );
+
+// Used by data.rs for data receiver (NOT deprecated)
 const FURUNO_DATA_BROADCAST_ADDRESS: SocketAddrV4 =
     SocketAddrV4::new(Ipv4Addr::new(172, 31, 255, 255), FURUNO_DATA_PORT);
 
 // Packet constants are now imported from mayara-core
 
 /// Radar model enum for Furuno radars
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum RadarModel {
     Unknown,
     FAR21x7,
@@ -126,6 +120,15 @@ fn login_to_radar(session: Session, radar_addr: SocketAddrV4) -> Result<u16, io:
     Ok(port)
 }
 
+// =============================================================================
+// DEPRECATED LEGACY CODE - COMMENTED OUT FOR BUILD VERIFICATION
+// =============================================================================
+// The following code has been replaced by CoreLocatorAdapter + process_discovery()
+// Keeping as comments to verify nothing references it. Delete after verification.
+// =============================================================================
+
+/*
+// deprecated_marked_for_delete: Legacy locator state - use process_discovery() instead
 #[derive(Clone)]
 struct FurunoLocatorState {
     session: Session,
@@ -133,6 +136,7 @@ struct FurunoLocatorState {
     model_found: bool,
 }
 
+// deprecated_marked_for_delete: Legacy RadarLocatorState implementation
 impl RadarLocatorState for FurunoLocatorState {
     fn process(
         &mut self,
@@ -168,16 +172,16 @@ impl FurunoLocatorState {
             // It's new, start the RadarProcessor thread
 
             // Load the model name afresh, it may have been modified from persisted data
-            /* let model = match info.model_name() {
-                Some(s) => Model::new(&s),
-                None => Model::Unknown,
-            };
-            if model != Model::Unknown {
-                let info2 = info.clone();
-                info.controls.update_when_model_known(model, &info2);
-                info.set_legend(model == Model::HALO);
-                radars.update(&info);
-            } */
+            // let model = match info.model_name() {
+            //     Some(s) => Model::new(&s),
+            //     None => Model::Unknown,
+            // };
+            // if model != Model::Unknown {
+            //     let info2 = info.clone();
+            //     info.controls.update_when_model_known(model, &info2);
+            //     info.set_legend(model == Model::HALO);
+            //     radars.update(&info);
+            // }
 
             // Furuno radars use a single TCP/IP connection to send commands and
             // receive status reports, so report_addr and send_command_addr are identical.
@@ -350,8 +354,9 @@ impl FurunoLocatorState {
                         radars.update_serial_no(key, serial_no);
                     }
 
-                    if model.is_some() {
+                    if let Some(ref model_name) = model {
                         self.model_found = true;
+                        radars.update_furuno_model(key, model_name);
                     }
                 }
                 Err(e) => {
@@ -369,11 +374,13 @@ impl FurunoLocatorState {
     }
 }
 
+// deprecated_marked_for_delete: Legacy FurunoLocator - use CoreLocatorAdapter instead
 #[derive(Clone)]
 struct FurunoLocator {
     session: Session,
 }
 
+// deprecated_marked_for_delete: Legacy RadarLocator implementation
 #[async_trait]
 impl RadarLocator for FurunoLocator {
     fn set_listen_addresses(&self, addresses: &mut Vec<LocatorAddress>) {
@@ -397,7 +404,178 @@ impl RadarLocator for FurunoLocator {
     }
 }
 
+/// deprecated_marked_for_delete: Use CoreLocatorAdapter with process_discovery() instead
 pub fn create_locator(session: Session) -> Box<dyn RadarLocator + Send> {
     let locator = FurunoLocator { session };
     Box::new(locator)
+}
+*/
+// =============================================================================
+// END DEPRECATED LEGACY CODE
+// =============================================================================
+
+// =============================================================================
+// New unified discovery processing (used by CoreLocatorAdapter)
+// =============================================================================
+
+use mayara_core::radar::RadarDiscovery;
+
+/// Process a radar discovery from the core locator.
+///
+/// This creates a RadarInfo, performs the TCP login, and spawns the data/report receivers.
+pub fn process_discovery(
+    session: Session,
+    discovery: &RadarDiscovery,
+    nic_addr: Ipv4Addr,
+    radars: &SharedRadars,
+    subsys: &SubsystemHandle,
+) -> Result<(), io::Error> {
+    // Parse address from discovery
+    let radar_addr = parse_radar_address(&discovery.address)?;
+
+    // DRS: spoke data all on a well-known address
+    let spoke_data_addr: SocketAddrV4 =
+        SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 2), FURUNO_DATA_PORT);
+
+    let report_addr: SocketAddrV4 = SocketAddrV4::new(*radar_addr.ip(), 0); // Port is set in login_to_radar
+    let send_command_addr: SocketAddrV4 = report_addr.clone();
+
+    let info: RadarInfo = RadarInfo::new(
+        session.clone(),
+        LocatorId::Furuno,
+        Brand::Furuno,
+        discovery.model.as_deref(),
+        Some(&discovery.name),
+        64,
+        FURUNO_SPOKES,
+        FURUNO_SPOKE_LEN,
+        radar_addr,
+        nic_addr,
+        spoke_data_addr,
+        report_addr,
+        send_command_addr,
+        settings::new(session.clone()),
+        true,
+    );
+
+    // Set userName control
+    info.controls.set_string("userName", info.key()).ok();
+
+    // Check if this is a new radar
+    let Some(mut info) = radars.located(info) else {
+        log::debug!("Furuno radar {} already known", discovery.name);
+        return Ok(());
+    };
+
+    // Apply model-specific settings if known
+    if let Some(ref model_name) = discovery.model {
+        let model = model_name_to_radar_model(model_name);
+        let version = "unknown"; // Version comes from $N96 via report receiver
+        log::info!(
+            "{}: Model from discovery: {} ({:?})",
+            info.key(),
+            model_name,
+            model
+        );
+        settings::update_when_model_known(&mut info, model, version);
+        radars.update(&info);
+    }
+
+    // Perform TCP login to get the command/report port
+    if !session.read().unwrap().args.replay {
+        let port: u16 = match login_to_radar(session.clone(), info.addr) {
+            Err(e) => {
+                log::error!("{}: Unable to connect for login: {}", info.key(), e);
+                radars.remove(&info.key());
+                return Err(e);
+            }
+            Ok(p) => p,
+        };
+        if port != info.send_command_addr.port() {
+            info.send_command_addr.set_port(port);
+            info.report_addr.set_port(port);
+            radars.update(&info);
+        }
+    }
+
+    // Spawn subsystems
+    let data_name = info.key() + " data";
+    let report_name = info.key() + " reports";
+
+    if session.read().unwrap().args.output {
+        let info_clone = info.clone();
+        subsys.start(SubsystemBuilder::new("stdout", move |s| {
+            info_clone.forward_output(s)
+        }));
+    }
+
+    let data_receiver = data::FurunoDataReceiver::new(session.clone(), info.clone());
+    subsys.start(SubsystemBuilder::new(
+        data_name,
+        move |s: SubsystemHandle| data_receiver.run(s),
+    ));
+
+    if !session.read().unwrap().args.replay {
+        let report_receiver = report::FurunoReportReceiver::new(session.clone(), info);
+        subsys.start(SubsystemBuilder::new(report_name, |s| {
+            report_receiver.run(s)
+        }));
+    } else {
+        let model = RadarModel::DRS4DNXT; // Default model for replay
+        let version = "01.05";
+        log::info!(
+            "{}: Radar model {} assumed for replay mode",
+            info.key(),
+            model.to_str(),
+        );
+        settings::update_when_model_known(&mut info, model, version);
+    }
+
+    log::info!(
+        "{}: Furuno radar activated via CoreLocatorAdapter",
+        discovery.name
+    );
+    Ok(())
+}
+
+/// Parse address string "ip:port" into SocketAddrV4
+fn parse_radar_address(addr: &str) -> Result<SocketAddrV4, io::Error> {
+    if let Some(colon_pos) = addr.rfind(':') {
+        let ip_str = &addr[..colon_pos];
+        let port_str = &addr[colon_pos + 1..];
+        let ip: Ipv4Addr = ip_str.parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid IP: {}", e))
+        })?;
+        let port: u16 = port_str.parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid port: {}", e))
+        })?;
+        Ok(SocketAddrV4::new(ip, port))
+    } else {
+        let ip: Ipv4Addr = addr.parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid IP: {}", e))
+        })?;
+        Ok(SocketAddrV4::new(ip, FURUNO_BEACON_PORT))
+    }
+}
+
+/// Convert model name string to RadarModel enum
+fn model_name_to_radar_model(name: &str) -> RadarModel {
+    match name {
+        "DRS4D-NXT" => RadarModel::DRS4DNXT,
+        "DRS6A-NXT" => RadarModel::DRS6ANXT,
+        "DRS12A-NXT" => RadarModel::DRS12ANXT,
+        "DRS25A-NXT" => RadarModel::DRS25ANXT,
+        "DRS6A-XCLASS" => RadarModel::DRS6AXCLASS,
+        "FAR-21x7" => RadarModel::FAR21x7,
+        "FAR-14x7" => RadarModel::FAR14x7,
+        "FAR-3000" => RadarModel::FAR3000,
+        "FAR-15x3" => RadarModel::FAR15x3,
+        "FAR-14x6" => RadarModel::FAR14x6,
+        "DRS4DL" => RadarModel::DRS4DL,
+        "DRS" => RadarModel::DRS,
+        _ => {
+            log::warn!("Unknown Furuno model: {}", name);
+            RadarModel::Unknown
+        }
+    }
 }

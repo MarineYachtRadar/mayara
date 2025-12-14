@@ -813,6 +813,7 @@ fn parse_beacon_dual(data: &[u8], source_addr: &str) -> Result<RadarDiscovery, P
         max_spoke_len: MAX_SPOKE_LEN,
         pixel_values: 16, // 4-bit pixels
         serial_number: None,
+        nic_address: None, // Set by locator
     })
 }
 
@@ -833,6 +834,7 @@ fn parse_beacon_single(data: &[u8], source_addr: &str) -> Result<RadarDiscovery,
         max_spoke_len: MAX_SPOKE_LEN,
         pixel_values: 16,
         serial_number: None,
+        nic_address: None, // Set by locator
     })
 }
 
@@ -853,6 +855,7 @@ fn parse_beacon_br24(data: &[u8], source_addr: &str) -> Result<RadarDiscovery, P
         max_spoke_len: MAX_SPOKE_LEN,
         pixel_values: 16,
         serial_number: None,
+        nic_address: None, // Set by locator
     })
 }
 

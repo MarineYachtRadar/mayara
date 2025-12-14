@@ -1,18 +1,9 @@
-use anyhow::Error;
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::io;
 use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 
-// Use mayara-core for beacon parsing (pure, WASM-compatible)
-use mayara_core::protocol::raymarine::{
-    parse_beacon_36, parse_beacon_56, ParsedBeacon56,
-    MFD_BEACON, SUBTYPE_QUANTUM_36, SUBTYPE_RD_36,
-};
-
-use crate::locator::{LocatorAddress, LocatorId, RadarLocator, RadarLocatorState};
+use crate::locator::LocatorId;
 use crate::radar::{RadarInfo, SharedRadars};
-use crate::util::PrintableSlice;
 use crate::{Brand, Session};
 
 mod report;
@@ -31,10 +22,11 @@ const NON_HD_PIXEL_VALUES: u8 = 16; // Old radars have one nibble
 const HD_PIXEL_VALUES_RAW: u16 = 256; // New radars have one byte pixels
 const HD_PIXEL_VALUES: u8 = 128; // ... but we drop the last bit so we have space for other data
 
-const RAYMARINE_BEACON_ADDRESS: SocketAddr =
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)), 5800);
-const RAYMARINE_QUANTUM_WIFI_ADDRESS: SocketAddr =
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(232, 1, 1, 1)), 5800);
+// deprecated_marked_for_delete: Only used by legacy locator
+// const RAYMARINE_BEACON_ADDRESS: SocketAddr =
+//     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)), 5800);
+// const RAYMARINE_QUANTUM_WIFI_ADDRESS: SocketAddr =
+//     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(232, 1, 1, 1)), 5800);
 
 #[derive(Clone, Debug)]
 struct RaymarineModel {
@@ -213,13 +205,23 @@ fn hd_to_pixel_values(hd: bool) -> u8 {
 // Re-export BaseModel from core for use by other modules in this brand
 pub use mayara_core::protocol::raymarine::BaseModel;
 
+// =============================================================================
+// DEPRECATED LEGACY CODE - COMMENTED OUT FOR BUILD VERIFICATION
+// =============================================================================
+// The following code has been replaced by CoreLocatorAdapter + process_discovery()
+// Keeping as comments to verify nothing references it. Delete after verification.
+// =============================================================================
+
+/*
 type LinkId = u32;
 
+// deprecated_marked_for_delete: Legacy radar state for two-step discovery
 #[derive(Clone)]
 struct RadarState {
     beacon: ParsedBeacon56,
 }
 
+// deprecated_marked_for_delete: Legacy locator state - use process_discovery() instead
 #[derive(Clone)]
 struct RaymarineLocatorState {
     session: Session,
@@ -425,6 +427,7 @@ impl RaymarineLocatorState {
     }
 }
 
+// deprecated_marked_for_delete: Legacy RadarLocatorState implementation
 impl RadarLocatorState for RaymarineLocatorState {
     fn process(
         &mut self,
@@ -484,11 +487,13 @@ impl RadarLocatorState for RaymarineLocatorState {
     }
 }
 
+// deprecated_marked_for_delete: Legacy RaymarineLocator - use CoreLocatorAdapter instead
 #[derive(Clone)]
 struct RaymarineLocator {
     session: Session,
 }
 
+// deprecated_marked_for_delete: Legacy RadarLocator implementation
 impl RadarLocator for RaymarineLocator {
     fn set_listen_addresses(&self, addresses: &mut Vec<LocatorAddress>) {
         if !addresses.iter().any(|i| i.id == LocatorId::Raymarine) {
@@ -509,11 +514,141 @@ impl RadarLocator for RaymarineLocator {
     }
 }
 
+/// deprecated_marked_for_delete: Use CoreLocatorAdapter with process_discovery() instead
 pub fn create_locator(session: Session) -> Box<dyn RadarLocator + Send> {
     let locator = RaymarineLocator { session };
     Box::new(locator)
 }
+*/
+// =============================================================================
+// END DEPRECATED LEGACY CODE
+// =============================================================================
 
+// =============================================================================
+// New unified discovery processing (used by CoreLocatorAdapter)
+// =============================================================================
+
+use mayara_core::radar::RadarDiscovery;
+
+/// Process a radar discovery from the core locator.
+///
+/// Note: Raymarine radars use a two-step discovery process (56-byte beacon first,
+/// then 36-byte beacon with addresses). The core RadarDiscovery provides simplified
+/// info. For full functionality, the existing stateful RaymarineLocatorState should
+/// be used until the core properly handles the two-step process.
+pub fn process_discovery(
+    session: Session,
+    discovery: &RadarDiscovery,
+    nic_addr: Ipv4Addr,
+    radars: &SharedRadars,
+    subsys: &SubsystemHandle,
+) -> Result<(), io::Error> {
+    // Parse address from discovery
+    let radar_addr = parse_radar_address(&discovery.address)?;
+
+    // Determine model from discovery
+    let model = if let Some(ref model_name) = discovery.model {
+        RaymarineModel::try_into(model_name)
+            .unwrap_or_else(|| RaymarineModel::new_eseries())
+    } else {
+        RaymarineModel::new_eseries()
+    };
+
+    let spokes_per_revolution = if model.model == BaseModel::Quantum {
+        QUANTUM_SPOKES_PER_REVOLUTION
+    } else {
+        RD_SPOKES_PER_REVOLUTION
+    };
+
+    let max_spoke_len = model.max_spoke_len;
+    let pixel_values = if model.hd { HD_PIXEL_VALUES } else { NON_HD_PIXEL_VALUES };
+
+    // For simplified discovery, use basic addresses
+    let report_addr: SocketAddrV4 = SocketAddrV4::new(*radar_addr.ip(), discovery.command_port);
+    let data_addr: SocketAddrV4 = SocketAddrV4::new(*radar_addr.ip(), discovery.data_port);
+    let send_addr: SocketAddrV4 = SocketAddrV4::new(*radar_addr.ip(), discovery.command_port);
+
+    let info: RadarInfo = RadarInfo::new(
+        session.clone(),
+        LocatorId::Raymarine,
+        Brand::Raymarine,
+        discovery.serial_number.as_deref(),
+        None,
+        pixel_values,
+        spokes_per_revolution,
+        max_spoke_len,
+        radar_addr,
+        nic_addr,
+        data_addr,
+        report_addr,
+        send_addr,
+        settings::new(session.clone(), model.model.clone()),
+        model.doppler,
+    );
+
+    // Set userName control
+    info.controls.set_string("userName", info.key()).ok();
+
+    // Check if this is a new radar
+    let Some(info) = radars.located(info) else {
+        log::debug!("Raymarine radar {} already known", discovery.name);
+        return Ok(());
+    };
+
+    // Spawn subsystems
+    if session.read().unwrap().args.output {
+        let info_clone = info.clone();
+        subsys.start(SubsystemBuilder::new("stdout", move |s| {
+            info_clone.forward_output(s)
+        }));
+    }
+
+    let report_name = info.key();
+    let report_receiver = report::RaymarineReportReceiver::new(
+        session.clone(),
+        info.clone(),
+        radars.clone(),
+    );
+
+    subsys.start(SubsystemBuilder::new(report_name, |s| {
+        report_receiver.run(s)
+    }));
+
+    log::info!(
+        "{}: Raymarine radar activated via CoreLocatorAdapter",
+        discovery.name
+    );
+    Ok(())
+}
+
+/// Parse address string "ip:port" into SocketAddrV4
+fn parse_radar_address(addr: &str) -> Result<SocketAddrV4, io::Error> {
+    if let Some(colon_pos) = addr.rfind(':') {
+        let ip_str = &addr[..colon_pos];
+        let port_str = &addr[colon_pos + 1..];
+        let ip: Ipv4Addr = ip_str.parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid IP: {}", e))
+        })?;
+        let port: u16 = port_str.parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid port: {}", e))
+        })?;
+        Ok(SocketAddrV4::new(ip, port))
+    } else {
+        let ip: Ipv4Addr = addr.parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid IP: {}", e))
+        })?;
+        Ok(SocketAddrV4::new(ip, 5800)) // Default Raymarine beacon port
+    }
+}
+
+// =============================================================================
+// DEPRECATED TESTS - COMMENTED OUT WITH LEGACY CODE
+// =============================================================================
+// These tests use RaymarineLocatorState which has been replaced by
+// CoreLocatorAdapter + process_discovery(). Delete after verification.
+// =============================================================================
+
+/*
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
@@ -679,3 +814,7 @@ mod tests {
         );
     }
 }
+*/
+// =============================================================================
+// END DEPRECATED TESTS
+// =============================================================================

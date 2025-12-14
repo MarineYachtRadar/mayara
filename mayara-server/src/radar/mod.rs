@@ -587,6 +587,46 @@ impl SharedRadars {
         }
         false
     }
+
+    /// Update Furuno radar model when received from UDP model report
+    #[cfg(feature = "furuno")]
+    pub fn update_furuno_model(&self, key: &str, model_name: &str) {
+        use crate::brand::furuno::settings;
+
+        let mut radars = self.radars.write().unwrap();
+        if let Some(info) = radars.info.get_mut(key) {
+            let model = model_name_to_radar_model(model_name);
+            log::info!(
+                "{}: Updating model from UDP report: {} -> {:?}",
+                key,
+                model_name,
+                model
+            );
+            // Use "unknown" for firmware since we don't have it from UDP
+            settings::update_when_model_known(info, model, "unknown");
+        }
+    }
+}
+
+/// Convert model name string to RadarModel enum (for Furuno)
+#[cfg(feature = "furuno")]
+fn model_name_to_radar_model(name: &str) -> crate::brand::furuno::RadarModel {
+    use crate::brand::furuno::RadarModel;
+    match name {
+        "FAR-21x7" => RadarModel::FAR21x7,
+        "DRS" => RadarModel::DRS,
+        "FAR-14x7" => RadarModel::FAR14x7,
+        "DRS4DL" => RadarModel::DRS4DL,
+        "FAR-3000" => RadarModel::FAR3000,
+        "DRS4D-NXT" => RadarModel::DRS4DNXT,
+        "DRS6A-NXT" => RadarModel::DRS6ANXT,
+        "DRS6A-XCLASS" => RadarModel::DRS6AXCLASS,
+        "FAR-15x3" => RadarModel::FAR15x3,
+        "FAR-14x6" => RadarModel::FAR14x6,
+        "DRS12A-NXT" => RadarModel::DRS12ANXT,
+        "DRS25A-NXT" => RadarModel::DRS25ANXT,
+        _ => RadarModel::Unknown,
+    }
 }
 
 #[derive(Clone, Debug)]

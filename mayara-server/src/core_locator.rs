@@ -230,11 +230,75 @@ pub fn parse_address(addr: &str) -> Option<SocketAddrV4> {
     }
 }
 
-/// Get the NIC address for a radar (placeholder - needs proper implementation)
-pub fn get_nic_for_radar(_addr: &SocketAddrV4) -> Ipv4Addr {
-    // TODO: Implement proper NIC detection based on routing table
-    // For now, assume local interface
-    Ipv4Addr::new(0, 0, 0, 0)
+/// Get the NIC address for a radar using network interface matching
+pub fn get_nic_for_radar(addr: &SocketAddrV4) -> Ipv4Addr {
+    crate::network::find_nic_for_radar(addr.ip()).unwrap_or(Ipv4Addr::UNSPECIFIED)
+}
+
+// =============================================================================
+// Discovery Dispatch
+// =============================================================================
+
+use crate::radar::SharedRadars;
+use crate::Session;
+
+/// Dispatch a radar discovery to the appropriate brand-specific processor.
+///
+/// This routes `RadarDiscovery` from the core locator to the brand's
+/// `process_discovery` function which creates a `RadarInfo` and spawns
+/// the necessary subsystems.
+pub fn dispatch_discovery(
+    session: Session,
+    discovery: &RadarDiscovery,
+    radars: &SharedRadars,
+    subsys: &SubsystemHandle,
+) -> Result<(), std::io::Error> {
+    // Determine NIC address for this radar
+    let radar_addr = parse_address(&discovery.address);
+    let nic_addr = radar_addr.map(|a| get_nic_for_radar(&a)).unwrap_or(Ipv4Addr::UNSPECIFIED);
+
+    log::info!(
+        "Processing {} discovery: {} at {} via {}",
+        discovery.brand,
+        discovery.name,
+        discovery.address,
+        nic_addr
+    );
+
+    match discovery.brand {
+        #[cfg(feature = "furuno")]
+        CoreBrand::Furuno => {
+            crate::brand::furuno::process_discovery(session, discovery, nic_addr, radars, subsys)
+        }
+        #[cfg(feature = "navico")]
+        CoreBrand::Navico => {
+            crate::brand::navico::process_discovery(session, discovery, nic_addr, radars, subsys)
+        }
+        #[cfg(feature = "raymarine")]
+        CoreBrand::Raymarine => {
+            crate::brand::raymarine::process_discovery(session, discovery, nic_addr, radars, subsys)
+        }
+        // Garmin not yet implemented with process_discovery
+        #[cfg(not(feature = "furuno"))]
+        CoreBrand::Furuno => {
+            log::warn!("Furuno support not compiled in");
+            Ok(())
+        }
+        #[cfg(not(feature = "navico"))]
+        CoreBrand::Navico => {
+            log::warn!("Navico support not compiled in");
+            Ok(())
+        }
+        #[cfg(not(feature = "raymarine"))]
+        CoreBrand::Raymarine => {
+            log::warn!("Raymarine support not compiled in");
+            Ok(())
+        }
+        CoreBrand::Garmin => {
+            log::warn!("Garmin process_discovery not implemented");
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

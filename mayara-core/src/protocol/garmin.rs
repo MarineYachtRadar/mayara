@@ -347,6 +347,7 @@ pub fn create_discovery(source_addr: &str) -> RadarDiscovery {
         max_spoke_len: MAX_SPOKE_LEN,
         pixel_values: PIXEL_VALUES,
         serial_number: None,
+        nic_address: None, // Set by locator
     }
 }
 

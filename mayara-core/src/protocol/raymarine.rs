@@ -432,6 +432,7 @@ pub fn parse_beacon_response(data: &[u8], source_addr: &str) -> Result<RadarDisc
             max_spoke_len: spoke_len,
             pixel_values: pixels,
             serial_number: None,
+            nic_address: None, // Set by locator
         });
     }
 
@@ -474,6 +475,7 @@ pub fn parse_beacon_response(data: &[u8], source_addr: &str) -> Result<RadarDisc
             max_spoke_len: spoke_len,
             pixel_values: pixels,
             serial_number: None,
+            nic_address: None, // Set by locator
         });
     }
 

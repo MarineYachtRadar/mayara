@@ -31,6 +31,9 @@ pub struct RadarDiscovery {
     /// Serial number (from model report)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serial_number: Option<String>,
+    /// NIC address that received this beacon (for multi-interface systems)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nic_address: Option<String>,
 }
 
 /// Legend entry for mapping pixel values to colors

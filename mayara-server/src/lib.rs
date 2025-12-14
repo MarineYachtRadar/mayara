@@ -199,6 +199,13 @@ pub struct Cli {
     /// Multi-radar mode keeps locators running even when one radar is found
     #[arg(long, default_value_t = false)]
     pub multiple_radar: bool,
+
+    /// Use legacy brand-specific locators (deprecated)
+    ///
+    /// This uses the old brand-specific RadarLocatorState implementations.
+    /// Default is now the unified core locator from mayara-core.
+    #[arg(long, default_value_t = false)]
+    pub legacy_locator: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -353,18 +360,38 @@ impl Session {
 
         session.write().unwrap().radars = Some(radars.clone());
 
+        let use_legacy_locator = session.read().unwrap().args.legacy_locator;
         let locator = Locator::new(session.clone(), radars);
 
-        let (tx_ip_change, rx_ip_change) = mpsc::channel(1);
+        // deprecated_marked_for_delete: Legacy locator used tx_ip_change and tx_interface_request
+        // let (tx_ip_change, rx_ip_change) = mpsc::channel(1);
+        let (_tx_ip_change, rx_ip_change) = mpsc::channel(1);
         let mut navdata = navdata::NavigationData::new(session.clone());
 
         subsystem.start(SubsystemBuilder::new("NavData", |subsys| async move {
             navdata.run(subsys, rx_ip_change).await
         }));
-        let tx_interface_request = session.write().unwrap().tx_interface_request.clone();
+        // deprecated_marked_for_delete: Legacy locator used tx_interface_request
+        // let tx_interface_request = session.write().unwrap().tx_interface_request.clone();
 
+        // deprecated_marked_for_delete: Legacy locator code removed
+        // if use_legacy_locator {
+        //     log::warn!("Using legacy locator (--legacy-locator flag) - deprecated");
+        //     subsystem.start(SubsystemBuilder::new("Locator", |subsys| {
+        //         locator.run(subsys, tx_ip_change, tx_interface_request)
+        //     }));
+        // } else {
+        //     ...
+        // }
+
+        // Use the unified core locator (default and only option now)
+        if use_legacy_locator {
+            log::error!("--legacy-locator flag is no longer supported, legacy code has been commented out");
+            log::warn!("Falling back to unified core locator");
+        }
+        log::info!("Using unified core locator");
         subsystem.start(SubsystemBuilder::new("Locator", |subsys| {
-            locator.run(subsys, tx_ip_change, tx_interface_request)
+            locator.run_with_core_locator(subsys)
         }));
 
         session

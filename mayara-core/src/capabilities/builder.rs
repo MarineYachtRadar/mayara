@@ -252,6 +252,7 @@ mod tests {
             max_spoke_len: 512,
             pixel_values: 64,
             serial_number: Some("12345".into()),
+            nic_address: None,
         };
 
         let caps = build_capabilities(&discovery, "1", vec![]);
@@ -278,6 +279,7 @@ mod tests {
             max_spoke_len: 512,
             pixel_values: 64,
             serial_number: None,
+            nic_address: None,
         };
 
         let caps = build_capabilities(

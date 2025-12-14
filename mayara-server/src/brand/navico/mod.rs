@@ -1,10 +1,9 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::{fmt, io};
 use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 
-use crate::locator::{LocatorAddress, LocatorId, RadarLocator, RadarLocatorState};
+use crate::locator::LocatorId;
 use crate::radar::{RadarInfo, SharedRadars};
-use crate::util::PrintableSlice;
 use crate::{Brand, Session};
 
 mod data;
@@ -27,8 +26,9 @@ const BITS_PER_NIBBLE: usize = 4;
 const NAVICO_PIXELS_PER_BYTE: usize = BITS_PER_BYTE / NAVICO_BITS_PER_PIXEL;
 const RADAR_LINE_DATA_LENGTH: usize = NAVICO_SPOKE_LEN / NAVICO_PIXELS_PER_BYTE;
 
-const NAVICO_BEACON_ADDRESS: SocketAddr =
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(236, 6, 7, 5)), 6878);
+// deprecated_marked_for_delete: Only used by legacy locator
+// const NAVICO_BEACON_ADDRESS: SocketAddr =
+//     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(236, 6, 7, 5)), 6878);
 
 /* NAVICO API SPOKES */
 /*
@@ -52,11 +52,12 @@ Not definitive list for
 4G radars only send the C4 data.
 */
 
-const NAVICO_ADDRESS_REQUEST_PACKET: [u8; 2] = [0x01, 0xB1];
+// deprecated_marked_for_delete: Only used by legacy locator
+// const NAVICO_ADDRESS_REQUEST_PACKET: [u8; 2] = [0x01, 0xB1];
 
-// BR24 beacon comes from a different multicast address
-const NAVICO_BR24_BEACON_ADDRESS: SocketAddr =
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(236, 6, 7, 4)), 6768);
+// deprecated_marked_for_delete: BR24 beacon comes from a different multicast address
+// const NAVICO_BR24_BEACON_ADDRESS: SocketAddr =
+//     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(236, 6, 7, 4)), 6768);
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum Model {
@@ -94,6 +95,15 @@ impl Model {
     }
 }
 
+// =============================================================================
+// DEPRECATED LEGACY CODE - COMMENTED OUT FOR BUILD VERIFICATION
+// =============================================================================
+// The following code has been replaced by CoreLocatorAdapter + process_discovery()
+// Keeping as comments to verify nothing references it. Delete after verification.
+// =============================================================================
+
+/*
+// deprecated_marked_for_delete: Legacy locator state - use process_discovery() instead
 #[derive(Clone)]
 struct NavicoLocatorState {
     session: Session,
@@ -260,6 +270,7 @@ impl NavicoLocatorState {
     }
 }
 
+// deprecated_marked_for_delete: Legacy RadarLocatorState implementation
 impl RadarLocatorState for NavicoLocatorState {
     fn process(
         &mut self,
@@ -279,11 +290,13 @@ impl RadarLocatorState for NavicoLocatorState {
     }
 }
 
+// deprecated_marked_for_delete: Legacy NavicoLocator - use CoreLocatorAdapter instead
 #[derive(Clone)]
 struct NavicoLocator {
     session: Session,
 }
 
+// deprecated_marked_for_delete: Legacy RadarLocator implementation
 impl RadarLocator for NavicoLocator {
     fn set_listen_addresses(&self, addresses: &mut Vec<LocatorAddress>) {
         let mut beacon_request_packets: Vec<&'static [u8]> = Vec::new();
@@ -304,16 +317,19 @@ impl RadarLocator for NavicoLocator {
     }
 }
 
+/// deprecated_marked_for_delete: Use CoreLocatorAdapter with process_discovery() instead
 pub fn create_locator(session: Session) -> Box<dyn RadarLocator + Send> {
     let locator = NavicoLocator { session };
     Box::new(locator)
 }
 
+// deprecated_marked_for_delete: Legacy NavicoBR24Locator - use CoreLocatorAdapter instead
 #[derive(Clone)]
 struct NavicoBR24Locator {
     session: Session,
 }
 
+// deprecated_marked_for_delete: Legacy RadarLocator implementation
 impl RadarLocator for NavicoBR24Locator {
     fn set_listen_addresses(&self, addresses: &mut Vec<LocatorAddress>) {
         if !addresses.iter().any(|i| i.id == LocatorId::GenBR24) {
@@ -330,10 +346,15 @@ impl RadarLocator for NavicoBR24Locator {
     }
 }
 
+/// deprecated_marked_for_delete: Use CoreLocatorAdapter with process_discovery() instead
 pub fn create_br24_locator(session: Session) -> Box<dyn RadarLocator + Send> {
     let locator = NavicoBR24Locator { session };
     Box::new(locator)
 }
+*/
+// =============================================================================
+// END DEPRECATED LEGACY CODE
+// =============================================================================
 
 const BLANKING_SETS: [(usize, &str, &str); 4] = [
     (0, "noTransmitStart1", "noTransmitEnd1"),
@@ -341,3 +362,133 @@ const BLANKING_SETS: [(usize, &str, &str); 4] = [
     (2, "noTransmitStart3", "noTransmitEnd3"),
     (3, "noTransmitStart4", "noTransmitEnd4"),
 ];
+
+// =============================================================================
+// New unified discovery processing (used by CoreLocatorAdapter)
+// =============================================================================
+
+use mayara_core::radar::RadarDiscovery;
+
+/// Process a radar discovery from the core locator.
+///
+/// Note: The core RadarDiscovery doesn't fully support Navico's dual-range radars
+/// or the separate data/report/send endpoints. For now, this uses the simplified
+/// addresses from RadarDiscovery. Full dual-range support requires keeping
+/// the existing beacon parsing via parse_beacon_endpoints.
+pub fn process_discovery(
+    session: Session,
+    discovery: &RadarDiscovery,
+    nic_addr: Ipv4Addr,
+    radars: &SharedRadars,
+    subsys: &SubsystemHandle,
+) -> Result<(), io::Error> {
+    // Parse address from discovery
+    let radar_addr = parse_radar_address(&discovery.address)?;
+
+    // For simplified discovery, use the same address for data/report/send with different ports
+    let data_addr: SocketAddrV4 = SocketAddrV4::new(*radar_addr.ip(), discovery.data_port);
+    let report_addr: SocketAddrV4 = SocketAddrV4::new(*radar_addr.ip(), discovery.command_port);
+    let send_addr: SocketAddrV4 = SocketAddrV4::new(*radar_addr.ip(), discovery.command_port);
+
+    // Determine locator ID and model
+    let is_br24 = discovery.model.as_deref() == Some("BR24");
+    let locator_id = if is_br24 {
+        LocatorId::GenBR24
+    } else {
+        LocatorId::Gen3Plus
+    };
+    let model_name = discovery.model.as_deref();
+
+    let info: RadarInfo = RadarInfo::new(
+        session.clone(),
+        locator_id,
+        Brand::Navico,
+        discovery.serial_number.as_deref(),
+        None, // suffix - not available from simplified discovery
+        16,
+        NAVICO_SPOKES,
+        NAVICO_SPOKE_LEN,
+        radar_addr,
+        nic_addr,
+        data_addr,
+        report_addr,
+        send_addr,
+        settings::new(session.clone(), model_name),
+        false, // is_dual_range - not available from simplified discovery
+    );
+
+    // Set userName control
+    info.controls.set_string("userName", info.key()).ok();
+
+    // Check if this is a new radar
+    let Some(mut info) = radars.located(info) else {
+        log::debug!("Navico radar {} already known", discovery.name);
+        return Ok(());
+    };
+
+    // Apply model-specific settings if known
+    let model = match model_name {
+        Some(name) => Model::new(name),
+        None => Model::Unknown,
+    };
+
+    if model != Model::Unknown {
+        let info2 = info.clone();
+        settings::update_when_model_known(&mut info.controls, model, &info2);
+        info.set_doppler(model == Model::HALO);
+        radars.update(&info);
+    }
+
+    // Spawn subsystems
+    let data_name = info.key() + " data";
+    let report_name = info.key() + " reports";
+
+    if session.read().unwrap().args.output {
+        let info_clone = info.clone();
+        subsys.start(SubsystemBuilder::new("stdout", move |s| {
+            info_clone.forward_output(s)
+        }));
+    }
+
+    let data_receiver = data::NavicoDataReceiver::new(&session, info.clone());
+    let report_receiver = report::NavicoReportReceiver::new(
+        session.clone(),
+        info,
+        radars.clone(),
+        model,
+    );
+
+    subsys.start(SubsystemBuilder::new(
+        data_name,
+        move |s: SubsystemHandle| data_receiver.run(s),
+    ));
+    subsys.start(SubsystemBuilder::new(report_name, |s| {
+        report_receiver.run(s)
+    }));
+
+    log::info!(
+        "{}: Navico radar activated via CoreLocatorAdapter",
+        discovery.name
+    );
+    Ok(())
+}
+
+/// Parse address string "ip:port" into SocketAddrV4
+fn parse_radar_address(addr: &str) -> Result<SocketAddrV4, io::Error> {
+    if let Some(colon_pos) = addr.rfind(':') {
+        let ip_str = &addr[..colon_pos];
+        let port_str = &addr[colon_pos + 1..];
+        let ip: Ipv4Addr = ip_str.parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid IP: {}", e))
+        })?;
+        let port: u16 = port_str.parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid port: {}", e))
+        })?;
+        Ok(SocketAddrV4::new(ip, port))
+    } else {
+        let ip: Ipv4Addr = addr.parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid IP: {}", e))
+        })?;
+        Ok(SocketAddrV4::new(ip, 0))
+    }
+}

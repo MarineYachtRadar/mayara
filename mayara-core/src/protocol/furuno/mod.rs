@@ -256,7 +256,7 @@ pub fn parse_beacon_response(data: &[u8], source_addr: &str) -> Result<RadarDisc
 
     Ok(RadarDiscovery {
         brand: Brand::Furuno,
-        model: None, // Model comes from TCP $N96 response
+        model: None, // Model comes from UDP model report
         name,
         address: source_addr.to_string(),
         data_port: DATA_PORT,
@@ -264,8 +264,8 @@ pub fn parse_beacon_response(data: &[u8], source_addr: &str) -> Result<RadarDisc
         spokes_per_revolution: SPOKES_PER_REVOLUTION,
         max_spoke_len: MAX_SPOKE_LEN,
         pixel_values: 64,
-        // Serial number not available - UDP model report returns empty
         serial_number: None,
+        nic_address: None, // Set by locator
     })
 }
 

@@ -93,9 +93,10 @@ pub struct FurunoController {
     login_port_idx: usize,
     /// Index into fallback command ports to try
     fallback_port_idx: usize,
-    /// Firmware version from $N96 response
+    /// Firmware version from $N96 response (e.g., "01.05")
     firmware_version: Option<String>,
-    /// Radar model from $N96 response (e.g., "DRS4D-NXT")
+    /// Radar model from UDP model report (e.g., "DRS4D-NXT")
+    /// Note: $N96 contains part numbers, not model names
     model: Option<String>,
     /// Operating hours from $N8E response
     operating_hours: Option<f64>,
@@ -706,19 +707,22 @@ impl FurunoController {
             ));
         }
 
-        // Parse module response for model/firmware
+        // Parse module response for firmware version
+        // Format: $N96,{part1}-{ver1},{part2}-{ver2},...
+        // Example: $N96,0359360-01.05,0359358-01.01,0359359-01.01,0359361-01.05,,,
+        // Note: This does NOT contain the model name - model comes from UDP model report
         if line.starts_with("$N96") {
-            // Format: $N96,model,firmware,...
             let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() >= 3 {
-                self.model = Some(parts[1].to_string());
-                self.firmware_version = Some(parts[2].to_string());
-                io.debug(&format!(
-                    "[{}] Model: {}, Firmware: {}",
-                    self.radar_id,
-                    parts[1],
-                    parts[2]
-                ));
+            // Extract firmware version from first module (e.g., "0359360-01.05" -> "01.05")
+            if parts.len() >= 2 {
+                if let Some(version_part) = parts[1].split('-').last() {
+                    self.firmware_version = Some(version_part.to_string());
+                    io.debug(&format!(
+                        "[{}] Firmware version from $N96: {}",
+                        self.radar_id,
+                        version_part
+                    ));
+                }
             }
         }
 

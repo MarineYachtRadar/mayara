@@ -272,6 +272,48 @@ pub fn match_ipv4(addr: &Ipv4Addr, bcast: &Ipv4Addr, netmask: &Ipv4Addr) -> bool
     r == b
 }
 
+/// Find the NIC address that can reach a given radar IP.
+///
+/// Returns the first interface IP that matches the radar's subnet.
+/// Falls back to the first non-loopback interface if no match is found.
+pub fn find_nic_for_radar(radar_ip: &Ipv4Addr) -> Option<Ipv4Addr> {
+    use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+
+    let interfaces = NetworkInterface::show().ok()?;
+
+    // First pass: find an interface on the same subnet
+    for itf in &interfaces {
+        for addr in &itf.addr {
+            if let (IpAddr::V4(nic_ip), Some(IpAddr::V4(netmask))) = (addr.ip(), addr.netmask()) {
+                if !nic_ip.is_loopback() && match_ipv4(&nic_ip, radar_ip, &netmask) {
+                    log::debug!(
+                        "Found NIC {} ({}) for radar {}",
+                        itf.name, nic_ip, radar_ip
+                    );
+                    return Some(nic_ip);
+                }
+            }
+        }
+    }
+
+    // Second pass: return first non-loopback interface
+    for itf in &interfaces {
+        for addr in &itf.addr {
+            if let IpAddr::V4(nic_ip) = addr.ip() {
+                if !nic_ip.is_loopback() {
+                    log::debug!(
+                        "Fallback NIC {} ({}) for radar {} (no subnet match)",
+                        itf.name, nic_ip, radar_ip
+                    );
+                    return Some(nic_ip);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) use macos::is_wireless_interface;
 #[cfg(target_os = "macos")]
