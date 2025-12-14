@@ -386,6 +386,17 @@ impl Locator {
                                 );
                             }
                         }
+                        Some(LocatorMessage::RadarUpdated(discovery)) => {
+                            log::info!(
+                                "Core locator updated {} radar: {} - model: {:?}",
+                                discovery.brand,
+                                discovery.name,
+                                discovery.model
+                            );
+
+                            // Update existing radar with new model info
+                            radars.update_from_discovery(&discovery);
+                        }
                         Some(LocatorMessage::Shutdown) => {
                             log::info!("Core locator shutdown");
                             break;

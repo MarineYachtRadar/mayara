@@ -602,6 +602,100 @@ impl SharedRadars {
             settings::update_when_model_known(info, model, "unknown");
         }
     }
+
+    /// Update radar info from a core RadarDiscovery (e.g., when model info arrives).
+    ///
+    /// This finds the existing radar by address and updates its model/serial.
+    pub fn update_from_discovery(&self, discovery: &mayara_core::radar::RadarDiscovery) {
+        use mayara_core::Brand as CoreBrand;
+
+        // Extract IP from discovery address (which may be "ip:port" or just "ip")
+        let discovery_ip = discovery.address.split(':').next().unwrap_or(&discovery.address);
+
+        // Find radar by matching address
+        let matching_key = {
+            let radars = self.radars.read().unwrap();
+            radars
+                .info
+                .iter()
+                .find(|(_, info)| {
+                    let info_ip = info.addr.ip().to_string();
+                    info_ip == discovery_ip
+                })
+                .map(|(key, _)| key.clone())
+        };
+
+        if let Some(key) = matching_key {
+            // Update model if provided - delegate to brand-specific handlers
+            if let Some(ref model_name) = discovery.model {
+                match discovery.brand {
+                    #[cfg(feature = "furuno")]
+                    CoreBrand::Furuno => {
+                        self.update_furuno_model(&key, model_name);
+                    }
+                    #[cfg(feature = "navico")]
+                    CoreBrand::Navico => {
+                        self.update_navico_model(&key, model_name);
+                    }
+                    #[cfg(feature = "raymarine")]
+                    CoreBrand::Raymarine => {
+                        // Raymarine model settings applied at discovery time
+                        log::debug!("{}: Raymarine model update ignored (applied at discovery)", key);
+                    }
+                    _ => {
+                        log::debug!("{}: No model update handler for brand {:?}", key, discovery.brand);
+                    }
+                }
+            }
+
+            // Update serial if provided
+            if let Some(ref serial) = discovery.serial_number {
+                let mut radars = self.radars.write().unwrap();
+                if let Some(info) = radars.info.get_mut(&key) {
+                    if info.serial_no.as_ref() != Some(serial) {
+                        log::info!(
+                            "{}: Updating serial from discovery: {:?} -> {}",
+                            key,
+                            info.serial_no,
+                            serial
+                        );
+                        info.serial_no = Some(serial.clone());
+                    }
+                }
+            }
+        } else {
+            log::warn!(
+                "update_from_discovery: No radar found for address {}",
+                discovery_ip
+            );
+        }
+    }
+
+    /// Update Navico radar model when received from discovery update
+    #[cfg(feature = "navico")]
+    pub fn update_navico_model(&self, key: &str, model_name: &str) {
+        use crate::brand::navico::Model;
+
+        let mut radars = self.radars.write().unwrap();
+        if let Some(info) = radars.info.get_mut(key) {
+            let current_model = info.controls.model_name();
+            if current_model.as_deref() != Some(model_name) {
+                log::info!(
+                    "{}: Updating Navico model: {:?} -> {}",
+                    key,
+                    current_model,
+                    model_name
+                );
+                info.controls.set_model_name(model_name.to_string());
+
+                // Apply model-specific control updates
+                let model = Model::from_name(model_name);
+                if model != Model::Unknown {
+                    crate::brand::navico::update_controls_for_model(info, model);
+                }
+            }
+        }
+    }
 }
 
 /// Convert model name string to RadarModel enum (for Furuno)

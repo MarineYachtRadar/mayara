@@ -12,6 +12,15 @@ use crate::radar::RadarDiscovery;
 /// Furuno beacon/announce broadcast address
 const FURUNO_BEACON_BROADCAST: &str = "172.31.255.255";
 
+/// Event from the radar locator
+#[derive(Debug, Clone)]
+pub enum LocatorEvent {
+    /// A new radar was discovered
+    RadarDiscovered(RadarDiscovery),
+    /// An existing radar's info was updated (e.g., model report received)
+    RadarUpdated(RadarDiscovery),
+}
+
 /// A discovered radar with its metadata
 #[derive(Debug, Clone)]
 pub struct DiscoveredRadar {
@@ -228,8 +237,8 @@ impl RadarLocator {
 
     /// Poll for incoming beacon packets
     ///
-    /// Returns list of newly discovered radars.
-    pub fn poll<I: IoProvider>(&mut self, io: &mut I) -> Vec<RadarDiscovery> {
+    /// Returns list of locator events (new discoveries and updates).
+    pub fn poll<I: IoProvider>(&mut self, io: &mut I) -> Vec<LocatorEvent> {
         self.poll_count += 1;
         let current_time_ms = io.current_time_ms();
 
@@ -239,6 +248,7 @@ impl RadarLocator {
             self.send_furuno_announce(io);
         }
 
+        let mut events = Vec::new();
         let mut discoveries = Vec::new();
         let mut buf = [0u8; 2048];
 
@@ -250,7 +260,9 @@ impl RadarLocator {
 
         // Apply model reports to existing radars
         for (addr, model, serial) in model_reports {
-            self.update_radar_model_info(io, &addr, model.as_deref(), serial.as_deref());
+            if let Some(updated) = self.update_radar_model_info(io, &addr, model.as_deref(), serial.as_deref()) {
+                events.push(LocatorEvent::RadarUpdated(updated));
+            }
         }
 
         // Poll Navico BR24
@@ -323,14 +335,13 @@ impl RadarLocator {
         }
 
         // Add all discoveries to the radar list
-        let mut new_radars = Vec::new();
         for discovery in discoveries {
             if self.add_radar(io, &discovery, current_time_ms) {
-                new_radars.push(discovery);
+                events.push(LocatorEvent::RadarDiscovered(discovery));
             }
         }
 
-        new_radars
+        events
     }
 
     fn poll_furuno<I: IoProvider>(
@@ -374,19 +385,23 @@ impl RadarLocator {
         }
     }
 
+    /// Update model/serial info for an existing radar.
+    /// Returns the updated discovery if anything changed.
     fn update_radar_model_info<I: IoProvider>(
         &mut self,
         io: &I,
         source_addr: &str,
         model: Option<&str>,
         serial: Option<&str>,
-    ) {
+    ) -> Option<RadarDiscovery> {
         let source_ip = source_addr.split(':').next().unwrap_or(source_addr);
 
         for (_id, radar) in self.radars.iter_mut() {
             let radar_ip = radar.discovery.address.split(':').next().unwrap_or(&radar.discovery.address);
 
             if radar_ip == source_ip {
+                let mut changed = false;
+
                 if let Some(m) = model {
                     if radar.discovery.model.is_none() || radar.discovery.model.as_deref() != Some(m) {
                         io.debug(&format!(
@@ -394,6 +409,7 @@ impl RadarLocator {
                             radar.discovery.name, radar.discovery.model, m
                         ));
                         radar.discovery.model = Some(m.to_string());
+                        changed = true;
                     }
                 }
                 if let Some(s) = serial {
@@ -403,9 +419,14 @@ impl RadarLocator {
                             radar.discovery.name, radar.discovery.serial_number, s
                         ));
                         radar.discovery.serial_number = Some(s.to_string());
+                        changed = true;
                     }
                 }
-                return;
+
+                if changed {
+                    return Some(radar.discovery.clone());
+                }
+                return None;
             }
         }
 
@@ -413,6 +434,7 @@ impl RadarLocator {
             "Model report for unknown radar at {}: model={:?}, serial={:?}",
             source_addr, model, serial
         ));
+        None
     }
 
     fn add_radar<I: IoProvider>(&mut self, io: &I, discovery: &RadarDiscovery, current_time_ms: u64) -> bool {

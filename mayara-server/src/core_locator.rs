@@ -31,7 +31,7 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::Duration;
 
-use mayara_core::locator::RadarLocator;
+use mayara_core::locator::{LocatorEvent, RadarLocator};
 use mayara_core::radar::RadarDiscovery;
 use mayara_core::Brand as CoreBrand;
 use tokio::sync::mpsc;
@@ -44,8 +44,10 @@ use crate::Brand;
 /// Discovery message sent from the locator to the server.
 #[derive(Debug, Clone)]
 pub enum LocatorMessage {
-    /// A radar was discovered (or rediscovered with updated info)
+    /// A new radar was discovered
     RadarDiscovered(RadarDiscovery),
+    /// An existing radar's info was updated (e.g., model detected)
+    RadarUpdated(RadarDiscovery),
     /// Locator has shut down
     Shutdown,
 }
@@ -95,8 +97,8 @@ impl CoreLocatorAdapter {
 
     /// Poll for discoveries once.
     ///
-    /// Returns list of newly discovered radars.
-    pub fn poll(&mut self) -> Vec<RadarDiscovery> {
+    /// Returns list of locator events (new discoveries and updates).
+    pub fn poll(&mut self) -> Vec<LocatorEvent> {
         self.locator.poll(&mut self.io)
     }
 
@@ -141,16 +143,28 @@ impl CoreLocatorAdapter {
                 }
                 _ = poll_timer.tick() => {
                     // Poll the core locator
-                    let new_radars = self.poll();
+                    let events = self.poll();
 
-                    // Send any new discoveries to the server
-                    for discovery in new_radars {
-                        log::info!(
-                            "CoreLocatorAdapter: Discovered {} radar '{}' at {}",
-                            discovery.brand, discovery.name, discovery.address
-                        );
+                    // Send events to the server
+                    for event in events {
+                        let message = match event {
+                            LocatorEvent::RadarDiscovered(discovery) => {
+                                log::info!(
+                                    "CoreLocatorAdapter: Discovered {} radar '{}' at {}",
+                                    discovery.brand, discovery.name, discovery.address
+                                );
+                                LocatorMessage::RadarDiscovered(discovery)
+                            }
+                            LocatorEvent::RadarUpdated(discovery) => {
+                                log::info!(
+                                    "CoreLocatorAdapter: Updated {} radar '{}' - model: {:?}",
+                                    discovery.brand, discovery.name, discovery.model
+                                );
+                                LocatorMessage::RadarUpdated(discovery)
+                            }
+                        };
 
-                        if self.discovery_tx.send(LocatorMessage::RadarDiscovered(discovery)).await.is_err() {
+                        if self.discovery_tx.send(message).await.is_err() {
                             log::warn!("CoreLocatorAdapter: Discovery channel closed");
                             break;
                         }

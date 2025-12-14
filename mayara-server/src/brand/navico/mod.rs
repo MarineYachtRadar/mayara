@@ -445,3 +445,12 @@ pub fn process_discovery(
     );
     Ok(())
 }
+
+/// Update controls for a Navico radar when model is known.
+///
+/// Called from SharedRadars::update_navico_model when a model update arrives.
+pub fn update_controls_for_model(info: &mut RadarInfo, model: Model) {
+    let info2 = info.clone();
+    settings::update_when_model_known(&mut info.controls, model, &info2);
+    info.set_doppler(model.has_doppler());
+}
