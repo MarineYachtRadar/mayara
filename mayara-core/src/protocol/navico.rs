@@ -511,6 +511,60 @@ pub struct HaloSpeedPacket {
     _u01: [u8; 7],
 }
 
+impl HaloHeadingPacket {
+    /// Parse a heading packet from raw bytes
+    pub fn transmute(bytes: &[u8]) -> Result<Self, &'static str> {
+        const SIZE: usize = core::mem::size_of::<HaloHeadingPacket>();
+        if bytes.len() < SIZE {
+            return Err("Buffer too small for HaloHeadingPacket");
+        }
+        let arr: [u8; SIZE] = bytes[..SIZE].try_into().map_err(|_| "Conversion failed")?;
+        Ok(unsafe { core::mem::transmute(arr) })
+    }
+
+    /// Get heading in degrees (0.0 to 360.0)
+    pub fn heading_degrees(&self) -> f64 {
+        i16::from_le_bytes(self.heading) as f64 * 0.1
+    }
+}
+
+impl HaloNavigationPacket {
+    /// Parse a navigation packet from raw bytes
+    pub fn transmute(bytes: &[u8]) -> Result<Self, &'static str> {
+        const SIZE: usize = core::mem::size_of::<HaloNavigationPacket>();
+        if bytes.len() < SIZE {
+            return Err("Buffer too small for HaloNavigationPacket");
+        }
+        let arr: [u8; SIZE] = bytes[..SIZE].try_into().map_err(|_| "Conversion failed")?;
+        Ok(unsafe { core::mem::transmute(arr) })
+    }
+
+    /// Get SOG in knots
+    pub fn sog_knots(&self) -> f64 {
+        u16::from_le_bytes(self.sog) as f64 * 0.01 * MS_TO_KN
+    }
+
+    /// Get COG in degrees (0.0 to 360.0)
+    pub fn cog_degrees(&self) -> f64 {
+        u16::from_le_bytes(self.cog) as f64 * 360.0 / 63488.0
+    }
+}
+
+impl HaloSpeedPacket {
+    /// Parse a speed packet from raw bytes
+    pub fn transmute(bytes: &[u8]) -> Result<Self, &'static str> {
+        const SIZE: usize = core::mem::size_of::<HaloSpeedPacket>();
+        if bytes.len() < SIZE {
+            return Err("Buffer too small for HaloSpeedPacket");
+        }
+        let arr: [u8; SIZE] = bytes[..SIZE].try_into().map_err(|_| "Conversion failed")?;
+        Ok(unsafe { core::mem::transmute(arr) })
+    }
+}
+
+// Conversion constant for speed
+const MS_TO_KN: f64 = 1.943844;
+
 // =============================================================================
 // Doppler Mode
 // =============================================================================
@@ -1300,6 +1354,107 @@ pub fn create_doppler_command(mode: DopplerMode) -> Vec<u8> {
 }
 
 // =============================================================================
+// Navigation Data Packet Formatting (send heading/SOG/COG to Navico radars)
+// =============================================================================
+
+/// Size of heading packet
+pub const HEADING_PACKET_SIZE: usize = std::mem::size_of::<HaloHeadingPacket>();
+
+/// Size of navigation packet
+pub const NAVIGATION_PACKET_SIZE: usize = std::mem::size_of::<HaloNavigationPacket>();
+
+/// Size of speed packet
+pub const SPEED_PACKET_SIZE: usize = std::mem::size_of::<HaloSpeedPacket>();
+
+/// Format a heading packet for Navico HALO radars
+///
+/// # Arguments
+/// * `heading_deg` - Heading in degrees (0.0..360.0)
+/// * `counter` - Packet counter (increments each transmission)
+/// * `timestamp_ms` - Timestamp in milliseconds since Unix epoch
+///
+/// # Returns
+/// 72-byte packet ready to send to INFO_ADDR:INFO_PORT
+pub fn format_heading_packet(heading_deg: f64, counter: u16, timestamp_ms: i64) -> [u8; 72] {
+    let heading = (heading_deg * 10.0) as i16;
+    let now = timestamp_ms.to_le_bytes();
+
+    let packet = HaloHeadingPacket {
+        marker: [b'N', b'K', b'O', b'E'],
+        preamble: [0, 1, 0x90, 0x02],
+        counter: counter.to_be_bytes(),
+        _u01: [0; 26],
+        _u02: [0x12, 0xf1, 0x01, 0x00],
+        now,
+        _u03: [0, 0, 0, 2, 0, 0, 0, 0],
+        _u04: [0; 4],
+        _u05: [0; 4],
+        _u06: [0xff],
+        heading: heading.to_le_bytes(),
+        _u07: [0; 5],
+    };
+
+    // Safe: struct is repr(C, packed) with known size
+    unsafe { std::mem::transmute(packet) }
+}
+
+/// Format a navigation packet for Navico HALO radars (COG/SOG)
+///
+/// # Arguments
+/// * `sog_ms` - Speed over ground in m/s
+/// * `cog_deg` - Course over ground in degrees (0.0..360.0)
+/// * `counter` - Packet counter (increments each transmission)
+/// * `timestamp_ms` - Timestamp in milliseconds since Unix epoch
+///
+/// # Returns
+/// 72-byte packet ready to send to INFO_ADDR:INFO_PORT
+pub fn format_navigation_packet(sog_ms: f64, cog_deg: f64, counter: u16, timestamp_ms: i64) -> [u8; 72] {
+    let sog = (sog_ms * 10.0) as i16;  // 0.01 m/s units
+    let cog = (cog_deg * (63488.0 / 360.0)) as i16;  // 0.01 radians
+    let now = timestamp_ms.to_le_bytes();
+
+    let packet = HaloNavigationPacket {
+        marker: [b'N', b'K', b'O', b'E'],
+        preamble: [0, 1, 0x90, 0x02],
+        counter: counter.to_be_bytes(),
+        _u01: [0; 26],
+        _u02: [0x02, 0xf8, 0x01, 0x00],
+        now,
+        _u03: [0; 18],
+        cog: cog.to_le_bytes(),
+        sog: sog.to_le_bytes(),
+        _u04: [0xff, 0xff],
+    };
+
+    // Safe: struct is repr(C, packed) with known size
+    unsafe { std::mem::transmute(packet) }
+}
+
+/// Format a speed packet for Navico HALO radars
+///
+/// # Arguments
+/// * `sog_ms` - Speed over ground in m/s
+/// * `cog_deg` - Course over ground in degrees (0.0..360.0)
+///
+/// # Returns
+/// 23-byte packet ready to send to SPEED_ADDR_A:SPEED_PORT_A and SPEED_ADDR_B:SPEED_PORT_B
+pub fn format_speed_packet(sog_ms: f64, cog_deg: f64) -> [u8; 23] {
+    let sog = (sog_ms * 10.0) as u16;
+    let cog = (cog_deg * 63488.0 / 360.0) as u16;
+
+    let packet = HaloSpeedPacket {
+        marker: [0x01, 0xd3, 0x01, 0x00, 0x00, 0x00],
+        sog: sog.to_le_bytes(),
+        _u00: [0x00, 0x00, 0x01, 0x00, 0x00, 0x00],
+        cog: cog.to_le_bytes(),
+        _u01: [0x00, 0x00, 0x01, 0x33, 0x00, 0x00, 0x00],
+    };
+
+    // Safe: struct is repr(C, packed) with known size
+    unsafe { std::mem::transmute(packet) }
+}
+
+// =============================================================================
 // Utility Functions
 // =============================================================================
 
@@ -1441,6 +1596,37 @@ mod tests {
         assert!(BEACON_BR24_SIZE > 0);
         assert!(BEACON_SINGLE_SIZE > BEACON_BR24_SIZE);
         assert!(BEACON_DUAL_SIZE > BEACON_SINGLE_SIZE);
+    }
+
+    #[test]
+    fn test_format_heading_packet() {
+        let packet = format_heading_packet(90.0, 1, 1234567890000);
+        assert_eq!(packet.len(), 72);
+        assert_eq!(&packet[0..4], b"NKOE");
+        // Heading 90.0 * 10 = 900 = 0x0384
+        // heading field is at offset 65-66 (after marker[4], preamble[4], counter[2], _u01[26], _u02[4], now[8], _u03[8], _u04[4], _u05[4], _u06[1])
+        assert_eq!(&packet[65..67], &900i16.to_le_bytes());
+    }
+
+    #[test]
+    fn test_format_navigation_packet() {
+        let packet = format_navigation_packet(5.0, 180.0, 2, 1234567890000);
+        assert_eq!(packet.len(), 72);
+        assert_eq!(&packet[0..4], b"NKOE");
+    }
+
+    #[test]
+    fn test_format_speed_packet() {
+        let packet = format_speed_packet(10.0, 45.0);
+        assert_eq!(packet.len(), 23);
+        assert_eq!(&packet[0..6], &[0x01, 0xd3, 0x01, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_packet_sizes() {
+        assert_eq!(HEADING_PACKET_SIZE, 72);
+        assert_eq!(NAVIGATION_PACKET_SIZE, 72);
+        assert_eq!(SPEED_PACKET_SIZE, 23);
     }
 
     #[test]

@@ -219,16 +219,6 @@ impl RaymarineController {
         }
     }
 
-    // Quantum command builders
-    fn quantum_command(&self, opcode: u16, data: &[u8]) -> Vec<u8> {
-        let mut cmd = Vec::with_capacity(4 + data.len());
-        cmd.extend_from_slice(&opcode.to_le_bytes());
-        cmd.push(0x28);
-        cmd.push(0x00);
-        cmd.extend_from_slice(data);
-        cmd
-    }
-
     // RD command builders
     fn rd_command(&self, opcode: u16, data: &[u8]) -> Vec<u8> {
         let mut cmd = Vec::with_capacity(4 + data.len());

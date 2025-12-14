@@ -127,7 +127,7 @@ mayara/
 │       │   │   ├── command.rs      # Format functions (format_gain_command, etc.)
 │       │   │   ├── dispatch.rs     # Control dispatch (ID → wire command)
 │       │   │   └── report.rs       # TCP response parsing
-│       │   ├── navico.rs           # Navico protocol
+│       │   ├── navico.rs           # Navico: report parsing + nav packet formatting
 │       │   ├── raymarine.rs        # Raymarine protocol
 │       │   └── garmin.rs           # Garmin protocol
 │       │
@@ -138,7 +138,7 @@ mayara/
 │       │   └── garmin.rs           # xHD series
 │       │
 │       ├── capabilities/           # Control definitions
-│       │   ├── controls.rs         # 40+ control definitions (gain, sea, dopplerMode...)
+│       │   ├── controls.rs         # 40+ definitions + batch getters (get_base_*, get_all_*)
 │       │   └── builder.rs          # Capability manifest builder
 │       │
 │       ├── arpa/                   # ARPA target tracking
@@ -158,15 +158,16 @@ mayara/
 │       ├── core_locator.rs         # CoreLocatorAdapter (wraps mayara-core RadarLocator)
 │       ├── locator.rs              # Legacy platform-specific locator
 │       ├── web.rs                  # Axum HTTP/WebSocket handlers
-│       ├── settings.rs             # Control factory using mayara-core definitions
+│       ├── settings.rs             # SharedControls wrapper for radar state
+│       ├── control_factory.rs      # Batch control builders (uses core get_base_*, get_all_*)
 │       ├── storage.rs              # Local applicationData storage
 │       ├── navdata.rs              # NMEA/SignalK navigation input
 │       │
-│       └── brand/                  # Brand-specific controllers
-│           ├── furuno/             # Furuno TCP controller
-│           ├── navico/             # Navico UDP controller
-│           ├── raymarine/          # Raymarine controller
-│           └── garmin/             # Garmin controller
+│       └── brand/                  # Brand-specific async adapters
+│           ├── furuno/             # Async report/data receivers, delegates to core
+│           ├── navico/             # report.rs + info.rs use core protocol/navico.rs
+│           ├── raymarine/          # Async report/data receivers, delegates to core
+│           └── garmin/             # Discovery only (controller integration pending)
 │
 ├── mayara-signalk-wasm/            # SignalK WASM plugin
 │   └── src/
@@ -326,8 +327,10 @@ impl CoreLocatorAdapter {
 | Component | Location | Notes |
 |-----------|----------|-------|
 | **Protocol parsing** | mayara-core/protocol/ | All 4 brands: Furuno, Navico, Raymarine, Garmin |
+| **Protocol formatting** | mayara-core/protocol/navico.rs | Navigation packets (heading/SOG/COG) |
 | **Model database** | mayara-core/models/ | All models with ranges, spokes, capabilities |
 | **Control definitions** | mayara-core/capabilities/ | 40+ controls (v5 API) |
+| **Batch control init** | mayara-core/capabilities/controls.rs | get_base_controls_for_brand(), get_all_controls_for_model() |
 | **IoProvider trait** | mayara-core/io.rs | Platform-independent I/O abstraction |
 | **RadarLocator** | mayara-core/locator.rs | Multi-brand discovery via IoProvider |
 | **ConnectionManager** | mayara-core/connection.rs | State machine, backoff, Furuno login |
@@ -352,7 +355,7 @@ The server's brand modules now delegate to unified core controllers:
 | Brand | Core Controller | Server Integration | Status |
 |-------|-----------------|-------------------|--------|
 | **Furuno** | `FurunoController` (TCP login + commands) | `brand/furuno/report.rs` uses core | ✅ Complete |
-| **Navico** | `NavicoController` (UDP multicast) | `brand/navico/report.rs` uses core | ✅ Complete |
+| **Navico** | `NavicoController` (UDP multicast) | `report.rs` + `info.rs` use core protocol | ✅ Complete |
 | **Raymarine** | `RaymarineController` (Quantum/RD) | `brand/raymarine/report.rs` uses core | ✅ Complete |
 | **Garmin** | `GarminController` (UDP) | Core ready, server uses legacy locator | 🚧 Partial |
 
@@ -361,6 +364,7 @@ The server's `brand/` modules still handle:
 - Radar discovery and lifecycle management
 - Control value caching and broadcasting
 - WebSocket spoke streaming to clients
+- Navigation data sending (Navico `info.rs` uses core formatting functions)
 
 ### ❌ Not Yet Implemented
 
@@ -420,10 +424,10 @@ The server's `brand/` modules still handle:
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │   Brand Controllers (can use mayara-core/controllers/ OR brand/)     │    │
-│  │   - Unified controllers from mayara-core (FurunoController, etc.)    │    │
-│  │   - OR async wrappers in brand/ that use core's controllers          │    │
-│  │   - TokioIoProvider implements IoProvider for I/O                    │    │
+│  │   Brand Adapters (brand/) + Core Controllers (controllers/)          │    │
+│  │   - Async receivers in brand/ handle tokio sockets, spoke streaming  │    │
+│  │   - Delegate control commands to mayara-core unified controllers     │    │
+│  │   - TokioIoProvider implements IoProvider for controller I/O         │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
@@ -447,8 +451,10 @@ The server's `brand/` modules still handle:
 | Component | Location | WASM | Server | Notes |
 |-----------|----------|:----:|:------:|-------|
 | **Protocol parsing** | mayara-core/protocol/ | ✓ | ✓ | Packet encode/decode |
+| **Protocol formatting** | mayara-core/protocol/navico.rs | ✓ | ✓ | Heading/SOG/COG packets |
 | **Model database** | mayara-core/models/ | ✓ | ✓ | Ranges, capabilities |
 | **Control definitions** | mayara-core/capabilities/ | ✓ | ✓ | v5 API schemas |
+| **Batch control init** | mayara-core/capabilities/controls.rs | ✓ | ✓ | get_base_*, get_all_* |
 | **IoProvider trait** | mayara-core/io.rs | ✓ | ✓ | Socket abstraction |
 | **RadarLocator** | mayara-core/locator.rs | ✓ | ✓ | **Same discovery code!** |
 | **Unified Controllers** | mayara-core/controllers/ | ✓ | ✓ | **ALL 4 brands!** |
@@ -674,6 +680,118 @@ impl RaymarineReportReceiver {
 
 ---
 
+## Navigation Data Formatting
+
+Navico radars require navigation data (heading, SOG, COG) to be sent as UDP multicast packets for proper HALO/4G operation. The packet formatting functions in `mayara-core/protocol/navico.rs` are pure functions that create byte arrays, enabling both server and WASM to send identical packets.
+
+### Packet Types
+
+| Packet | Function | Multicast Address | Purpose |
+|--------|----------|-------------------|---------|
+| **Heading** | `format_heading_packet()` | 236.6.7.8:50200 | Ship heading for display orientation |
+| **Navigation** | `format_navigation_packet()` | 236.6.7.8:50200 | SOG + COG for trail orientation |
+| **Speed** | `format_speed_packet()` | 236.6.7.5:50201 + 236.6.7.6:50201 | Speed/course for target motion |
+
+### Packet Parsing
+
+The same `navico.rs` file also provides packet parsing via `transmute()` methods on the packed structs:
+
+```rust
+// mayara-core/src/protocol/navico.rs
+
+// Parsing received packets (in server's report.rs):
+impl HaloHeadingPacket {
+    pub fn transmute(bytes: &[u8]) -> Result<Self, &'static str>
+    pub fn heading_degrees(&self) -> f64  // Convenience accessor
+}
+
+impl HaloNavigationPacket {
+    pub fn transmute(bytes: &[u8]) -> Result<Self, &'static str>
+    pub fn sog_knots(&self) -> f64
+    pub fn cog_degrees(&self) -> f64
+}
+
+// Formatting packets to send (in server's info.rs):
+pub fn format_heading_packet(heading_deg: f64, counter: u16, timestamp_ms: i64) -> [u8; 72]
+pub fn format_navigation_packet(sog_ms: f64, cog_deg: f64, counter: u16, timestamp_ms: i64) -> [u8; 72]
+pub fn format_speed_packet(sog_ms: f64, cog_deg: f64) -> [u8; 23]
+```
+
+### Address Constants
+
+All multicast addresses are defined once in mayara-core:
+
+```rust
+// mayara-core/src/protocol/navico.rs
+pub const INFO_ADDR: &str = "236.6.7.8";
+pub const INFO_PORT: u16 = 50200;
+pub const SPEED_ADDR_A: &str = "236.6.7.5";
+pub const SPEED_ADDR_B: &str = "236.6.7.6";
+pub const SPEED_PORT_A: u16 = 50201;
+pub const SPEED_PORT_B: u16 = 50201;
+```
+
+**Key insight:** The server's `navico/info.rs` and `navico/report.rs` import these constants from core, eliminating duplicate address definitions.
+
+---
+
+## Batch Control Initialization
+
+The capabilities module provides batch functions to generate all controls for a brand or model, enabling server's `control_factory.rs` to initialize controls without hardcoding lists:
+
+### Core Functions (mayara-core/capabilities/controls.rs)
+
+```rust
+/// Get base controls that exist on all radars of a brand
+pub fn get_base_controls_for_brand(brand: Brand) -> Vec<ControlDefinition> {
+    // Returns: power, gain, sea, rain, etc.
+}
+
+/// Get all controls for a specific model (base + extended)
+pub fn get_all_controls_for_model(brand: Brand, model_name: Option<&str>) -> Vec<ControlDefinition> {
+    // Uses models::get_model() to look up model's control list
+    // Returns base controls + model-specific extended controls
+}
+```
+
+### Server Builders (mayara-server/control_factory.rs)
+
+```rust
+/// Convert core ControlDefinitions to server's Control objects
+pub fn build_base_controls_for_brand(brand: Brand) -> HashMap<String, Control> {
+    let core_defs = controls::get_base_controls_for_brand(brand);
+    core_defs.into_iter()
+        .map(|def| (def.id.clone(), build_control(&def)))
+        .collect()
+}
+
+/// Build all controls for a model
+pub fn build_all_controls_for_model(brand: Brand, model_name: Option<&str>) -> HashMap<String, Control>
+
+/// Build only extended controls for a model (when model detected after startup)
+pub fn build_extended_controls_for_model(brand: Brand, model_name: &str) -> HashMap<String, Control>
+```
+
+### Initialization Flow
+
+```
+1. Radar discovered (unknown model)
+   └── settings.rs calls build_base_controls_for_brand(Brand::Navico)
+       └── Core returns base controls: power, gain, sea, rain, range, etc.
+
+2. Model identified via report packet (e.g., "HALO24")
+   └── settings.rs calls build_extended_controls_for_model(Brand::Navico, "HALO24")
+       └── Core looks up HALO24 in models/navico.rs
+       └── Returns: dopplerMode, dopplerSpeed, accentLight, seaState, etc.
+
+3. Controls merged into radar state
+   └── API /capabilities reflects all available controls
+```
+
+**Key insight:** The model database in `mayara-core/models/` is the single source of truth for which controls exist on each radar model. Adding a control to a model's list automatically makes it available through the API.
+
+---
+
 ## Adding a New Feature: The Workflow
 
 ### Example: Adding a New Control (e.g., "pulseWidth")
@@ -733,10 +851,12 @@ pub fn format_control_command(control_id: &str, value: i32, auto: bool) -> Optio
 │  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐ ┌───────────────┐   │
 │  │  protocol/    │ │   models/     │ │ capabilities/ │ │   state.rs    │   │
 │  │  - furuno/    │ │ - furuno.rs   │ │ - controls.rs │ │   RadarState  │   │
-│  │    - dispatch │ │ - navico.rs   │ │ - builder.rs  │ │   PowerState  │   │
-│  │    - command  │ │ - raymarine   │ │               │ │               │   │
-│  │    - report   │ │ - garmin.rs   │ │               │ │               │   │
+│  │    - dispatch │ │ - navico.rs   │ │   get_base_*  │ │   PowerState  │   │
+│  │    - command  │ │ - raymarine   │ │   get_all_*   │ │               │   │
+│  │    - report   │ │ - garmin.rs   │ │ - builder.rs  │ │               │   │
 │  │  - navico.rs  │ │               │ │               │ │               │   │
+│  │    (parse +   │ │               │ │               │ │               │   │
+│  │     format)   │ │               │ │               │ │               │   │
 │  │  - raymarine  │ │               │ │               │ │               │   │
 │  │  - garmin.rs  │ │               │ │               │ │               │   │
 │  └───────────────┘ └───────────────┘ └───────────────┘ └───────────────┘   │

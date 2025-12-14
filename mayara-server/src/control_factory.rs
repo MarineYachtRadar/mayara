@@ -353,6 +353,61 @@ pub fn main_bang_suppression_control() -> Control {
     build_control(&core_def)
 }
 
+// =============================================================================
+// Batch control builders - create all controls for a brand/model from core
+// =============================================================================
+
+use std::collections::HashMap;
+
+/// Build all base controls for a brand from mayara-core definitions.
+/// Returns a HashMap suitable for inserting into SharedControls.
+///
+/// This uses the same control definitions that WASM uses, ensuring
+/// both platforms have identical control schemas.
+pub fn build_base_controls_for_brand(brand: Brand) -> HashMap<String, Control> {
+    let core_defs = controls::get_base_controls_for_brand(brand);
+    let mut result = HashMap::new();
+    for def in core_defs {
+        let id = def.id.clone();
+        result.insert(id, build_control(&def));
+    }
+    result
+}
+
+/// Build all controls for a brand and model from mayara-core definitions.
+/// Includes base controls plus model-specific extended controls.
+///
+/// If model_name is None, only base controls are returned.
+pub fn build_all_controls_for_model(brand: Brand, model_name: Option<&str>) -> HashMap<String, Control> {
+    let core_defs = controls::get_all_controls_for_model(brand, model_name);
+    let mut result = HashMap::new();
+    for def in core_defs {
+        let id = def.id.clone();
+        result.insert(id, build_control(&def));
+    }
+    result
+}
+
+/// Build model-specific extended controls for a brand and model.
+/// Does NOT include base controls (use build_base_controls_for_brand for those).
+pub fn build_extended_controls_for_model(brand: Brand, model_name: &str) -> HashMap<String, Control> {
+    use mayara_core::models;
+
+    let mut result = HashMap::new();
+    if let Some(model_info) = models::get_model(brand, model_name) {
+        for control_id in model_info.controls {
+            // Skip special compound controls that map to multiple controls
+            if *control_id == "noTransmitZones" {
+                continue;
+            }
+            if let Some(def) = controls::get_extended_control_for_brand(control_id, brand) {
+                result.insert(control_id.to_string(), build_control(&def));
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

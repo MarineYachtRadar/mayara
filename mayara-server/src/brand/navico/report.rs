@@ -8,10 +8,9 @@ use tokio::sync::*;
 use tokio::time::{sleep, sleep_until, Instant};
 use tokio_graceful_shutdown::SubsystemHandle;
 
-use crate::brand::navico::info::{
-    HaloHeadingPacket, HaloNavigationPacket, HaloSpeedPacket, Information,
-};
-use crate::brand::navico::{NAVICO_INFO_ADDRESS, NAVICO_SPEED_ADDRESS_A};
+use std::net::SocketAddrV4;
+
+use crate::brand::navico::info::Information;
 use crate::network::create_udp_multicast_listen;
 use crate::radar::range::{RangeDetection, RangeDetectionResult};
 use crate::radar::target::MS_TO_KN;
@@ -27,10 +26,12 @@ use super::Model;
 
 use crate::radar::Status;
 
-// Use mayara-core for report parsing (pure, WASM-compatible)
+// Use mayara-core for report parsing and packet types (pure, WASM-compatible)
 use mayara_core::protocol::navico::{
     parse_report_01, parse_report_02, parse_report_03, parse_report_04,
     parse_report_06_68, parse_report_06_74, parse_report_08,
+    HaloHeadingPacket, HaloNavigationPacket, HaloSpeedPacket,
+    INFO_ADDR, INFO_PORT, SPEED_ADDR_A, SPEED_PORT_A,
     Model as CoreModel,
 };
 
@@ -194,7 +195,8 @@ impl NavicoReportReceiver {
         if self.info_socket.is_some() {
             return Ok(()); // Already started
         }
-        match create_udp_multicast_listen(&NAVICO_INFO_ADDRESS, &self.info.nic_addr) {
+        let info_addr = SocketAddrV4::new(INFO_ADDR.parse().unwrap(), INFO_PORT);
+        match create_udp_multicast_listen(&info_addr, &self.info.nic_addr) {
             Ok(socket) => {
                 self.info_socket = Some(socket);
                 log::debug!(
@@ -222,7 +224,8 @@ impl NavicoReportReceiver {
         if self.speed_socket.is_some() {
             return Ok(()); // Already started
         }
-        match create_udp_multicast_listen(&NAVICO_SPEED_ADDRESS_A, &self.info.nic_addr) {
+        let speed_addr = SocketAddrV4::new(SPEED_ADDR_A.parse().unwrap(), SPEED_PORT_A);
+        match create_udp_multicast_listen(&speed_addr, &self.info.nic_addr) {
             Ok(socket) => {
                 self.speed_socket = Some(socket);
                 log::debug!(

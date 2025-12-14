@@ -29,9 +29,6 @@ const RADAR_LINE_DATA_LENGTH: usize = NAVICO_SPOKE_LEN / NAVICO_PIXELS_PER_BYTE;
 
 const NAVICO_BEACON_ADDRESS: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(236, 6, 7, 5)), 6878);
-const NAVICO_INFO_ADDRESS: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(239, 238, 55, 73), 7527);
-const NAVICO_SPEED_ADDRESS_A: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(236, 6, 7, 20), 6690);
-const NAVICO_SPEED_ADDRESS_B: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(236, 6, 7, 15), 6005);
 
 /* NAVICO API SPOKES */
 /*

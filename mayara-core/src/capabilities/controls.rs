@@ -1663,3 +1663,50 @@ pub fn get_extended_control_for_brand(id: &str, brand: Brand) -> Option<ControlD
 pub fn get_control_for_brand(id: &str, brand: Brand) -> Option<ControlDefinition> {
     get_base_control_for_brand(id, brand).or_else(|| get_extended_control_for_brand(id, brand))
 }
+
+/// Base control IDs that all radars of a brand support (before model is known)
+const BASE_CONTROL_IDS: &[&str] = &[
+    "power",
+    "gain",
+    "sea",
+    "rain",
+];
+
+/// Get all base controls for a brand as a vector of ControlDefinitions.
+/// These are controls that exist before the model is known.
+pub fn get_base_controls_for_brand(brand: Brand) -> Vec<ControlDefinition> {
+    let mut controls = Vec::new();
+    for id in BASE_CONTROL_IDS {
+        if let Some(def) = get_base_control_for_brand(id, brand) {
+            controls.push(def);
+        }
+    }
+    controls
+}
+
+/// Get all controls for a brand and model as a vector of ControlDefinitions.
+/// This includes base controls plus model-specific extended controls.
+///
+/// If model_name is None, only base controls are returned.
+pub fn get_all_controls_for_model(brand: Brand, model_name: Option<&str>) -> Vec<ControlDefinition> {
+    use crate::models;
+
+    let mut controls = get_base_controls_for_brand(brand);
+
+    // Add model-specific extended controls if model is known
+    if let Some(name) = model_name {
+        if let Some(model_info) = models::get_model(brand, name) {
+            for control_id in model_info.controls {
+                // Skip special compound controls
+                if *control_id == "noTransmitZones" {
+                    continue;
+                }
+                if let Some(def) = get_extended_control_for_brand(control_id, brand) {
+                    controls.push(def);
+                }
+            }
+        }
+    }
+
+    controls
+}
