@@ -22,6 +22,12 @@ class render_webgpu {
     this.lastSpokeAngle = -1;
     this.fillRotations = 4; // Number of rotations to use neighbor enhancement
 
+    // Buffer flush - wait for full rotation after standby/range change
+    // This ensures we only draw fresh data, not stale buffered spokes
+    this.waitForRotation = false; // True when waiting for angle wraparound
+    this.waitStartAngle = -1; // Angle when we started waiting
+    this.seenAngleWrap = false; // True once we've seen angle decrease (wrap)
+
     // Heading rotation for North Up mode (in radians)
     this.headingRotation = 0;
 
@@ -138,8 +144,6 @@ class render_webgpu {
   }
 
   setSpokes(spokesPerRevolution, max_spoke_len) {
-    console.log("WebGPU setSpokes:", spokesPerRevolution, max_spoke_len, "ready:", this.ready);
-
     if (!this.ready) {
       this.pendingSpokes = { spokesPerRevolution, max_spoke_len };
       this.spokesPerRevolution = spokesPerRevolution;
@@ -187,25 +191,45 @@ class render_webgpu {
     this.hasTxTimeCapability = hasTxTimeCap || false;
 
     if (isStandby && !wasStandby) {
-      // Entering standby - clear spoke data
-      if (this.data) {
-        this.data.fill(0);
-      }
-      // Reset rotation counter
-      this.rotationCount = 0;
-      this.lastSpokeAngle = -1;
+      // Entering standby - clear spoke data and force GPU texture update
+      this.clearRadarDisplay();
+    } else if (!isStandby && wasStandby) {
+      // Exiting standby (entering transmit) - clear any stale data and reset state
+      this.clearRadarDisplay();
     }
 
     // Redraw to show/hide standby overlay
     this.redrawCanvas();
-    if (this.ready) {
-      // Render to upload cleared data to GPU (clears the display)
+  }
+
+  // Clear all radar data from display (used when entering standby or changing range)
+  clearRadarDisplay() {
+    if (this.data) {
+      this.data.fill(0);
+    }
+    // Reset rotation counter and tracking
+    this.rotationCount = 0;
+    this.lastSpokeAngle = -1;
+    this.firstSpokeAngle = -1;
+
+    // Wait for full rotation to flush any buffered stale spokes
+    this.waitForRotation = true;
+    this.waitStartAngle = -1;
+    this.seenAngleWrap = false;
+
+    // Upload cleared data to GPU and render
+    if (this.ready && this.polarTexture && this.data) {
+      this.device.queue.writeTexture(
+        { texture: this.polarTexture },
+        this.data,
+        { bytesPerRow: this.max_spoke_len },
+        { width: this.max_spoke_len, height: this.spokesPerRevolution }
+      );
       this.render();
     }
   }
 
   setLegend(l) {
-    console.log("WebGPU setLegend, ready:", this.ready);
     if (!this.ready) {
       this.pendingLegend = l;
       return;
@@ -254,6 +278,62 @@ class render_webgpu {
   drawSpoke(spoke) {
     if (!this.data) return;
 
+    // Don't draw spokes in standby mode
+    if (this.standbyMode) {
+      // Prepare to wait for full rotation when we exit standby
+      this.waitForRotation = true;
+      this.waitStartAngle = -1;
+      this.seenAngleWrap = false;
+      return;
+    }
+
+    // Bounds check - log bad angles
+    if (spoke.angle >= this.spokesPerRevolution) {
+      console.error(`Bad spoke angle: ${spoke.angle} >= ${this.spokesPerRevolution}`);
+      return;
+    }
+
+    // Wait for full rotation: skip all buffered spokes until we complete one full sweep
+    // This ensures we only draw fresh data after standby/range change
+    if (this.waitForRotation) {
+      if (this.waitStartAngle < 0) {
+        // First spoke - record starting angle
+        this.waitStartAngle = spoke.angle;
+        this.lastWaitAngle = spoke.angle;
+        return;
+      }
+
+      // Detect angle wraparound (e.g., from 2000 to 100)
+      if (!this.seenAngleWrap && spoke.angle < this.lastWaitAngle - this.spokesPerRevolution / 2) {
+        this.seenAngleWrap = true;
+      }
+
+      // After wraparound, wait until we're back past the start angle
+      // This means we've completed one full rotation of fresh data
+      if (this.seenAngleWrap && spoke.angle >= this.waitStartAngle) {
+        // Full rotation complete - start drawing fresh data
+        this.waitForRotation = false;
+        this.rotationCount = 0;
+        this.lastSpokeAngle = -1;
+        this.firstSpokeAngle = -1;
+        // Clear display before starting fresh
+        if (this.data) this.data.fill(0);
+        if (this.ready && this.polarTexture && this.data) {
+          this.device.queue.writeTexture(
+            { texture: this.polarTexture },
+            this.data,
+            { bytesPerRow: this.max_spoke_len },
+            { width: this.max_spoke_len, height: this.spokesPerRevolution }
+          );
+        }
+        // Fall through to draw this spoke
+      } else {
+        // Still waiting for rotation to complete
+        this.lastWaitAngle = spoke.angle;
+        return;
+      }
+    }
+
     if (this.actual_range != spoke.range) {
       this.actual_range = spoke.range;
       // Clear spoke data when range changes - old data is at wrong scale
@@ -261,13 +341,28 @@ class render_webgpu {
       // Reset rotation counter on range change
       this.rotationCount = 0;
       this.lastSpokeAngle = -1;
+      this.firstSpokeAngle = -1;
+      // Wait for full rotation to flush any buffered old-range spokes
+      this.waitForRotation = true;
+      this.waitStartAngle = -1;
+      this.seenAngleWrap = false;
       this.redrawCanvas();
+      // Upload cleared data to GPU
+      if (this.ready && this.polarTexture) {
+        this.device.queue.writeTexture(
+          { texture: this.polarTexture },
+          this.data,
+          { bytesPerRow: this.max_spoke_len },
+          { width: this.max_spoke_len, height: this.spokesPerRevolution }
+        );
+        this.render();
+      }
+      return;  // Skip this spoke, it's from the old range
     }
 
-    // Bounds check - log bad angles
-    if (spoke.angle >= this.spokesPerRevolution) {
-      console.error(`Bad spoke angle: ${spoke.angle} >= ${this.spokesPerRevolution}`);
-      return;
+    // Track first spoke angle after clear (for limiting backward spread)
+    if (this.firstSpokeAngle < 0) {
+      this.firstSpokeAngle = spoke.angle;
     }
 
     // Track rotations: detect when we wrap around from high angle to low angle
@@ -318,6 +413,7 @@ class render_webgpu {
             blendFactors = [0.6, 0.3];
           }
 
+          // Spread to neighboring spokes (both directions)
           for (let d = 1; d <= spreadWidth; d++) {
             const prev = (spoke.angle + spokes - d) % spokes;
             const next = (spoke.angle + d) % spokes;

@@ -94,9 +94,17 @@ window.onload = async function () {
     return; // Error message already shown
   }
 
-  protobuf.load("./proto/RadarMessage.proto", function (err, root) {
-    if (err) throw err;
-    RadarMessage = root.lookupType(".RadarMessage");
+  // Load protobuf definition - must complete before websocket can process messages
+  const protobufPromise = new Promise((resolve, reject) => {
+    protobuf.load("./proto/RadarMessage.proto", function (err, root) {
+      if (err) {
+        reject(err);
+        return;
+      }
+      RadarMessage = root.lookupType(".RadarMessage");
+      console.log("RadarMessage protobuf loaded successfully");
+      resolve();
+    });
   });
 
   // WebGPU only
@@ -106,16 +114,19 @@ window.onload = async function () {
     drawBackground
   );
 
-  // Wait for WebGPU initialization before loading radar
-  // (radarLoaded callback needs renderer to be ready)
-  await renderer.initPromise;
+  // Wait for both WebGPU initialization AND protobuf loading before proceeding
+  // (radarLoaded callback needs renderer to be ready and protobuf for websocket messages)
+  await Promise.all([renderer.initPromise, protobufPromise]);
+  console.log("Both WebGPU and protobuf ready");
 
   // Process any pending radar data that arrived before renderer was ready
+  // (the callback might have been triggered by control.js before window.onload)
   if (pendingRadarData) {
     console.log("Processing deferred radar data");
     radarLoaded(pendingRadarData);
     pendingRadarData = null;
   } else {
+    // No pending data - load radar now
     loadRadar(id);
   }
 
@@ -573,8 +584,7 @@ function radarLoaded(r) {
 
   // If renderer isn't ready yet, store data and return
   // It will be processed when renderer.initPromise resolves
-  if (!renderer) {
-    console.log("radarLoaded: renderer not ready, deferring...");
+  if (!renderer || !renderer.ready) {
     pendingRadarData = r;
     return;
   }
