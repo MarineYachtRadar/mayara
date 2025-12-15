@@ -96,6 +96,16 @@ impl CoreLocatorAdapter {
     /// This initializes all beacon sockets (Furuno, Navico, Raymarine, Garmin).
     pub fn start(&mut self) {
         log::info!("Starting core radar locator");
+
+        // CRITICAL: Configure Furuno interface to prevent cross-NIC broadcast traffic
+        // Furuno uses 172.31.x.x subnet - find the NIC that can reach it
+        if let Some(furuno_nic) = find_furuno_interface() {
+            log::info!("Found Furuno-capable NIC: {} - broadcasts will use this interface", furuno_nic);
+            self.locator.set_furuno_interface(&furuno_nic.to_string());
+        } else {
+            log::warn!("No NIC found for Furuno subnet (172.31.x.x) - broadcasts may go to wrong interface");
+        }
+
         self.locator.start(&mut self.io);
 
         // Update session with locator status
@@ -326,14 +336,61 @@ pub fn dispatch_discovery(
     }
 }
 
+// =============================================================================
+// Interface Detection
+// =============================================================================
+
+/// Furuno subnet: 172.31.0.0/16
+const FURUNO_SUBNET: Ipv4Addr = Ipv4Addr::new(172, 31, 0, 0);
+const FURUNO_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 0, 0);
+
+/// Find the network interface that can reach the Furuno subnet (172.31.x.x).
+///
+/// This is critical for multi-NIC setups to ensure broadcast packets
+/// go out on the correct interface.
+fn find_furuno_interface() -> Option<Ipv4Addr> {
+    use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+    use std::net::IpAddr;
+
+    let interfaces = NetworkInterface::show().ok()?;
+
+    for itf in &interfaces {
+        for addr in &itf.addr {
+            if let (IpAddr::V4(nic_ip), Some(IpAddr::V4(netmask))) = (addr.ip(), addr.netmask()) {
+                if !nic_ip.is_loopback() {
+                    // Check if this NIC is on the Furuno subnet (172.31.x.x)
+                    // We check if the NIC's subnet overlaps with Furuno's subnet
+                    let nic_network = u32::from(nic_ip) & u32::from(netmask);
+                    let furuno_network = u32::from(FURUNO_SUBNET) & u32::from(FURUNO_NETMASK);
+
+                    // Check if this NIC can reach 172.31.x.x
+                    // Either the NIC is directly on 172.31.x.x, or its network contains it
+                    if nic_network == furuno_network ||
+                       (u32::from(nic_ip) & u32::from(FURUNO_NETMASK)) == furuno_network {
+                        log::debug!(
+                            "Interface {} ({}) can reach Furuno subnet 172.31.x.x",
+                            itf.name, nic_ip
+                        );
+                        return Some(nic_ip);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Session;
 
     #[tokio::test]
     async fn test_locator_creation() {
+        let session = Session::new_fake();
         let (tx, _rx) = mpsc::channel(32);
-        let mut adapter = CoreLocatorAdapter::with_default_interval(tx);
+        let mut adapter = CoreLocatorAdapter::with_default_interval(session, tx);
         adapter.start();
         // Just verify it doesn't panic
         let radars = adapter.poll();

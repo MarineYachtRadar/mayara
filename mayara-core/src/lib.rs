@@ -123,9 +123,9 @@ pub mod trails;
 pub use brand::Brand;
 pub use connection::{ConnectionManager, ConnectionState, ReceiveSocketType};
 pub use controllers::{
-    ControllerState, FurunoController, GarminController, GarminControllerState, NavicoController,
-    NavicoControllerState, NavicoModel, RaymarineController, RaymarineControllerState,
-    RaymarineVariant,
+    ControllerEvent, ControllerState, FurunoController, GarminController, GarminControllerState,
+    NavicoController, NavicoControllerState, NavicoModel, RaymarineController,
+    RaymarineControllerState, RaymarineVariant,
 };
 pub use error::ParseError;
 pub use io::{IoError, IoProvider, TcpSocketHandle, UdpSocketHandle};

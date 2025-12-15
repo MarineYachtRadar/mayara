@@ -424,17 +424,24 @@ pub fn process_discovery(
         }));
     }
 
+    log::debug!("{}: Creating data receiver", info.key());
     let data_receiver = data::FurunoDataReceiver::new(session.clone(), info.clone());
+    log::debug!("{}: Starting data receiver subsystem", info.key());
     subsys.start(SubsystemBuilder::new(
         data_name,
         move |s: SubsystemHandle| data_receiver.run(s),
     ));
 
+    log::debug!("{}: Checking replay mode for report receiver", info.key());
     if !session.read().unwrap().args.replay {
+        log::debug!("{}: Creating report receiver", info.key());
+        let info_key = info.key().clone();
         let report_receiver = report::FurunoReportReceiver::new(session.clone(), info);
+        log::debug!("{}: Starting report receiver subsystem", info_key);
         subsys.start(SubsystemBuilder::new(report_name, |s| {
             report_receiver.run(s)
         }));
+        log::debug!("{}: Report receiver subsystem started", info_key);
     } else if discovery.model.is_none() {
         // In replay mode without model info from discovery, warn the user
         // Model should come from beacon parsing - if missing, replay may not work correctly

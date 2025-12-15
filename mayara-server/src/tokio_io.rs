@@ -269,6 +269,61 @@ impl IoProvider for TokioIoProvider {
         self.udp_sockets.remove(&socket.0);
     }
 
+    fn udp_bind_interface(&mut self, socket: &UdpSocketHandle, interface: &str) -> Result<(), IoError> {
+        let state = self
+            .udp_sockets
+            .get_mut(&socket.0)
+            .ok_or_else(|| IoError::new(-1, "Invalid socket handle"))?;
+
+        // Get current port from the socket
+        let current_port = state
+            .socket
+            .local_addr()
+            .map(|a| a.port())
+            .unwrap_or(0);
+
+        // Parse the interface IP address
+        let interface_ip: Ipv4Addr = interface
+            .parse()
+            .map_err(|e| IoError::new(-1, format!("Invalid interface address '{}': {}", interface, e)))?;
+
+        // Recreate the socket bound to the specific interface
+        let new_socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+            .map_err(|e| IoError::new(-1, format!("Failed to create socket: {}", e)))?;
+
+        new_socket
+            .set_nonblocking(true)
+            .map_err(|e| IoError::new(-1, format!("Failed to set non-blocking: {}", e)))?;
+        new_socket
+            .set_reuse_address(true)
+            .map_err(|e| IoError::new(-1, format!("Failed to set reuse address: {}", e)))?;
+
+        #[cfg(unix)]
+        {
+            let _ = new_socket.set_reuse_port(true);
+        }
+
+        // Re-enable broadcast mode (was set on original socket)
+        new_socket
+            .set_broadcast(true)
+            .map_err(|e| IoError::new(-1, format!("Failed to set broadcast: {}", e)))?;
+
+        // Bind to the specific interface IP (not 0.0.0.0)
+        let bind_addr = SocketAddrV4::new(interface_ip, current_port);
+        new_socket
+            .bind(&bind_addr.into())
+            .map_err(|e| IoError::new(-1, format!("Failed to bind to {}: {}", bind_addr, e)))?;
+
+        log::debug!("UDP socket rebound to interface {} port {}", interface_ip, current_port);
+
+        let std_socket: std::net::UdpSocket = new_socket.into();
+        let tokio_socket = UdpSocket::from_std(std_socket)
+            .map_err(|e| IoError::new(-1, format!("Failed to convert to tokio socket: {}", e)))?;
+
+        state.socket = tokio_socket;
+        Ok(())
+    }
+
     // -------------------------------------------------------------------------
     // TCP Operations
     // -------------------------------------------------------------------------
@@ -374,26 +429,39 @@ impl IoProvider for TokioIoProvider {
         // Read into internal buffer
         let mut temp_buf = [0u8; 1024];
         match stream.try_read(&mut temp_buf) {
-            Ok(0) => return None, // EOF
+            Ok(0) => {
+                log::debug!("tcp_recv_line: EOF");
+                return None;
+            }
             Ok(n) => {
                 let data = String::from_utf8_lossy(&temp_buf[..n]);
+                log::debug!("tcp_recv_line: read {} bytes: {:?}", n, data);
                 state.line_buffer.push_str(&data);
             }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
-            Err(_) => return None,
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                // No data available yet - this is normal for non-blocking I/O
+            }
+            Err(e) => {
+                log::debug!("tcp_recv_line: error: {}", e);
+                return None;
+            }
         }
 
         // Check for complete line
         if let Some(pos) = state.line_buffer.find('\n') {
-            let line = state.line_buffer[..pos].trim_end_matches('\r');
+            let line = state.line_buffer[..pos].trim_end_matches('\r').to_string();
             let line_bytes = line.as_bytes();
             let len = line_bytes.len().min(buf.len());
             buf[..len].copy_from_slice(&line_bytes[..len]);
 
             // Remove the line from buffer (including newline)
             state.line_buffer = state.line_buffer[pos + 1..].to_string();
+            log::debug!("tcp_recv_line: returning line ({} bytes): {:?}", len, line);
             Some(len)
         } else {
+            if !state.line_buffer.is_empty() {
+                log::debug!("tcp_recv_line: buffer has {} bytes but no newline yet", state.line_buffer.len());
+            }
             None
         }
     }
@@ -431,6 +499,10 @@ impl IoProvider for TokioIoProvider {
 
     fn debug(&self, msg: &str) {
         log::debug!("{}", msg);
+    }
+
+    fn info(&self, msg: &str) {
+        log::info!("{}", msg);
     }
 }
 

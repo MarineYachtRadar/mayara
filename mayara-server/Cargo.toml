@@ -27,6 +27,8 @@ navico = []
 furuno = []
 garmin = []
 raymarine = []
+# Embed rustdoc HTML (requires running `cargo doc` first)
+rustdoc = []
 # default = ["navico", "furuno", "raymarine"]
 default = ["navico", "furuno", "raymarine"]
 

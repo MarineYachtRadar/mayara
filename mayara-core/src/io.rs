@@ -178,6 +178,16 @@ pub trait IoProvider {
     /// Close a UDP socket.
     fn udp_close(&mut self, socket: UdpSocketHandle);
 
+    /// Bind a UDP socket to a specific interface IP for outgoing packets.
+    ///
+    /// This is used for broadcast sockets to ensure packets go out on the
+    /// correct interface in multi-NIC setups. Call this before `udp_send_to`.
+    ///
+    /// Default implementation does nothing (uses OS routing).
+    fn udp_bind_interface(&mut self, _socket: &UdpSocketHandle, _interface: &str) -> Result<(), IoError> {
+        Ok(())
+    }
+
     // -------------------------------------------------------------------------
     // TCP Operations
     // -------------------------------------------------------------------------
@@ -250,6 +260,12 @@ pub trait IoProvider {
     /// On native, this goes to the logging framework.
     /// On WASM, this goes to SignalK's debug output.
     fn debug(&self, msg: &str);
+
+    /// Log an info message.
+    ///
+    /// On native, this goes to the logging framework.
+    /// On WASM, this goes to SignalK's info output.
+    fn info(&self, msg: &str);
 }
 
 // =============================================================================

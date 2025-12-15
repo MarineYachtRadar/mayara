@@ -87,6 +87,8 @@ struct ProtoWebAssets;
 
 /// Rustdoc HTML documentation - served at /rustdoc/
 /// Generate with: cargo doc --no-deps -p mayara-core -p mayara-server
+/// Only available when built with `rustdoc` feature.
+#[cfg(feature = "rustdoc")]
 #[derive(RustEmbed, Clone)]
 #[folder = "../target/doc/"]
 struct RustdocAssets;
@@ -150,6 +152,7 @@ impl Web {
         let serve_assets = ServeEmbed::<Assets>::new();
         let proto_web_assets = ServeEmbed::<ProtoWebAssets>::new();
         let proto_assets = ServeEmbed::<ProtoAssets>::new();
+        #[cfg(feature = "rustdoc")]
         let rustdoc_assets = ServeEmbed::<RustdocAssets>::new();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let shutdown_tx = self.shutdown_tx.clone(); // Clone as self used in with_state() and with_graceful_shutdown() below
@@ -183,9 +186,13 @@ impl Web {
             .layer(middleware::from_fn(no_cache_middleware))
             // Static assets (no middleware - can be cached)
             .nest_service("/protobuf", proto_web_assets)
-            .nest_service("/proto", proto_assets)
-            .nest_service("/rustdoc", rustdoc_assets)
-            .fallback_service(serve_assets)
+            .nest_service("/proto", proto_assets);
+
+        // Conditionally add rustdoc assets if feature enabled
+        #[cfg(feature = "rustdoc")]
+        let app = app.nest_service("/rustdoc", rustdoc_assets);
+
+        let app = app.fallback_service(serve_assets)
             .with_state(self)
             .into_make_service_with_connect_info::<SocketAddr>();
 

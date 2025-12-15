@@ -53,6 +53,25 @@ pub struct LocatorStatus {
     pub brands: Vec<BrandStatus>,
 }
 
+/// Startup phase for staggered brand initialization
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupPhase {
+    /// Not started yet
+    NotStarted,
+    /// Starting Furuno listener
+    Furuno,
+    /// Starting Navico BR24 listener
+    NavicoBr24,
+    /// Starting Navico Gen3+ listener
+    NavicoGen3,
+    /// Starting Raymarine listener
+    Raymarine,
+    /// Starting Garmin listener
+    Garmin,
+    /// All brands initialized
+    Complete,
+}
+
 /// Generic radar locator that discovers radars on the network
 ///
 /// Uses the `IoProvider` trait for I/O operations, allowing the same code
@@ -77,6 +96,12 @@ pub struct RadarLocator {
 
     /// Current status of each brand's listener
     status: LocatorStatus,
+
+    /// Optional interface IP for Furuno broadcasts (to prevent cross-NIC traffic)
+    furuno_interface: Option<String>,
+
+    /// Current startup phase for staggered initialization
+    startup_phase: StartupPhase,
 }
 
 impl RadarLocator {
@@ -91,17 +116,71 @@ impl RadarLocator {
             radars: BTreeMap::new(),
             poll_count: 0,
             status: LocatorStatus::default(),
+            furuno_interface: None,
+            startup_phase: StartupPhase::NotStarted,
         }
     }
 
+    /// Set the interface IP to use for Furuno broadcasts.
+    ///
+    /// This is critical for multi-NIC setups to prevent broadcast packets
+    /// from going out on the wrong interface (e.g., 192.168.0.x instead of 172.31.x.x).
+    pub fn set_furuno_interface(&mut self, interface: &str) {
+        self.furuno_interface = Some(interface.to_string());
+    }
+
     /// Start listening for beacons
+    ///
+    /// This begins staggered initialization - one brand is initialized per poll cycle
+    /// to spread out network activity (IGMP joins, etc.) and avoid flooding the network.
     pub fn start<I: IoProvider>(&mut self, io: &mut I) {
         self.status.brands.clear();
-        self.start_furuno(io);
-        self.start_navico_br24(io);
-        self.start_navico_gen3(io);
-        self.start_raymarine(io);
-        self.start_garmin(io);
+        self.startup_phase = StartupPhase::Furuno;
+        io.info("Starting staggered brand initialization...");
+        // First brand is initialized immediately
+        self.advance_startup(io);
+    }
+
+    /// Advance startup phase - initializes one brand per call
+    fn advance_startup<I: IoProvider>(&mut self, io: &mut I) {
+        match self.startup_phase {
+            StartupPhase::NotStarted => {
+                // start() should be called first
+            }
+            StartupPhase::Furuno => {
+                self.start_furuno(io);
+                self.startup_phase = StartupPhase::NavicoBr24;
+                io.debug("Startup: Furuno initialized, next: Navico BR24");
+            }
+            StartupPhase::NavicoBr24 => {
+                self.start_navico_br24(io);
+                self.startup_phase = StartupPhase::NavicoGen3;
+                io.debug("Startup: Navico BR24 initialized, next: Navico Gen3");
+            }
+            StartupPhase::NavicoGen3 => {
+                self.start_navico_gen3(io);
+                self.startup_phase = StartupPhase::Raymarine;
+                io.debug("Startup: Navico Gen3 initialized, next: Raymarine");
+            }
+            StartupPhase::Raymarine => {
+                self.start_raymarine(io);
+                self.startup_phase = StartupPhase::Garmin;
+                io.debug("Startup: Raymarine initialized, next: Garmin");
+            }
+            StartupPhase::Garmin => {
+                self.start_garmin(io);
+                self.startup_phase = StartupPhase::Complete;
+                io.info("Startup complete: All brand listeners initialized");
+            }
+            StartupPhase::Complete => {
+                // Nothing to do
+            }
+        }
+    }
+
+    /// Check if startup is still in progress
+    pub fn is_starting(&self) -> bool {
+        self.startup_phase != StartupPhase::Complete && self.startup_phase != StartupPhase::NotStarted
     }
 
     /// Get the current status of all brand listeners
@@ -120,6 +199,16 @@ impl RadarLocator {
                 }
 
                 if io.udp_bind(&socket, furuno::BEACON_PORT).is_ok() {
+                    // CRITICAL: Bind to specific interface if configured
+                    // This prevents broadcast packets from going out on wrong NIC in multi-NIC setups
+                    if let Some(ref interface) = self.furuno_interface {
+                        if let Err(e) = io.udp_bind_interface(&socket, interface) {
+                            io.debug(&format!("Warning: Failed to bind Furuno socket to interface {}: {}", interface, e));
+                        } else {
+                            io.info(&format!("Furuno socket bound to interface {} (prevents cross-NIC traffic)", interface));
+                        }
+                    }
+
                     io.debug(&format!(
                         "Listening for Furuno beacons on port {} (also used for announces)",
                         furuno::BEACON_PORT
@@ -166,12 +255,12 @@ impl RadarLocator {
             let addr = FURUNO_BEACON_BROADCAST;
             let port = furuno::BEACON_PORT;
 
-            // Send beacon request
+            // Send beacon request to broadcast
             if let Err(e) = io.udp_send_to(socket, &furuno::REQUEST_BEACON_PACKET, addr, port) {
                 io.debug(&format!("Failed to send Furuno beacon request: {}", e));
             }
 
-            // Send model request
+            // Send model request to broadcast
             if let Err(e) = io.udp_send_to(socket, &furuno::REQUEST_MODEL_PACKET, addr, port) {
                 io.debug(&format!("Failed to send Furuno model request: {}", e));
             }
@@ -182,6 +271,9 @@ impl RadarLocator {
             } else {
                 io.debug(&format!("Sent Furuno announce to {}:{}", addr, port));
             }
+
+            // Note: UDP model requests (0x14) are unreliable - the response often has empty model/serial fields
+            // Model detection is done via TCP $N96 command in FurunoController instead
         }
     }
 
@@ -396,7 +488,14 @@ impl RadarLocator {
         self.poll_count += 1;
         let current_time_ms = io.current_time_ms();
 
+        // Advance staggered startup - one brand per poll cycle
+        // This spreads out IGMP joins and socket creation to avoid network flood
+        if self.is_starting() {
+            self.advance_startup(io);
+        }
+
         // Send Furuno announce periodically (every ~2 seconds at 10 polls/sec)
+        // Note: ANNOUNCE_INTERVAL of 20 * 100ms poll interval = 2 seconds
         const ANNOUNCE_INTERVAL: u64 = 20;
         if self.poll_count % ANNOUNCE_INTERVAL == 0 {
             self.send_furuno_announce(io);
@@ -521,10 +620,12 @@ impl RadarLocator {
                         }
                     }
                 } else if furuno::is_model_report(data) {
+                    // UDP model reports (170 bytes) are often empty/unreliable
+                    // Model detection now uses TCP $N96 command instead (see FurunoController)
                     match furuno::parse_model_report(data) {
                         Ok((model, serial)) => {
                             io.debug(&format!(
-                                "Furuno model report from {}: model={:?}, serial={:?}",
+                                "Furuno UDP model report from {}: model={:?}, serial={:?}",
                                 addr, model, serial
                             ));
                             if model.is_some() || serial.is_some() {
@@ -532,9 +633,12 @@ impl RadarLocator {
                             }
                         }
                         Err(e) => {
-                            io.debug(&format!("Furuno model report parse error: {}", e));
+                            io.debug(&format!("Furuno UDP model report parse error from {}: {}", addr, e));
                         }
                     }
+                } else {
+                    // Log unexpected packet sizes to help debug
+                    io.debug(&format!("Furuno UDP packet from {}: {} bytes (not beacon or model)", addr, len));
                 }
             }
         }
@@ -559,7 +663,7 @@ impl RadarLocator {
 
                 if let Some(m) = model {
                     if radar.discovery.model.is_none() || radar.discovery.model.as_deref() != Some(m) {
-                        io.debug(&format!(
+                        io.info(&format!(
                             "Updating radar {} model: {:?} -> {}",
                             radar.discovery.name, radar.discovery.model, m
                         ));

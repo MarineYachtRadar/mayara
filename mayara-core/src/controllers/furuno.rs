@@ -30,6 +30,7 @@
 //! }
 //! ```
 
+use super::ControllerEvent;
 use crate::io::{IoProvider, TcpSocketHandle};
 use crate::protocol::furuno::command::{
     format_antenna_height_command, format_auto_acquire_command, format_bird_mode_command,
@@ -104,8 +105,16 @@ pub struct FurunoController {
     info_requested: bool,
     /// Whether state requests have been sent after connection
     state_requested: bool,
+    /// Whether login message has been sent (to avoid sending on every poll)
+    login_sent: bool,
     /// Current radar control state
     radar_state: RadarState,
+    /// Whether Connected event has been emitted
+    connected_event_emitted: bool,
+    /// Whether ModelDetected event has been emitted
+    model_event_emitted: bool,
+    /// Last emitted operating hours (to detect changes)
+    last_emitted_hours: Option<f64>,
 }
 
 impl FurunoController {
@@ -143,7 +152,11 @@ impl FurunoController {
             operating_hours: None,
             info_requested: false,
             state_requested: false,
+            login_sent: false,
             radar_state: RadarState::default(),
+            connected_event_emitted: false,
+            model_event_emitted: false,
+            last_emitted_hours: None,
         };
         // Queue keepalive to trigger connection
         controller.request_info();
@@ -152,6 +165,7 @@ impl FurunoController {
 
     /// Request radar info by initiating a connection
     pub fn request_info(&mut self) {
+        // Always set a pending command to trigger connection on first poll
         if self.state == ControllerState::Disconnected && self.pending_command.is_none() {
             let cmd = format_keepalive();
             self.pending_command = Some(cmd.trim().to_string());
@@ -176,6 +190,11 @@ impl FurunoController {
     /// Get radar model if known
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+
+    /// Set the radar model (called when UDP model report is received by locator)
+    pub fn set_model(&mut self, model: &str) {
+        self.model = Some(model.to_string());
     }
 
     /// Get firmware version if known
@@ -325,9 +344,17 @@ impl FurunoController {
 
     /// Poll the controller - call this regularly from the main poll loop
     ///
-    /// Returns true if there's activity, false if idle.
-    pub fn poll<I: IoProvider>(&mut self, io: &mut I) -> bool {
+    /// Returns a list of events for the shell to handle. Events include:
+    /// - `Connected` when connection is established
+    /// - `Disconnected` when connection is lost
+    /// - `ModelDetected` when model and firmware version are identified
+    /// - `OperatingHoursUpdated` when operating hours change
+    pub fn poll<I: IoProvider>(&mut self, io: &mut I) -> Vec<ControllerEvent> {
         self.poll_count += 1;
+        let mut events = Vec::new();
+
+        // Track state before polling for disconnect detection
+        let was_connected = self.state == ControllerState::Connected;
 
         match self.state {
             ControllerState::Disconnected => {
@@ -337,7 +364,7 @@ impl FurunoController {
                         let delay = Self::RETRY_DELAY_BASE * (1 << self.retry_count.min(4) as u64);
                         let elapsed = self.poll_count - self.last_retry_poll;
                         if elapsed < delay {
-                            return false;
+                            return events;
                         }
                         if self.retry_count >= Self::MAX_RETRIES {
                             io.debug(&format!(
@@ -346,7 +373,7 @@ impl FurunoController {
                             ));
                             self.pending_command = None;
                             self.retry_count = 0;
-                            return false;
+                            return events;
                         }
                         io.debug(&format!(
                             "[{}] Retry {} of {}",
@@ -354,16 +381,52 @@ impl FurunoController {
                         ));
                     }
                     self.start_login(io);
-                    true
-                } else {
-                    false
                 }
             }
-            ControllerState::LoggingIn => self.poll_login(io),
-            ControllerState::Connecting => self.poll_connecting(io),
-            ControllerState::Connected => self.poll_connected(io),
-            ControllerState::TryingFallback => self.poll_fallback(io),
+            ControllerState::LoggingIn => { self.poll_login(io); }
+            ControllerState::Connecting => { self.poll_connecting(io); }
+            ControllerState::Connected => { self.poll_connected(io); }
+            ControllerState::TryingFallback => { self.poll_fallback(io); }
         }
+
+        // Emit Connected event when we first reach Connected state
+        if self.state == ControllerState::Connected && !self.connected_event_emitted {
+            self.connected_event_emitted = true;
+            events.push(ControllerEvent::Connected);
+            io.info(&format!("[{}] Controller connected", self.radar_id));
+        }
+
+        // Emit Disconnected event when we lose connection
+        if was_connected && self.state == ControllerState::Disconnected {
+            self.connected_event_emitted = false;
+            events.push(ControllerEvent::Disconnected);
+            io.info(&format!("[{}] Controller disconnected", self.radar_id));
+        }
+
+        // Emit ModelDetected event when model becomes available
+        if !self.model_event_emitted {
+            if let (Some(model), Some(version)) = (&self.model, &self.firmware_version) {
+                self.model_event_emitted = true;
+                events.push(ControllerEvent::ModelDetected {
+                    model: model.clone(),
+                    version: version.clone(),
+                });
+                io.info(&format!(
+                    "[{}] Model detected: {} (firmware {})",
+                    self.radar_id, model, version
+                ));
+            }
+        }
+
+        // Emit OperatingHoursUpdated when hours change
+        if let Some(hours) = self.operating_hours {
+            if self.last_emitted_hours != Some(hours) {
+                self.last_emitted_hours = Some(hours);
+                events.push(ControllerEvent::OperatingHoursUpdated { hours });
+            }
+        }
+
+        events
     }
 
     /// Start the login process
@@ -392,6 +455,7 @@ impl FurunoController {
                 if io.tcp_connect(&socket, &self.radar_addr, login_port).is_ok() {
                     self.login_socket = Some(socket);
                     self.state = ControllerState::LoggingIn;
+                    self.login_sent = false; // Reset for new login attempt
                     io.debug(&format!(
                         "[{}] Login connection initiated to port {}",
                         self.radar_id, login_port
@@ -441,15 +505,19 @@ impl FurunoController {
         }
 
         if !io.tcp_is_connected(&socket) {
+            io.debug(&format!("[{}] Login socket still connecting...", self.radar_id));
             return true; // Still connecting
         }
 
-        // Send login message
-        io.debug(&format!("[{}] Sending login message", self.radar_id));
-        if io.tcp_send(&socket, &LOGIN_MESSAGE).is_err() {
-            io.debug(&format!("[{}] Failed to send login message", self.radar_id));
-            self.disconnect(io);
-            return false;
+        // Send login message ONCE (not on every poll!)
+        if !self.login_sent {
+            self.login_sent = true;
+            io.debug(&format!("[{}] Sending login message", self.radar_id));
+            if io.tcp_send(&socket, &LOGIN_MESSAGE).is_err() {
+                io.debug(&format!("[{}] Failed to send login message", self.radar_id));
+                self.disconnect(io);
+                return false;
+            }
         }
 
         // Check for response
@@ -707,20 +775,40 @@ impl FurunoController {
             ));
         }
 
-        // Parse module response for firmware version
+        // Parse module response for model and firmware version
         // Format: $N96,{part1}-{ver1},{part2}-{ver2},...
         // Example: $N96,0359360-01.05,0359358-01.01,0359359-01.01,0359361-01.05,,,
-        // Note: This does NOT contain the model name - model comes from UDP model report
+        // The first part code identifies the radar model (see protocol docs)
         if line.starts_with("$N96") {
             let parts: Vec<&str> = line.split(',').collect();
-            // Extract firmware version from first module (e.g., "0359360-01.05" -> "01.05")
             if parts.len() >= 2 {
-                if let Some(version_part) = parts[1].split('-').last() {
-                    self.firmware_version = Some(version_part.to_string());
+                // Parse first module: "0359360-01.05" -> code="0359360", version="01.05"
+                let module_parts: Vec<&str> = parts[1].split('-').collect();
+                if module_parts.len() >= 2 {
+                    let part_code = module_parts[0];
+                    let firmware_version = module_parts[1];
+
+                    // Map part code to model name
+                    let model = crate::protocol::furuno::report::firmware_to_model(part_code);
+                    let model_name = model.as_str();
+
+                    if model_name != "Unknown" {
+                        self.model = Some(model_name.to_string());
+                        io.info(&format!(
+                            "[{}] Model identified from $N96: {} (part {})",
+                            self.radar_id, model_name, part_code
+                        ));
+                    } else {
+                        io.info(&format!(
+                            "[{}] Unknown part code from $N96: {}",
+                            self.radar_id, part_code
+                        ));
+                    }
+
+                    self.firmware_version = Some(firmware_version.to_string());
                     io.debug(&format!(
                         "[{}] Firmware version from $N96: {}",
-                        self.radar_id,
-                        version_part
+                        self.radar_id, firmware_version
                     ));
                 }
             }
@@ -750,6 +838,8 @@ impl FurunoController {
         self.state = ControllerState::Disconnected;
         self.info_requested = false;
         self.state_requested = false;
+        // Note: connected_event_emitted is reset in poll() when Disconnected event is emitted
+        // This allows Connected to be emitted again on reconnection
     }
 
     /// Shutdown the controller

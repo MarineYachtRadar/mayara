@@ -2,17 +2,21 @@
 //!
 //! This module wraps the platform-independent `FurunoController` from mayara-core,
 //! polling it in an async loop and applying state updates to the server's control system.
+//!
+//! The controller emits [`ControllerEvent`]s that this receiver handles to update
+//! the server's shared state (e.g., registering the radar with ranges when model is detected).
 
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::time::{interval, MissedTickBehavior};
 use tokio_graceful_shutdown::SubsystemHandle;
 
-// Use unified controller from mayara-core
+// Use unified controller and events from mayara-core
 use mayara_core::controllers::FurunoController;
+use mayara_core::ControllerEvent;
 
 use super::settings;
 use super::RadarModel;
-use crate::radar::{RadarError, RadarInfo, Status};
+use crate::radar::{RadarError, RadarInfo, SharedRadars, Status};
 use crate::settings::ControlUpdate;
 use crate::tokio_io::TokioIoProvider;
 use crate::Session;
@@ -21,6 +25,8 @@ use crate::Session;
 pub struct FurunoReportReceiver {
     #[allow(dead_code)]
     session: Session, // Kept for potential future use
+    /// Shared radar registry - used to update radar info when model is detected
+    radars: SharedRadars,
     info: RadarInfo,
     key: String,
     /// Unified controller from mayara-core
@@ -29,8 +35,6 @@ pub struct FurunoReportReceiver {
     io: TokioIoProvider,
     /// Poll interval for the controller
     poll_interval: Duration,
-    /// Whether model info has been received
-    model_known: bool,
 }
 
 impl FurunoReportReceiver {
@@ -38,18 +42,26 @@ impl FurunoReportReceiver {
         let key = info.key();
         let radar_addr = info.addr.ip().to_string();
 
+        // Get SharedRadars from session - needed to update radar info when model is detected
+        let radars = session
+            .read()
+            .unwrap()
+            .radars
+            .clone()
+            .expect("SharedRadars must be initialized before creating report receiver");
+
         // Create the unified controller from mayara-core
         let controller = FurunoController::new(&key, &radar_addr);
         let io = TokioIoProvider::new();
 
         FurunoReportReceiver {
             session,
+            radars,
             info,
             key,
             controller,
             io,
             poll_interval: Duration::from_millis(100), // 10Hz polling
-            model_known: false,
         }
     }
 
@@ -58,6 +70,11 @@ impl FurunoReportReceiver {
         log::info!("{}: report receiver starting (unified controller)", self.key);
 
         let mut command_rx = self.info.control_update_subscribe();
+        let mut model_known = false;
+
+        // Use interval instead of sleep - sleep() in select! doesn't work correctly
+        let mut poll_interval = interval(self.poll_interval);
+        poll_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
@@ -67,15 +84,15 @@ impl FurunoReportReceiver {
                     return Ok(());
                 },
 
-                _ = sleep(self.poll_interval) => {
-                    // Poll the controller
-                    self.controller.poll(&mut self.io);
+                _ = poll_interval.tick() => {
+                    // Poll the controller and handle events
+                    let events = self.controller.poll(&mut self.io);
+                    for event in events {
+                        self.handle_controller_event(event, &mut model_known);
+                    }
 
                     // Apply state updates from controller to server controls
-                    self.apply_controller_state();
-
-                    // Check for model info
-                    self.check_model_info();
+                    self.apply_controller_state(model_known);
                 },
 
                 r = command_rx.recv() => {
@@ -92,8 +109,47 @@ impl FurunoReportReceiver {
         }
     }
 
+    /// Handle events from the core controller
+    fn handle_controller_event(&mut self, event: ControllerEvent, model_known: &mut bool) {
+        match event {
+            ControllerEvent::Connected => {
+                log::info!("{}: Controller connected to radar", self.key);
+            }
+            ControllerEvent::Disconnected => {
+                log::warn!("{}: Controller disconnected from radar", self.key);
+            }
+            ControllerEvent::ModelDetected { model, version } => {
+                log::info!(
+                    "{}: Model detected: {} (firmware {})",
+                    self.key, model, version
+                );
+                *model_known = true;
+
+                // Convert to RadarModel enum
+                let radar_model = RadarModel::from_name(&model);
+
+                // Update RadarInfo with model-specific settings (ranges, controls)
+                // This is the critical step that sets ranges from mayara-core's model database
+                settings::update_when_model_known(&mut self.info, radar_model, &version);
+
+                // CRITICAL: Push the updated RadarInfo to SharedRadars
+                // This makes the radar visible in the API (get_active() filters by ranges.len() > 0)
+                self.radars.update(&self.info);
+
+                log::info!(
+                    "{}: Radar registered with {} ranges",
+                    self.key,
+                    self.info.ranges.len()
+                );
+            }
+            ControllerEvent::OperatingHoursUpdated { hours } => {
+                self.set_value("operatingHours", hours as f32);
+            }
+        }
+    }
+
     /// Apply controller state to server controls
-    fn apply_controller_state(&mut self) {
+    fn apply_controller_state(&mut self, model_known: bool) {
         // Clone state to avoid borrow checker issues with self.set_* methods
         let state = self.controller.radar_state().clone();
 
@@ -118,7 +174,7 @@ impl FurunoReportReceiver {
 
         // Model-specific controls are only available after model detection
         // (update_when_model_known adds these controls)
-        if !self.model_known {
+        if !model_known {
             return;
         }
 
@@ -152,35 +208,6 @@ impl FurunoReportReceiver {
                 self.set_value("noTransmitStart2", z2.start as f32);
                 self.set_value("noTransmitEnd2", z2.end as f32);
             }
-        }
-    }
-
-    /// Check for model info from controller
-    fn check_model_info(&mut self) {
-        if self.model_known {
-            return;
-        }
-
-        if let Some(model_name) = self.controller.model() {
-            self.model_known = true;
-
-            // Convert to RadarModel
-            let model = RadarModel::from_name(model_name);
-            let version = self.controller.firmware_version().unwrap_or("unknown");
-
-            log::info!(
-                "{}: Radar model {} version {}",
-                self.key,
-                model.as_str(),
-                version
-            );
-
-            settings::update_when_model_known(&mut self.info, model, version);
-        }
-
-        // Apply operating hours if available
-        if let Some(hours) = self.controller.operating_hours() {
-            self.set_value("operatingHours", hours as f32);
         }
     }
 
