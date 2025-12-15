@@ -112,10 +112,14 @@ pub fn update_when_model_known(info: &mut RadarInfo, model: RadarModel, version:
     info.controls
         .set_valid_ranges("range", &ranges)
         .expect("Set valid values");
-    info.controls
+    // Notify data receiver of ranges - may fail if data receiver not yet started
+    // (which is fine, it will use info.ranges when it starts)
+    if let Err(e) = info.controls
         .get_data_update_tx()
         .send(DataUpdate::Ranges(ranges))
-        .expect("Ranges update");
+    {
+        log::debug!("{}: Ranges update not sent (data receiver not ready): {}", info.key(), e);
+    }
 
     info.controls.insert(
         "firmwareVersion",

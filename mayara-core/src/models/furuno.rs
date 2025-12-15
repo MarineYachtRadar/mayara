@@ -305,6 +305,19 @@ mod tests {
         assert!(model.has_dual_range);
         assert_eq!(model.no_transmit_zone_count, 2);
         assert!(model.controls.contains(&"dopplerMode"));
+        assert!(model.controls.contains(&"beamSharpening"));
+    }
+
+    #[test]
+    fn test_beam_sharpening_control_lookup() {
+        use crate::capabilities::controls::get_control_for_brand;
+        use crate::Brand;
+
+        // Verify beamSharpening can be looked up for Furuno
+        let def = get_control_for_brand("beamSharpening", Brand::Furuno);
+        assert!(def.is_some(), "beamSharpening should be found for Furuno");
+        let def = def.unwrap();
+        assert_eq!(def.id, "beamSharpening");
     }
 
     #[test]

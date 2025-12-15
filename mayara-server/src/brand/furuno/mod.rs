@@ -396,15 +396,18 @@ pub fn process_discovery(
         return Ok(());
     };
 
-    // Apply model-specific settings if known
-    if let Some(ref model_name) = discovery.model {
+    // Apply model-specific settings if known from discovery OR from persistence
+    // After located(), model_name may be set from persisted config
+    let model_name = discovery.model.clone().or_else(|| info.controls.model_name());
+    if let Some(ref model_name) = model_name {
         let model = RadarModel::from_name(model_name);
         let version = "unknown"; // Version comes from $N96 via report receiver
         log::info!(
-            "{}: Model from discovery: {} ({:?})",
+            "{}: Model known: {} ({:?}) [source: {}]",
             info.key(),
             model_name,
-            model
+            model,
+            if discovery.model.is_some() { "discovery" } else { "persistence" }
         );
         settings::update_when_model_known(&mut info, model, version);
         radars.update(&info);

@@ -335,6 +335,7 @@ class render_webgpu {
     }
 
     if (this.actual_range != spoke.range) {
+      const wasInitialRange = this.actual_range === 0;
       this.actual_range = spoke.range;
       // Clear spoke data when range changes - old data is at wrong scale
       this.data.fill(0);
@@ -342,22 +343,27 @@ class render_webgpu {
       this.rotationCount = 0;
       this.lastSpokeAngle = -1;
       this.firstSpokeAngle = -1;
-      // Wait for full rotation to flush any buffered old-range spokes
-      this.waitForRotation = true;
-      this.waitStartAngle = -1;
-      this.seenAngleWrap = false;
       this.redrawCanvas();
-      // Upload cleared data to GPU
-      if (this.ready && this.polarTexture) {
-        this.device.queue.writeTexture(
-          { texture: this.polarTexture },
-          this.data,
-          { bytesPerRow: this.max_spoke_len },
-          { width: this.max_spoke_len, height: this.spokesPerRevolution }
-        );
-        this.render();
+
+      // Only wait for full rotation on actual range CHANGE, not initial range setting
+      // This prevents ghost spokes from buffered old-range data
+      if (!wasInitialRange) {
+        this.waitForRotation = true;
+        this.waitStartAngle = -1;
+        this.seenAngleWrap = false;
+        // Upload cleared data to GPU
+        if (this.ready && this.polarTexture) {
+          this.device.queue.writeTexture(
+            { texture: this.polarTexture },
+            this.data,
+            { bytesPerRow: this.max_spoke_len },
+            { width: this.max_spoke_len, height: this.spokesPerRevolution }
+          );
+          this.render();
+        }
+        return;  // Skip this spoke, it's from the old range
       }
-      return;  // Skip this spoke, it's from the old range
+      // For initial range, just continue drawing - no stale data to flush
     }
 
     // Track first spoke angle after clear (for limiting backward spread)

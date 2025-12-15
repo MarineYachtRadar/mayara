@@ -791,6 +791,16 @@ async fn set_control_value(
                 let control = match radar.controls.get_by_name(&params.control_id) {
                     Some(c) => c,
                     None => {
+                        // Debug: list all available controls
+                        let available: Vec<String> = radar.controls.get_all()
+                            .iter()
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        log::warn!(
+                            "Control '{}' not found. Available controls: {:?}",
+                            params.control_id,
+                            available
+                        );
                         return (
                             StatusCode::BAD_REQUEST,
                             format!("Unknown control: {}", params.control_id),
