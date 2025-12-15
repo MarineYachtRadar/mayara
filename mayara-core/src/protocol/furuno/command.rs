@@ -729,14 +729,21 @@ pub fn parse_signal_processing_response(line: &str) -> Option<(i32, i32)> {
     if mode != CommandMode::New || cmd_id != CommandId::SignalProcessing.as_hex() {
         return None;
     }
-    // Try both formats:
-    // Format 1 (SET echo): $N67,0,{feature},{value},{screen} - args[1]=feature, args[2]=value
-    // Format 2 (REQUEST): $N67,{feature},{value},{screen} - args[0]=feature, args[1]=value
-    if args.len() >= 3 && args[0] == 0 {
-        // Format 1: leading 0, then feature, value
+    // Two response formats based on argument count:
+    // Format 1 (SET echo): $N67,0,{feature},{value},{screen} = 4 args
+    // Format 2 (REQUEST response): $N67,{feature},{value},{screen} = 3 args
+    //
+    // We distinguish by arg count, NOT by first arg value.
+    // This is important because feature=0 (interference rejection) would be
+    // ambiguous if we checked args[0]==0.
+    if args.len() >= 4 && args[0] == 0 {
+        // Format 1: SET echo with leading 0
         Some((args[1], args[2]))
+    } else if args.len() == 3 {
+        // Format 2: REQUEST response - feature, value, screen
+        Some((args[0], args[1]))
     } else if args.len() >= 2 {
-        // Format 2: feature, value directly (maybe from REQUEST response)
+        // Fallback for any other format
         Some((args[0], args[1]))
     } else {
         None
@@ -1308,10 +1315,14 @@ mod tests {
         let result = parse_signal_processing_response("$N67,3,0,0");
         assert_eq!(result, Some((3, 0))); // feature=3, value=0
 
-        // Interference rejection ON: $N67,0,2,0 (note: feature 0 looks like format 1!)
-        // This is ambiguous - if first arg is 0, we assume format 1
-        // So $N67,0,2,0 would be parsed as feature=2, value=0 (wrong!)
-        // This is a known limitation - format 2 with feature=0 is ambiguous
+        // Interference rejection ON: $N67,0,2,0 (3 args = Format 2)
+        // Now correctly parsed by arg count, not by first arg value
+        let result = parse_signal_processing_response("$N67,0,2,0");
+        assert_eq!(result, Some((0, 2))); // feature=0, value=2
+
+        // Interference rejection OFF: $N67,0,0,0 (3 args = Format 2)
+        let result = parse_signal_processing_response("$N67,0,0,0");
+        assert_eq!(result, Some((0, 0))); // feature=0, value=0
 
         // Wrong command
         assert!(parse_signal_processing_response("$N66,0,3,1,0").is_none());
