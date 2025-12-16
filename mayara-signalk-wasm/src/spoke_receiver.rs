@@ -1,11 +1,14 @@
 //! Spoke Receiver
 //!
 //! Receives spoke data from discovered radars and emits to SignalK stream.
+//! Uses IoProvider for platform-independent socket operations.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use mayara_core::io::{IoProvider, UdpSocketHandle};
 use mayara_core::protocol::furuno::{self, ParsedSpoke};
-use crate::signalk_ffi::{debug, UdpSocket, emit_radar_spokes};
+use crate::signalk_ffi::{debug, emit_radar_spokes};
 use crate::protobuf::encode_radar_message;
+use crate::wasm_io::WasmIoProvider;
 
 // Atomic counters for logging (Rust 2024 safe)
 static POLL_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -37,9 +40,11 @@ pub struct RadarSpokeState {
 }
 
 /// Spoke receiver for all radars
+///
+/// Uses IoProvider for platform-independent socket operations.
 pub struct SpokeReceiver {
-    /// Furuno spoke socket (multicast 239.255.0.2:10024)
-    furuno_socket: Option<UdpSocket>,
+    /// Furuno spoke socket handle (multicast 239.255.0.2:10024)
+    furuno_socket: Option<UdpSocketHandle>,
     /// Active Furuno radars being tracked
     furuno_radars: Vec<RadarSpokeState>,
     /// Receive buffer
@@ -55,16 +60,16 @@ impl SpokeReceiver {
         }
     }
 
-    /// Start listening for Furuno spokes
-    pub fn start_furuno(&mut self) {
+    /// Start listening for Furuno spokes using IoProvider
+    pub fn start_furuno(&mut self, io: &mut WasmIoProvider) {
         if self.furuno_socket.is_some() {
             return; // Already listening
         }
 
-        match UdpSocket::new() {
+        match io.udp_create() {
             Ok(socket) => {
-                if socket.bind_port(furuno::DATA_PORT).is_ok() {
-                    if socket.join_multicast(furuno::DATA_MULTICAST_ADDR).is_ok() {
+                if io.udp_bind(&socket, furuno::DATA_PORT).is_ok() {
+                    if io.udp_join_multicast(&socket, furuno::DATA_MULTICAST_ADDR, "").is_ok() {
                         debug(&format!(
                             "Listening for Furuno spokes on {}:{}",
                             furuno::DATA_MULTICAST_ADDR,
@@ -73,9 +78,11 @@ impl SpokeReceiver {
                         self.furuno_socket = Some(socket);
                     } else {
                         debug("Failed to join Furuno spoke multicast group");
+                        io.udp_close(socket);
                     }
                 } else {
                     debug("Failed to bind Furuno spoke socket");
+                    io.udp_close(socket);
                 }
             }
             Err(e) => {
@@ -85,7 +92,7 @@ impl SpokeReceiver {
     }
 
     /// Register a discovered Furuno radar for spoke tracking
-    pub fn add_furuno_radar(&mut self, radar_id: &str, source_ip: &str) {
+    pub fn add_furuno_radar(&mut self, radar_id: &str, source_ip: &str, io: &mut WasmIoProvider) {
         // Check if already tracking this radar
         if self.furuno_radars.iter().any(|r| r.radar_id == radar_id) {
             return;
@@ -106,13 +113,13 @@ impl SpokeReceiver {
         });
 
         // Start socket if not already listening
-        self.start_furuno();
+        self.start_furuno(io);
     }
 
     /// Poll for incoming spoke data and emit to SignalK
     ///
     /// Returns number of spokes emitted.
-    pub fn poll(&mut self) -> u32 {
+    pub fn poll(&mut self, io: &mut WasmIoProvider) -> u32 {
         let mut total_emitted = 0;
         let poll_count = POLL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
@@ -120,9 +127,9 @@ impl SpokeReceiver {
         let mut frames: Vec<(Vec<u8>, usize)> = Vec::new();
         let mut unknown_packets = 0u32;
 
-        // Poll Furuno spokes
+        // Poll Furuno spokes using IoProvider
         if let Some(socket) = &self.furuno_socket {
-            while let Some((len, addr, _port)) = socket.recv_from(&mut self.buf) {
+            while let Some((len, addr, _port)) = io.udp_recv_from(socket, &mut self.buf) {
                 // Find which radar this packet is from
                 let radar_idx = self.furuno_radars.iter().position(|r| r.source_ip == addr);
 
@@ -286,9 +293,11 @@ impl SpokeReceiver {
         }
     }
 
-    /// Shutdown all sockets
-    pub fn shutdown(&mut self) {
-        self.furuno_socket = None;
+    /// Shutdown all sockets using IoProvider
+    pub fn shutdown(&mut self, io: &mut WasmIoProvider) {
+        if let Some(socket) = self.furuno_socket.take() {
+            io.udp_close(socket);
+        }
         self.furuno_radars.clear();
     }
 }

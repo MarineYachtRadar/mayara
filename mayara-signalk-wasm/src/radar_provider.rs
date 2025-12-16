@@ -18,10 +18,140 @@ use mayara_core::guard_zones::{GuardZone, GuardZoneProcessor, GuardZoneStatus};
 use mayara_core::radar::RadarDiscovery;
 use mayara_core::trails::{TrailData, TrailSettings, TrailStore};
 use mayara_core::Brand;
-use crate::locator::RadarLocator;
+use crate::locator::{LocatorEvent, RadarLocator};
 use crate::signalk_ffi::{debug, emit_json, read_config, save_config};
 use crate::spoke_receiver::{SpokeReceiver, FURUNO_OUTPUT_SPOKES};
 use crate::wasm_io::WasmIoProvider;
+
+// =============================================================================
+// Unified Radar Controller
+// =============================================================================
+
+/// Unified controller enum for all radar brands.
+///
+/// This consolidates the 4 separate controller maps into a single dispatch pattern,
+/// reducing code duplication in control methods.
+pub enum RadarController {
+    Furuno(FurunoController),
+    Navico(NavicoController),
+    Raymarine(RaymarineController),
+    Garmin(GarminController),
+}
+
+impl RadarController {
+    /// Poll the controller for events.
+    /// Returns true if the controller is connected/active.
+    pub fn poll(&mut self, io: &mut WasmIoProvider) -> bool {
+        match self {
+            RadarController::Furuno(c) => {
+                let _events = c.poll(io);
+                // Furuno returns events, consider connected if state is not Disconnected
+                c.is_connected()
+            }
+            RadarController::Navico(c) => c.poll(io),
+            RadarController::Raymarine(c) => c.poll(io),
+            RadarController::Garmin(c) => c.poll(io),
+        }
+    }
+
+    /// Get the brand of this controller.
+    #[allow(dead_code)]
+    pub fn brand(&self) -> Brand {
+        match self {
+            RadarController::Furuno(_) => Brand::Furuno,
+            RadarController::Navico(_) => Brand::Navico,
+            RadarController::Raymarine(_) => Brand::Raymarine,
+            RadarController::Garmin(_) => Brand::Garmin,
+        }
+    }
+
+    /// Set power/transmit state.
+    pub fn set_power(&mut self, io: &mut WasmIoProvider, transmit: bool) {
+        match self {
+            RadarController::Furuno(c) => c.set_transmit(io, transmit),
+            RadarController::Navico(c) => c.set_power(io, transmit),
+            RadarController::Raymarine(c) => c.set_power(io, transmit),
+            RadarController::Garmin(c) => c.set_power(io, transmit),
+        }
+    }
+
+    /// Set range in meters.
+    pub fn set_range(&mut self, io: &mut WasmIoProvider, range: u32) {
+        match self {
+            RadarController::Furuno(c) => c.set_range(io, range),
+            RadarController::Navico(c) => c.set_range(io, (range * 10) as i32), // decimeters
+            RadarController::Raymarine(c) => c.set_range(io, (range / 100).min(255) as u8), // index
+            RadarController::Garmin(c) => c.set_range(io, range),
+        }
+    }
+
+    /// Set gain.
+    pub fn set_gain(&mut self, io: &mut WasmIoProvider, value: u8, auto: bool) {
+        match self {
+            RadarController::Furuno(c) => c.set_gain(io, value as i32, auto),
+            RadarController::Navico(c) => c.set_gain(io, value, auto),
+            RadarController::Raymarine(c) => c.set_gain(io, value, auto),
+            RadarController::Garmin(c) => c.set_gain(io, value as u32, auto),
+        }
+    }
+
+    /// Set sea clutter.
+    pub fn set_sea(&mut self, io: &mut WasmIoProvider, value: u8, auto: bool) {
+        match self {
+            RadarController::Furuno(c) => c.set_sea(io, value as i32, auto),
+            RadarController::Navico(c) => c.set_sea(io, value, auto),
+            RadarController::Raymarine(c) => c.set_sea(io, value, auto),
+            RadarController::Garmin(c) => c.set_sea(io, value as u32, auto),
+        }
+    }
+
+    /// Set rain clutter.
+    pub fn set_rain(&mut self, io: &mut WasmIoProvider, value: u8, auto: bool) {
+        match self {
+            RadarController::Furuno(c) => c.set_rain(io, value as i32, auto),
+            RadarController::Navico(c) => c.set_rain(io, value), // Navico rain has no auto
+            RadarController::Raymarine(c) => c.set_rain(io, value, auto),
+            RadarController::Garmin(c) => c.set_rain(io, value as u32, auto),
+        }
+    }
+
+    /// Get as Furuno controller (for extended controls).
+    pub fn as_furuno(&self) -> Option<&FurunoController> {
+        match self {
+            RadarController::Furuno(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Get as mutable Furuno controller (for extended controls).
+    #[allow(dead_code)]
+    pub fn as_furuno_mut(&mut self) -> Option<&mut FurunoController> {
+        match self {
+            RadarController::Furuno(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Get the radar's detected model name (if available).
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            RadarController::Furuno(c) => c.model(),
+            RadarController::Navico(_) => None, // TODO: implement
+            RadarController::Raymarine(_) => None, // TODO: implement
+            RadarController::Garmin(_) => None, // TODO: implement
+        }
+    }
+
+    /// Get radar state (currently only Furuno).
+    pub fn radar_state(&self) -> Option<&mayara_core::state::RadarState> {
+        match self {
+            RadarController::Furuno(c) => Some(c.radar_state()),
+            _ => None,
+        }
+    }
+}
+
+// =============================================================================
 
 /// Custom deserializer for antenna height that accepts both float and int
 /// Handles migration from old category values (0, 1, 2) to meters (0-100)
@@ -222,21 +352,21 @@ pub struct RadarProvider {
     io: WasmIoProvider,
     locator: RadarLocator,
     spoke_receiver: SpokeReceiver,
-    /// TCP controllers for Furuno radars (keyed by radar ID)
-    furuno_controllers: BTreeMap<String, FurunoController>,
-    /// UDP controllers for Navico radars (keyed by radar ID)
-    navico_controllers: BTreeMap<String, NavicoController>,
-    /// UDP controllers for Raymarine radars (keyed by radar ID)
-    raymarine_controllers: BTreeMap<String, RaymarineController>,
-    /// UDP controllers for Garmin radars (keyed by radar ID)
-    garmin_controllers: BTreeMap<String, GarminController>,
+    /// Unified controllers for all radar brands (keyed by radar ID)
+    controllers: BTreeMap<String, RadarController>,
     /// ARPA processors for each radar (keyed by radar ID)
     arpa_processors: BTreeMap<String, ArpaProcessor>,
     /// Guard zone processors for each radar (keyed by radar ID)
+    /// Note: Methods exist but FFI exports not yet implemented
+    #[allow(dead_code)]
     guard_zone_processors: BTreeMap<String, GuardZoneProcessor>,
     /// Trail stores for each radar (keyed by radar ID)
+    /// Note: Methods exist but FFI exports not yet implemented
+    #[allow(dead_code)]
     trail_stores: BTreeMap<String, TrailStore>,
     /// Dual-range controllers for each radar (keyed by radar ID)
+    /// Note: Methods exist but FFI exports not yet implemented
+    #[allow(dead_code)]
     dual_range_controllers: BTreeMap<String, DualRangeController>,
     poll_count: u64,
     /// Plugin configuration (installation settings per radar)
@@ -258,10 +388,7 @@ impl RadarProvider {
             io,
             locator,
             spoke_receiver: SpokeReceiver::new(),
-            furuno_controllers: BTreeMap::new(),
-            navico_controllers: BTreeMap::new(),
-            raymarine_controllers: BTreeMap::new(),
-            garmin_controllers: BTreeMap::new(),
+            controllers: BTreeMap::new(),
             arpa_processors: BTreeMap::new(),
             guard_zone_processors: BTreeMap::new(),
             trail_stores: BTreeMap::new(),
@@ -326,8 +453,10 @@ impl RadarProvider {
         let new_radars = self.locator.poll(&mut self.io);
 
         // Emit delta for each new radar
-        for discovery in &new_radars {
-            self.emit_radar_discovered(discovery);
+        for event in &new_radars {
+            if let LocatorEvent::RadarDiscovered(discovery) = event {
+                self.emit_radar_discovered(discovery);
+            }
         }
 
         // Register ALL Furuno radars for spoke tracking and create controllers
@@ -337,108 +466,82 @@ impl RadarProvider {
             debug(&format!("Checking {} radars for spoke tracking", radar_count));
         }
 
-        // Collect radar info by brand to avoid borrow issues
-        let mut furuno_radars: Vec<(String, String)> = Vec::new();
-        let mut navico_radars: Vec<(String, String, String, u16, String, u16, Option<String>)> = Vec::new();
-        let mut raymarine_radars: Vec<(String, String, u16, u16, Option<String>)> = Vec::new();
-        let mut garmin_radars: Vec<(String, String)> = Vec::new();
+        // Collect radar info to create controllers (avoid borrow issues)
+        struct RadarInfo {
+            id: String,
+            ip: String,
+            brand: Brand,
+            cmd_port: u16,
+            data_port: u16,
+            model: Option<String>,
+        }
+        let radar_infos: Vec<RadarInfo> = self.locator.radars.values()
+            .map(|r| {
+                let state = RadarState::from(&r.discovery);
+                RadarInfo {
+                    id: state.id,
+                    ip: r.discovery.address.split(':').next().unwrap_or(&r.discovery.address).to_string(),
+                    brand: r.discovery.brand,
+                    cmd_port: r.discovery.command_port,
+                    data_port: r.discovery.data_port,
+                    model: r.discovery.model.clone(),
+                }
+            })
+            .collect();
 
-        for r in self.locator.radars.values() {
-            let state = RadarState::from(&r.discovery);
-            let ip = r.discovery.address.split(':').next().unwrap_or(&r.discovery.address).to_string();
+        // Create controllers for each radar
+        for info in radar_infos {
+            if self.controllers.contains_key(&info.id) {
+                continue;
+            }
 
-            match r.discovery.brand {
+            debug(&format!("Creating controller for {} ({:?}) at {}", info.id, info.brand, info.ip));
+
+            let controller = match info.brand {
                 Brand::Furuno => {
-                    furuno_radars.push((state.id, ip));
+                    // Register for spoke tracking
+                    self.spoke_receiver.add_furuno_radar(&info.id, &info.ip, &mut self.io);
+                    RadarController::Furuno(FurunoController::new(&info.id, &info.ip))
                 }
                 Brand::Navico => {
-                    // Navico uses default multicast addresses (would come from beacon in real implementation)
-                    let cmd_addr = "236.6.7.8".to_string();
-                    let cmd_port = r.discovery.command_port;
-                    let report_addr = "236.6.7.9".to_string();
+                    // Navico uses default multicast addresses
+                    let cmd_addr = "236.6.7.8";
+                    let report_addr = "236.6.7.9";
                     let report_port = 6680u16;
-                    navico_radars.push((state.id, ip, cmd_addr, cmd_port, report_addr, report_port, r.discovery.model.clone()));
+                    let navico_model = match info.model.as_deref() {
+                        Some(m) if m.contains("HALO") => NavicoModel::Halo,
+                        Some(m) if m.contains("4G") => NavicoModel::Gen4,
+                        Some(m) if m.contains("3G") => NavicoModel::Gen3,
+                        Some(m) if m.contains("BR24") => NavicoModel::BR24,
+                        _ => NavicoModel::Gen4,
+                    };
+                    RadarController::Navico(NavicoController::new(
+                        &info.id, cmd_addr, info.cmd_port, report_addr, report_port, navico_model,
+                    ))
                 }
                 Brand::Raymarine => {
-                    let cmd_port = r.discovery.command_port;
-                    let data_port = r.discovery.data_port;
-                    raymarine_radars.push((state.id, ip, cmd_port, data_port, r.discovery.model.clone()));
+                    let (variant, has_doppler) = match info.model.as_deref() {
+                        Some(m) if m.contains("Quantum 2") => (RaymarineVariant::Quantum, true),
+                        Some(m) if m.contains("Quantum") => (RaymarineVariant::Quantum, false),
+                        _ => (RaymarineVariant::RD, false),
+                    };
+                    RadarController::Raymarine(RaymarineController::new(
+                        &info.id, &info.ip, info.cmd_port, &info.ip, info.data_port, variant, has_doppler,
+                    ))
                 }
                 Brand::Garmin => {
-                    garmin_radars.push((state.id, ip));
+                    RadarController::Garmin(GarminController::new(&info.id, &info.ip))
                 }
-            }
+            };
+            self.controllers.insert(info.id, controller);
         }
 
-        // Create Furuno controllers
-        for (radar_id, ip) in furuno_radars {
-            if self.poll_count % 100 == 1 {
-                debug(&format!("Furuno radar {} at {} for spokes", radar_id, ip));
-            }
-            // Register for spoke tracking
-            self.spoke_receiver.add_furuno_radar(&radar_id, &ip);
-
-            // Create controller if not exists
-            if !self.furuno_controllers.contains_key(&radar_id) {
-                debug(&format!("Creating FurunoController for {}", radar_id));
-                let controller = FurunoController::new(&radar_id, &ip);
-                self.furuno_controllers.insert(radar_id.clone(), controller);
-            }
-        }
-
-        // Create Navico controllers
-        for (radar_id, _ip, cmd_addr, cmd_port, report_addr, report_port, model) in navico_radars {
-            if !self.navico_controllers.contains_key(&radar_id) {
-                debug(&format!("Creating NavicoController for {}", radar_id));
-                // Determine model from discovery or default to Gen4
-                let navico_model = match model.as_deref() {
-                    Some(m) if m.contains("HALO") => NavicoModel::Halo,
-                    Some(m) if m.contains("4G") => NavicoModel::Gen4,
-                    Some(m) if m.contains("3G") => NavicoModel::Gen3,
-                    Some(m) if m.contains("BR24") => NavicoModel::BR24,
-                    _ => NavicoModel::Gen4,
-                };
-                let controller = NavicoController::new(
-                    &radar_id, &cmd_addr, cmd_port, &report_addr, report_port, navico_model,
-                );
-                self.navico_controllers.insert(radar_id.clone(), controller);
-            }
-        }
-
-        // Create Raymarine controllers
-        for (radar_id, ip, cmd_port, data_port, model) in raymarine_radars {
-            if !self.raymarine_controllers.contains_key(&radar_id) {
-                debug(&format!("Creating RaymarineController for {}", radar_id));
-                // Determine variant and doppler from model name
-                let (variant, has_doppler) = match model.as_deref() {
-                    Some(m) if m.contains("Quantum 2") => (RaymarineVariant::Quantum, true),
-                    Some(m) if m.contains("Quantum") => (RaymarineVariant::Quantum, false),
-                    _ => (RaymarineVariant::RD, false),
-                };
-                // Raymarine uses same address for command and report, different ports
-                let controller = RaymarineController::new(
-                    &radar_id, &ip, cmd_port, &ip, data_port, variant, has_doppler,
-                );
-                self.raymarine_controllers.insert(radar_id.clone(), controller);
-            }
-        }
-
-        // Create Garmin controllers
-        for (radar_id, ip) in garmin_radars {
-            if !self.garmin_controllers.contains_key(&radar_id) {
-                debug(&format!("Creating GarminController for {}", radar_id));
-                let controller = GarminController::new(&radar_id, &ip);
-                self.garmin_controllers.insert(radar_id.clone(), controller);
-            }
-        }
-
-        // Poll all Furuno controllers and update model info
-        for (radar_id, controller) in self.furuno_controllers.iter_mut() {
+        // Poll all controllers and update model info
+        for (radar_id, controller) in self.controllers.iter_mut() {
             controller.poll(&mut self.io);
 
             // Update radar discovery with model from controller (if available)
             if let Some(model) = controller.model() {
-                // Find the radar in locator and update its model
                 for radar_info in self.locator.radars.values_mut() {
                     let state = RadarState::from(&radar_info.discovery);
                     if state.id == *radar_id && radar_info.discovery.model.as_deref() != Some(model) {
@@ -452,23 +555,8 @@ impl RadarProvider {
             }
         }
 
-        // Poll all Navico controllers
-        for (_radar_id, controller) in self.navico_controllers.iter_mut() {
-            controller.poll(&mut self.io);
-        }
-
-        // Poll all Raymarine controllers
-        for (_radar_id, controller) in self.raymarine_controllers.iter_mut() {
-            controller.poll(&mut self.io);
-        }
-
-        // Poll all Garmin controllers
-        for (_radar_id, controller) in self.garmin_controllers.iter_mut() {
-            controller.poll(&mut self.io);
-        }
-
         // Poll for spoke data and emit to SignalK stream
-        let spokes_emitted = self.spoke_receiver.poll();
+        let spokes_emitted = self.spoke_receiver.poll(&mut self.io);
 
         // Log spoke activity periodically (every 100 polls or when spokes emitted)
         if self.poll_count % 100 == 0 {
@@ -522,7 +610,7 @@ impl RadarProvider {
     /// Shutdown the provider
     pub fn shutdown(&mut self) {
         self.locator.shutdown(&mut self.io);
-        self.spoke_receiver.shutdown();
+        self.spoke_receiver.shutdown(&mut self.io);
     }
 
     /// Get list of radar IDs for the Radar Provider API
@@ -566,129 +654,43 @@ impl RadarProvider {
 
     /// Set radar power state
     pub fn set_power(&mut self, radar_id: &str, state: &str) -> bool {
-        debug(&format!("set_power({}, {}) - {} controllers registered",
-            radar_id, state, self.furuno_controllers.len()));
-
-        // Debug: list all controller IDs
-        for id in self.furuno_controllers.keys() {
-            debug(&format!("  Registered controller: '{}'", id));
-        }
-
+        debug(&format!("set_power({}, {})", radar_id, state));
         let transmit = state == "transmit";
 
-        // Try Furuno controller
-        if self.furuno_controllers.contains_key(radar_id) {
-            debug(&format!("Using FurunoController for {} (transmit={})", radar_id, transmit));
-            self.locator.send_furuno_announce(&mut self.io);
-            if let Some(controller) = self.furuno_controllers.get_mut(radar_id) {
-                controller.set_transmit(&mut self.io, transmit);
+        // Send Furuno announce if this is a Furuno radar
+        if let Some(controller) = self.controllers.get(radar_id) {
+            if matches!(controller, RadarController::Furuno(_)) {
+                self.locator.send_furuno_announce(&mut self.io);
             }
+        }
+
+        if let Some(controller) = self.controllers.get_mut(radar_id) {
+            controller.set_power(&mut self.io, transmit);
             return true;
         }
 
-        // Try Navico controller
-        if self.navico_controllers.contains_key(radar_id) {
-            debug(&format!("Using NavicoController for {} (transmit={})", radar_id, transmit));
-            if let Some(controller) = self.navico_controllers.get_mut(radar_id) {
-                controller.set_power(&mut self.io, transmit);
-            }
-            return true;
-        }
-
-        // Try Raymarine controller
-        if self.raymarine_controllers.contains_key(radar_id) {
-            debug(&format!("Using RaymarineController for {} (transmit={})", radar_id, transmit));
-            if let Some(controller) = self.raymarine_controllers.get_mut(radar_id) {
-                controller.set_power(&mut self.io, transmit);
-            }
-            return true;
-        }
-
-        // Try Garmin controller
-        if self.garmin_controllers.contains_key(radar_id) {
-            debug(&format!("Using GarminController for {} (transmit={})", radar_id, transmit));
-            if let Some(controller) = self.garmin_controllers.get_mut(radar_id) {
-                controller.set_power(&mut self.io, transmit);
-            }
-            return true;
-        }
-
-        debug(&format!("No controller found for '{}', falling back to UDP", radar_id));
-
-        // Fallback to UDP (requires mayara-server)
-        if let Some(radar) = self.find_radar(radar_id) {
-            let ip = radar.discovery.address.split(':').next().unwrap_or("127.0.0.1");
-            let cmd = serde_json::json!({
-                "type": "set_power",
-                "radarId": radar_id,
-                "state": state
-            });
-            self.send_control_command(ip, &cmd)
-        } else {
-            debug(&format!("set_power: radar {} not found", radar_id));
-            false
-        }
+        debug(&format!("No controller found for '{}'", radar_id));
+        false
     }
 
     /// Set radar range in meters
     pub fn set_range(&mut self, radar_id: &str, range: u32) -> bool {
-        debug(&format!("set_range({}, {}) - {} controllers registered",
-            radar_id, range, self.furuno_controllers.len()));
+        debug(&format!("set_range({}, {}m)", radar_id, range));
 
-        // Try Furuno controller
-        if self.furuno_controllers.contains_key(radar_id) {
-            debug(&format!("Using FurunoController for {} (range={}m)", radar_id, range));
-            self.locator.send_furuno_announce(&mut self.io);
-            if let Some(controller) = self.furuno_controllers.get_mut(radar_id) {
-                controller.set_range(&mut self.io, range);
+        // Send Furuno announce if this is a Furuno radar
+        if let Some(controller) = self.controllers.get(radar_id) {
+            if matches!(controller, RadarController::Furuno(_)) {
+                self.locator.send_furuno_announce(&mut self.io);
             }
+        }
+
+        if let Some(controller) = self.controllers.get_mut(radar_id) {
+            controller.set_range(&mut self.io, range);
             return true;
         }
 
-        // Try Navico controller (range in decimeters)
-        if self.navico_controllers.contains_key(radar_id) {
-            debug(&format!("Using NavicoController for {} (range={}m)", radar_id, range));
-            if let Some(controller) = self.navico_controllers.get_mut(radar_id) {
-                controller.set_range(&mut self.io, (range * 10) as i32);
-            }
-            return true;
-        }
-
-        // Try Raymarine controller (range as index 0-255)
-        if self.raymarine_controllers.contains_key(radar_id) {
-            debug(&format!("Using RaymarineController for {} (range={}m)", radar_id, range));
-            if let Some(controller) = self.raymarine_controllers.get_mut(radar_id) {
-                // Convert meters to range index (approximate - actual mapping depends on model)
-                let range_index = (range / 100).min(255) as u8;
-                controller.set_range(&mut self.io, range_index);
-            }
-            return true;
-        }
-
-        // Try Garmin controller
-        if self.garmin_controllers.contains_key(radar_id) {
-            debug(&format!("Using GarminController for {} (range={}m)", radar_id, range));
-            if let Some(controller) = self.garmin_controllers.get_mut(radar_id) {
-                controller.set_range(&mut self.io, range);
-            }
-            return true;
-        }
-
-        debug(&format!("No controller found for '{}', falling back to UDP", radar_id));
-
-        // Fallback to UDP (requires mayara-server)
-        if let Some(radar) = self.find_radar(radar_id) {
-            let ip = radar.discovery.address.split(':').next().unwrap_or("127.0.0.1");
-            let cmd = serde_json::json!({
-                "type": "set_range",
-                "radarId": radar_id,
-                "range": range
-            });
-            self.send_control_command(ip, &cmd)
-        } else {
-            debug(&format!("set_range: radar {} not found", radar_id));
-            false
-        }
+        debug(&format!("No controller found for '{}'", radar_id));
+        false
     }
 
     /// Set radar gain
@@ -696,59 +698,13 @@ impl RadarProvider {
         debug(&format!("set_gain({}, auto={}, value={:?})", radar_id, auto, value));
         let val = value.unwrap_or(50);
 
-        // Try Furuno controller
-        if self.furuno_controllers.contains_key(radar_id) {
-            debug(&format!("Using FurunoController for {} (gain={}, auto={})", radar_id, val, auto));
-            self.locator.send_furuno_announce(&mut self.io);
-            if let Some(controller) = self.furuno_controllers.get_mut(radar_id) {
-                controller.set_gain(&mut self.io, val as i32, auto);
-            }
+        if let Some(controller) = self.controllers.get_mut(radar_id) {
+            controller.set_gain(&mut self.io, val, auto);
             return true;
         }
 
-        // Try Navico controller
-        if self.navico_controllers.contains_key(radar_id) {
-            debug(&format!("Using NavicoController for {} (gain={}, auto={})", radar_id, val, auto));
-            if let Some(controller) = self.navico_controllers.get_mut(radar_id) {
-                controller.set_gain(&mut self.io, val, auto);
-            }
-            return true;
-        }
-
-        // Try Raymarine controller
-        if self.raymarine_controllers.contains_key(radar_id) {
-            debug(&format!("Using RaymarineController for {} (gain={}, auto={})", radar_id, val, auto));
-            if let Some(controller) = self.raymarine_controllers.get_mut(radar_id) {
-                controller.set_gain(&mut self.io, val, auto);
-            }
-            return true;
-        }
-
-        // Try Garmin controller
-        if self.garmin_controllers.contains_key(radar_id) {
-            debug(&format!("Using GarminController for {} (gain={}, auto={})", radar_id, val, auto));
-            if let Some(controller) = self.garmin_controllers.get_mut(radar_id) {
-                controller.set_gain(&mut self.io, val as u32, auto);
-            }
-            return true;
-        }
-
-        debug(&format!("No controller found for '{}', falling back to UDP", radar_id));
-
-        // Fallback to UDP (requires mayara-server)
-        if let Some(radar) = self.find_radar(radar_id) {
-            let ip = radar.discovery.address.split(':').next().unwrap_or("127.0.0.1");
-            let cmd = serde_json::json!({
-                "type": "set_gain",
-                "radarId": radar_id,
-                "auto": auto,
-                "value": value
-            });
-            self.send_control_command(ip, &cmd)
-        } else {
-            debug(&format!("set_gain: radar {} not found", radar_id));
-            false
-        }
+        debug(&format!("No controller found for '{}'", radar_id));
+        false
     }
 
     /// Set radar sea clutter
@@ -756,59 +712,13 @@ impl RadarProvider {
         debug(&format!("set_sea({}, auto={}, value={:?})", radar_id, auto, value));
         let val = value.unwrap_or(50);
 
-        // Try Furuno controller
-        if self.furuno_controllers.contains_key(radar_id) {
-            debug(&format!("Using FurunoController for {} (sea={}, auto={})", radar_id, val, auto));
-            self.locator.send_furuno_announce(&mut self.io);
-            if let Some(controller) = self.furuno_controllers.get_mut(radar_id) {
-                controller.set_sea(&mut self.io, val as i32, auto);
-            }
+        if let Some(controller) = self.controllers.get_mut(radar_id) {
+            controller.set_sea(&mut self.io, val, auto);
             return true;
         }
 
-        // Try Navico controller
-        if self.navico_controllers.contains_key(radar_id) {
-            debug(&format!("Using NavicoController for {} (sea={}, auto={})", radar_id, val, auto));
-            if let Some(controller) = self.navico_controllers.get_mut(radar_id) {
-                controller.set_sea(&mut self.io, val, auto);
-            }
-            return true;
-        }
-
-        // Try Raymarine controller
-        if self.raymarine_controllers.contains_key(radar_id) {
-            debug(&format!("Using RaymarineController for {} (sea={}, auto={})", radar_id, val, auto));
-            if let Some(controller) = self.raymarine_controllers.get_mut(radar_id) {
-                controller.set_sea(&mut self.io, val, auto);
-            }
-            return true;
-        }
-
-        // Try Garmin controller
-        if self.garmin_controllers.contains_key(radar_id) {
-            debug(&format!("Using GarminController for {} (sea={}, auto={})", radar_id, val, auto));
-            if let Some(controller) = self.garmin_controllers.get_mut(radar_id) {
-                controller.set_sea(&mut self.io, val as u32, auto);
-            }
-            return true;
-        }
-
-        debug(&format!("No controller found for '{}', falling back to UDP", radar_id));
-
-        // Fallback to UDP (requires mayara-server)
-        if let Some(radar) = self.find_radar(radar_id) {
-            let ip = radar.discovery.address.split(':').next().unwrap_or("127.0.0.1");
-            let cmd = serde_json::json!({
-                "type": "set_sea",
-                "radarId": radar_id,
-                "auto": auto,
-                "value": value
-            });
-            self.send_control_command(ip, &cmd)
-        } else {
-            debug(&format!("set_sea: radar {} not found", radar_id));
-            false
-        }
+        debug(&format!("No controller found for '{}'", radar_id));
+        false
     }
 
     /// Set radar rain clutter
@@ -816,115 +726,69 @@ impl RadarProvider {
         debug(&format!("set_rain({}, auto={}, value={:?})", radar_id, auto, value));
         let val = value.unwrap_or(50);
 
-        // Try Furuno controller
-        if self.furuno_controllers.contains_key(radar_id) {
-            debug(&format!("Using FurunoController for {} (rain={}, auto={})", radar_id, val, auto));
-            self.locator.send_furuno_announce(&mut self.io);
-            if let Some(controller) = self.furuno_controllers.get_mut(radar_id) {
-                controller.set_rain(&mut self.io, val as i32, auto);
-            }
+        if let Some(controller) = self.controllers.get_mut(radar_id) {
+            controller.set_rain(&mut self.io, val, auto);
             return true;
         }
 
-        // Try Navico controller (rain doesn't have auto mode)
-        if self.navico_controllers.contains_key(radar_id) {
-            debug(&format!("Using NavicoController for {} (rain={})", radar_id, val));
-            if let Some(controller) = self.navico_controllers.get_mut(radar_id) {
-                controller.set_rain(&mut self.io, val);
-            }
-            return true;
-        }
-
-        // Try Raymarine controller
-        if self.raymarine_controllers.contains_key(radar_id) {
-            debug(&format!("Using RaymarineController for {} (rain={}, auto={})", radar_id, val, auto));
-            if let Some(controller) = self.raymarine_controllers.get_mut(radar_id) {
-                controller.set_rain(&mut self.io, val, auto);
-            }
-            return true;
-        }
-
-        // Try Garmin controller
-        if self.garmin_controllers.contains_key(radar_id) {
-            debug(&format!("Using GarminController for {} (rain={}, auto={})", radar_id, val, auto));
-            if let Some(controller) = self.garmin_controllers.get_mut(radar_id) {
-                controller.set_rain(&mut self.io, val as u32, auto);
-            }
-            return true;
-        }
-
-        debug(&format!("No controller found for '{}', falling back to UDP", radar_id));
-
-        // Fallback to UDP for other radar types (requires mayara-server)
-        if let Some(radar) = self.find_radar(radar_id) {
-            let ip = radar.discovery.address.split(':').next().unwrap_or("127.0.0.1");
-            let cmd = serde_json::json!({
-                "type": "set_rain",
-                "radarId": radar_id,
-                "auto": auto,
-                "value": value
-            });
-            self.send_control_command(ip, &cmd)
-        } else {
-            debug(&format!("set_rain: radar {} not found", radar_id));
-            false
-        }
+        debug(&format!("No controller found for '{}'", radar_id));
+        false
     }
 
     /// Set multiple radar controls at once
     pub fn set_controls(&mut self, radar_id: &str, controls: &serde_json::Value) -> bool {
         debug(&format!("set_controls({}, {:?})", radar_id, controls));
 
-        if let Some(radar) = self.find_radar(radar_id) {
-            let ip = radar.discovery.address.split(':').next().unwrap_or("127.0.0.1");
-            let cmd = serde_json::json!({
-                "type": "set_controls",
-                "radarId": radar_id,
-                "controls": controls
-            });
-            self.send_control_command(ip, &cmd)
-        } else {
-            debug(&format!("set_controls: radar {} not found", radar_id));
-            false
-        }
-    }
-
-    /// Send control command to mayara-server via UDP
-    fn send_control_command(&self, ip: &str, cmd: &serde_json::Value) -> bool {
-        use crate::signalk_ffi::UdpSocket;
-
-        // mayara-server control port (convention: 3002 for control commands)
-        const CONTROL_PORT: u16 = 3002;
-
-        let json = match serde_json::to_string(cmd) {
-            Ok(j) => j,
-            Err(e) => {
-                debug(&format!("Failed to serialize control command: {}", e));
+        let controls_obj = match controls.as_object() {
+            Some(obj) => obj,
+            None => {
+                debug("set_controls: controls must be an object");
                 return false;
             }
         };
 
-        debug(&format!("Sending control to {}:{}: {}", ip, CONTROL_PORT, json));
-
-        // Create UDP socket and send command
-        match UdpSocket::bind("0.0.0.0:0") {
-            Ok(socket) => {
-                match socket.send_to(json.as_bytes(), ip, CONTROL_PORT) {
-                    Ok(_) => {
-                        debug("Control command sent successfully");
-                        true
-                    }
-                    Err(e) => {
-                        debug(&format!("Failed to send control command: {:?}", e));
+        let mut success = true;
+        for (control_id, value) in controls_obj {
+            let ok = match control_id.as_str() {
+                "power" => {
+                    if let Some(state) = value.as_str() {
+                        self.set_power(radar_id, state)
+                    } else {
                         false
                     }
                 }
-            }
-            Err(e) => {
-                debug(&format!("Failed to create control socket: {:?}", e));
-                false
+                "range" => {
+                    if let Some(range) = value.as_u64() {
+                        self.set_range(radar_id, range as u32)
+                    } else {
+                        false
+                    }
+                }
+                "gain" => {
+                    let auto = value.get("mode").and_then(|m| m.as_str()) == Some("auto");
+                    let val = value.get("value").and_then(|v| v.as_u64()).map(|v| v as u8);
+                    self.set_gain(radar_id, auto, val)
+                }
+                "sea" => {
+                    let auto = value.get("mode").and_then(|m| m.as_str()) == Some("auto");
+                    let val = value.get("value").and_then(|v| v.as_u64()).map(|v| v as u8);
+                    self.set_sea(radar_id, auto, val)
+                }
+                "rain" => {
+                    let auto = value.get("mode").and_then(|m| m.as_str()) == Some("auto");
+                    let val = value.get("value").and_then(|v| v.as_u64()).map(|v| v as u8);
+                    self.set_rain(radar_id, auto, val)
+                }
+                _ => {
+                    // Try extended control (v5 API)
+                    self.set_control_v5(radar_id, control_id, &value).is_ok()
+                }
+            };
+            if !ok {
+                success = false;
             }
         }
+        success
     }
 
     // =========================================================================
@@ -937,7 +801,7 @@ impl RadarProvider {
 
         // Check if controller has model info (more up-to-date than discovery)
         let mut discovery = radar.discovery.clone();
-        if let Some(controller) = self.furuno_controllers.get(radar_id) {
+        if let Some(controller) = self.controllers.get(radar_id) {
             if let Some(model) = controller.model() {
                 discovery.model = Some(model.to_string());
             }
@@ -967,115 +831,35 @@ impl RadarProvider {
         let radar = self.find_radar(radar_id)?;
         let state = RadarState::from(&radar.discovery);
 
-        // Build controls map with current values from the controller
-        let mut controls = HashMap::new();
+        // Get live state from controller and use core's to_controls_map()
+        let mut controls: BTreeMap<String, serde_json::Value> = self.controllers
+            .get(radar_id)
+            .and_then(|c| c.radar_state())
+            .map(|live_state| {
+                // Use core's to_controls_map() - converts HashMap to BTreeMap
+                live_state.to_controls_map().into_iter().collect()
+            })
+            .unwrap_or_else(|| {
+                // Fallback to defaults if no controller
+                let mut defaults = BTreeMap::new();
+                defaults.insert("power".to_string(), serde_json::json!(state.status));
+                defaults.insert("range".to_string(), serde_json::json!(1852));
+                defaults.insert("gain".to_string(), serde_json::json!({"mode": "auto", "value": 50}));
+                defaults.insert("sea".to_string(), serde_json::json!({"mode": "auto", "value": 50}));
+                defaults.insert("rain".to_string(), serde_json::json!({"mode": "manual", "value": 0}));
+                defaults.insert("noiseReduction".to_string(), serde_json::json!(false));
+                defaults.insert("interferenceRejection".to_string(), serde_json::json!(false));
+                defaults
+            });
 
-        // Get live state from controller if available
-        if let Some(controller) = self.furuno_controllers.get(radar_id) {
-            let live_state = controller.radar_state();
-
-            // Power state from live radar state
-            let power_str = match live_state.power {
-                mayara_core::state::PowerState::Off => "off",
-                mayara_core::state::PowerState::Standby => "standby",
-                mayara_core::state::PowerState::Transmit => "transmit",
-                mayara_core::state::PowerState::Warming => "warming",
-            };
-            controls.insert("power".to_string(), serde_json::json!(power_str));
-
-            // Range from live state
-            controls.insert("range".to_string(), serde_json::json!(live_state.range));
-
-            // Gain, sea, rain from live state
-            controls.insert(
-                "gain".to_string(),
-                serde_json::json!({"mode": live_state.gain.mode, "value": live_state.gain.value}),
-            );
-            controls.insert(
-                "sea".to_string(),
-                serde_json::json!({"mode": live_state.sea.mode, "value": live_state.sea.value}),
-            );
-            controls.insert(
-                "rain".to_string(),
-                serde_json::json!({"mode": live_state.rain.mode, "value": live_state.rain.value}),
-            );
-
-            // Signal processing controls from live state
-            controls.insert(
-                "noiseReduction".to_string(),
-                serde_json::json!(live_state.noise_reduction),
-            );
-            controls.insert(
-                "interferenceRejection".to_string(),
-                serde_json::json!(live_state.interference_rejection),
-            );
-
-            // Extended controls from live state
-            controls.insert(
-                "beamSharpening".to_string(),
-                serde_json::json!(live_state.beam_sharpening),
-            );
-            controls.insert(
-                "birdMode".to_string(),
-                serde_json::json!(live_state.bird_mode),
-            );
-            controls.insert(
-                "dopplerMode".to_string(),
-                serde_json::json!({
-                    "enabled": live_state.doppler_mode.enabled,
-                    "mode": live_state.doppler_mode.mode
-                }),
-            );
-            controls.insert(
-                "scanSpeed".to_string(),
-                serde_json::json!(live_state.scan_speed),
-            );
-            controls.insert(
-                "mainBangSuppression".to_string(),
-                serde_json::json!(live_state.main_bang_suppression),
-            );
-            controls.insert(
-                "txChannel".to_string(),
-                serde_json::json!(live_state.tx_channel),
-            );
-            controls.insert(
-                "noTransmitZones".to_string(),
-                serde_json::json!({
-                    "zones": live_state.no_transmit_zones.zones.iter().map(|z| {
-                        serde_json::json!({
-                            "enabled": z.enabled,
-                            "start": z.start,
-                            "end": z.end
-                        })
-                    }).collect::<Vec<_>>()
-                }),
-            );
-
-            // Firmware version and operating hours
-            if let Some(firmware) = controller.firmware_version() {
+        // Add firmware version and operating hours (from Furuno controller)
+        if let Some(fc) = self.controllers.get(radar_id).and_then(|c| c.as_furuno()) {
+            if let Some(firmware) = fc.firmware_version() {
                 controls.insert("firmwareVersion".to_string(), serde_json::json!(firmware));
             }
-            if let Some(hours) = controller.operating_hours() {
+            if let Some(hours) = fc.operating_hours() {
                 controls.insert("operatingHours".to_string(), serde_json::json!(hours));
             }
-        } else {
-            // Fallback to defaults if no controller
-            controls.insert("power".to_string(), serde_json::json!(state.status));
-            controls.insert("range".to_string(), serde_json::json!(1852));
-            controls.insert(
-                "gain".to_string(),
-                serde_json::json!({"mode": "auto", "value": 50}),
-            );
-            controls.insert(
-                "sea".to_string(),
-                serde_json::json!({"mode": "auto", "value": 50}),
-            );
-            controls.insert(
-                "rain".to_string(),
-                serde_json::json!({"mode": "manual", "value": 0}),
-            );
-            controls.insert("noiseReduction".to_string(), serde_json::json!(false));
-            controls.insert("interferenceRejection".to_string(), serde_json::json!(false));
         }
 
         // Serial number from discovery (UDP model report)
@@ -1113,153 +897,9 @@ impl RadarProvider {
 
     /// Get a single control value (v5 API)
     pub fn get_control(&self, radar_id: &str, control_id: &str) -> Option<serde_json::Value> {
-        let radar = self.find_radar(radar_id)?;
-
-        // Try to get live state from controller
-        let controller = self.furuno_controllers.get(radar_id);
-        let live_state = controller.map(|c| c.radar_state());
-
-        match control_id {
-            "power" => {
-                if let Some(state) = live_state {
-                    let power_str = match state.power {
-                        mayara_core::state::PowerState::Off => "off",
-                        mayara_core::state::PowerState::Standby => "standby",
-                        mayara_core::state::PowerState::Transmit => "transmit",
-                        mayara_core::state::PowerState::Warming => "warming",
-                    };
-                    Some(serde_json::json!(power_str))
-                } else {
-                    Some(serde_json::json!("standby"))
-                }
-            }
-            "range" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!(state.range))
-                } else {
-                    Some(serde_json::json!(1852))
-                }
-            }
-            "gain" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!({"mode": state.gain.mode, "value": state.gain.value}))
-                } else {
-                    Some(serde_json::json!({"mode": "auto", "value": 50}))
-                }
-            }
-            "sea" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!({"mode": state.sea.mode, "value": state.sea.value}))
-                } else {
-                    Some(serde_json::json!({"mode": "auto", "value": 50}))
-                }
-            }
-            "rain" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!({"mode": state.rain.mode, "value": state.rain.value}))
-                } else {
-                    Some(serde_json::json!({"mode": "manual", "value": 0}))
-                }
-            }
-            // Info controls (read-only)
-            "serialNumber" => radar.discovery.serial_number.as_ref().map(|s| serde_json::json!(s)),
-            "firmwareVersion" => controller
-                .and_then(|c| c.firmware_version())
-                .map(|v| serde_json::json!(v)),
-            "operatingHours" => controller
-                .and_then(|c| c.operating_hours())
-                .map(|h| serde_json::json!(h)),
-            // Signal processing controls (from radar state)
-            "noiseReduction" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!(state.noise_reduction))
-                } else {
-                    Some(serde_json::json!(false))
-                }
-            }
-            "interferenceRejection" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!(state.interference_rejection))
-                } else {
-                    Some(serde_json::json!(false))
-                }
-            }
-            // Installation config values (stored locally)
-            "bearingAlignment" => self.config.radars.get(radar_id)
-                .and_then(|c| c.bearing_alignment)
-                .map(|v| serde_json::json!(v)),
-            "antennaHeight" => self.config.radars.get(radar_id)
-                .and_then(|c| c.antenna_height)
-                .map(|v| serde_json::json!(v)),
-            // Extended controls from live state
-            "beamSharpening" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!(state.beam_sharpening))
-                } else {
-                    Some(serde_json::json!(0))
-                }
-            }
-            "birdMode" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!(state.bird_mode))
-                } else {
-                    Some(serde_json::json!(0))
-                }
-            }
-            "dopplerMode" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!({
-                        "enabled": state.doppler_mode.enabled,
-                        "mode": state.doppler_mode.mode
-                    }))
-                } else {
-                    Some(serde_json::json!({"enabled": false, "mode": "target"}))
-                }
-            }
-            "scanSpeed" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!(state.scan_speed))
-                } else {
-                    Some(serde_json::json!(0))
-                }
-            }
-            "mainBangSuppression" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!(state.main_bang_suppression))
-                } else {
-                    Some(serde_json::json!(0))
-                }
-            }
-            "txChannel" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!(state.tx_channel))
-                } else {
-                    Some(serde_json::json!(0))
-                }
-            }
-            "noTransmitZones" => {
-                if let Some(state) = live_state {
-                    Some(serde_json::json!({
-                        "zones": state.no_transmit_zones.zones.iter().map(|z| {
-                            serde_json::json!({
-                                "enabled": z.enabled,
-                                "start": z.start,
-                                "end": z.end
-                            })
-                        }).collect::<Vec<_>>()
-                    }))
-                } else {
-                    Some(serde_json::json!({"zones": [
-                        {"enabled": false, "start": 0, "end": 0},
-                        {"enabled": false, "start": 0, "end": 0}
-                    ]}))
-                }
-            }
-            _ => {
-                debug(&format!("Unknown control: {}", control_id));
-                None
-            }
-        }
+        // Reuse get_state_v5() which already uses core's to_controls_map()
+        let state = self.get_state_v5(radar_id)?;
+        state.controls.get(control_id).cloned()
     }
 
     /// Set a single control value (v5 generic interface)
@@ -1382,13 +1022,23 @@ impl RadarProvider {
         self.locator.send_furuno_announce(&mut self.io);
 
         // Take controller out to avoid borrow conflict with io
-        let mut controller = match self.furuno_controllers.remove(radar_id) {
+        let mut controller_enum = match self.controllers.remove(radar_id) {
             Some(c) => c,
             None => {
                 debug(&format!(
-                    "No FurunoController for {} to set {}",
+                    "No controller for {} to set {}",
                     radar_id, control_id
                 ));
+                return Err(ControlError::ControllerNotAvailable);
+            }
+        };
+
+        // Extract Furuno controller from enum
+        let controller = match &mut controller_enum {
+            RadarController::Furuno(c) => c,
+            _ => {
+                // Put controller back and return error
+                self.controllers.insert(radar_id.to_string(), controller_enum);
                 return Err(ControlError::ControllerNotAvailable);
             }
         };
@@ -1408,12 +1058,10 @@ impl RadarProvider {
                 } else if let Some(n) = value.as_u64() {
                     n != 0
                 } else {
-                    return {
-                        self.furuno_controllers.insert(radar_id.to_string(), controller);
-                        Err(ControlError::InvalidValue(
-                            "interferenceRejection must be a boolean".to_string(),
-                        ))
-                    };
+                    self.controllers.insert(radar_id.to_string(), controller_enum);
+                    return Err(ControlError::InvalidValue(
+                        "interferenceRejection must be a boolean".to_string(),
+                    ));
                 };
                 controller.set_interference_rejection(&mut self.io, enabled);
                 Ok(())
@@ -1455,8 +1103,10 @@ impl RadarProvider {
                 // Also persist to local config
                 let mut install_config = self.config.radars.get(radar_id).cloned().unwrap_or_default();
                 install_config.bearing_alignment = Some(degrees);
+                // Put controller back before saving config (which mutates self)
+                self.controllers.insert(radar_id.to_string(), controller_enum);
                 self.set_installation_config(radar_id, install_config);
-                Ok(())
+                return Ok(());
             }
             "noiseReduction" => {
                 let enabled = value.as_bool().ok_or_else(|| {
@@ -1501,7 +1151,7 @@ impl RadarProvider {
                     ControlError::InvalidValue("antennaHeight must be a number (meters)".to_string())
                 })? as i32;
                 if !(0..=100).contains(&meters) {
-                    self.furuno_controllers.insert(radar_id.to_string(), controller);
+                    self.controllers.insert(radar_id.to_string(), controller_enum);
                     return Err(ControlError::InvalidValue(
                         "antennaHeight must be 0-100 meters".to_string()
                     ));
@@ -1510,8 +1160,10 @@ impl RadarProvider {
                 // Persist to local config
                 let mut install_config = self.config.radars.get(radar_id).cloned().unwrap_or_default();
                 install_config.antenna_height = Some(meters);
+                // Put controller back before saving config (which mutates self)
+                self.controllers.insert(radar_id.to_string(), controller_enum);
                 self.set_installation_config(radar_id, install_config);
-                Ok(())
+                return Ok(());
             }
             "noTransmitZones" => {
                 let zones = value
@@ -1562,7 +1214,7 @@ impl RadarProvider {
         };
 
         // Put controller back
-        self.furuno_controllers.insert(radar_id.to_string(), controller);
+        self.controllers.insert(radar_id.to_string(), controller_enum);
         result
     }
 
@@ -1664,10 +1316,11 @@ impl RadarProvider {
     }
 
     // =========================================================================
-    // Guard Zone Methods
+    // Guard Zone Methods (FFI exports not yet implemented)
     // =========================================================================
 
     /// Get or create guard zone processor for a radar
+    #[allow(dead_code)]
     fn get_or_create_guard_zone_processor(&mut self, radar_id: &str) -> &mut GuardZoneProcessor {
         if !self.guard_zone_processors.contains_key(radar_id) {
             debug(&format!("Creating guard zone processor for {}", radar_id));
@@ -1677,6 +1330,7 @@ impl RadarProvider {
     }
 
     /// Get all guard zones for a radar
+    #[allow(dead_code)]
     pub fn get_guard_zones(&self, radar_id: &str) -> Vec<GuardZoneStatus> {
         self.guard_zone_processors
             .get(radar_id)
@@ -1685,6 +1339,7 @@ impl RadarProvider {
     }
 
     /// Get a specific guard zone
+    #[allow(dead_code)]
     pub fn get_guard_zone(&self, radar_id: &str, zone_id: u32) -> Option<GuardZoneStatus> {
         self.guard_zone_processors
             .get(radar_id)
@@ -1692,6 +1347,7 @@ impl RadarProvider {
     }
 
     /// Create or update a guard zone
+    #[allow(dead_code)]
     pub fn set_guard_zone(&mut self, radar_id: &str, zone: GuardZone) {
         let processor = self.get_or_create_guard_zone_processor(radar_id);
         processor.add_zone(zone.clone());
@@ -1699,6 +1355,7 @@ impl RadarProvider {
     }
 
     /// Delete a guard zone
+    #[allow(dead_code)]
     pub fn delete_guard_zone(&mut self, radar_id: &str, zone_id: u32) -> bool {
         if let Some(processor) = self.guard_zone_processors.get_mut(radar_id) {
             let result = processor.remove_zone(zone_id);
@@ -1712,10 +1369,11 @@ impl RadarProvider {
     }
 
     // =========================================================================
-    // Trail Methods
+    // Trail Methods (FFI exports not yet implemented)
     // =========================================================================
 
     /// Get or create trail store for a radar
+    #[allow(dead_code)]
     fn get_or_create_trail_store(&mut self, radar_id: &str) -> &mut TrailStore {
         if !self.trail_stores.contains_key(radar_id) {
             debug(&format!("Creating trail store for {}", radar_id));
@@ -1725,6 +1383,7 @@ impl RadarProvider {
     }
 
     /// Get all trails for a radar
+    #[allow(dead_code)]
     pub fn get_all_trails(&self, radar_id: &str) -> Vec<TrailData> {
         self.trail_stores
             .get(radar_id)
@@ -1733,6 +1392,7 @@ impl RadarProvider {
     }
 
     /// Get trail for a specific target
+    #[allow(dead_code)]
     pub fn get_trail(&self, radar_id: &str, target_id: u32) -> Option<TrailData> {
         self.trail_stores
             .get(radar_id)
@@ -1740,6 +1400,7 @@ impl RadarProvider {
     }
 
     /// Clear all trails for a radar
+    #[allow(dead_code)]
     pub fn clear_all_trails(&mut self, radar_id: &str) {
         if let Some(store) = self.trail_stores.get_mut(radar_id) {
             store.clear_all();
@@ -1748,6 +1409,7 @@ impl RadarProvider {
     }
 
     /// Clear trail for a specific target
+    #[allow(dead_code)]
     pub fn clear_trail(&mut self, radar_id: &str, target_id: u32) {
         if let Some(store) = self.trail_stores.get_mut(radar_id) {
             store.clear_trail(target_id);
@@ -1756,6 +1418,7 @@ impl RadarProvider {
     }
 
     /// Get trail settings for a radar
+    #[allow(dead_code)]
     pub fn get_trail_settings(&self, radar_id: &str) -> TrailSettings {
         self.trail_stores
             .get(radar_id)
@@ -1764,6 +1427,7 @@ impl RadarProvider {
     }
 
     /// Update trail settings for a radar
+    #[allow(dead_code)]
     pub fn set_trail_settings(&mut self, radar_id: &str, settings: TrailSettings) {
         let store = self.get_or_create_trail_store(radar_id);
         store.update_settings(settings);
@@ -1771,10 +1435,11 @@ impl RadarProvider {
     }
 
     // =========================================================================
-    // Dual-Range Methods
+    // Dual-Range Methods (FFI exports not yet implemented)
     // =========================================================================
 
     /// Get or create dual-range controller for a radar
+    #[allow(dead_code)]
     fn get_or_create_dual_range_controller(&mut self, radar_id: &str) -> Option<&mut DualRangeController> {
         // Get model info to determine max secondary range
         let radar = self.find_radar(radar_id)?;
@@ -1797,6 +1462,7 @@ impl RadarProvider {
     }
 
     /// Check if a radar supports dual-range
+    #[allow(dead_code)]
     pub fn supports_dual_range(&self, radar_id: &str) -> bool {
         if let Some(radar) = self.find_radar(radar_id) {
             if let Some(model_name) = &radar.discovery.model {
@@ -1809,6 +1475,7 @@ impl RadarProvider {
     }
 
     /// Get dual-range state for a radar
+    #[allow(dead_code)]
     pub fn get_dual_range_state(&self, radar_id: &str) -> Option<DualRangeState> {
         self.dual_range_controllers
             .get(radar_id)

@@ -259,4 +259,9 @@ impl IoProvider for WasmIoProvider {
     fn debug(&self, msg: &str) {
         signalk_ffi::debug(msg);
     }
+
+    fn info(&self, msg: &str) {
+        // SignalK FFI only has debug, so use that for info as well
+        signalk_ffi::debug(msg);
+    }
 }
