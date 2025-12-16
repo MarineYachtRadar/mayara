@@ -72,6 +72,19 @@ fn build_enum_control(def: &CoreControlDefinition) -> Control {
 
     let mut control = Control::new_list(&def.id, &labels);
 
+    // Override max_value if enum values aren't sequential 0..n-1
+    // For example, Furuno scanSpeed uses values 0 and 2 (not 0 and 1)
+    if let Some(values) = &def.values {
+        let max_enum_value = values
+            .iter()
+            .filter_map(|v| v.value.as_i64())
+            .max()
+            .unwrap_or(0) as f32;
+        if max_enum_value > (labels.len() - 1) as f32 {
+            control = control.max_value(max_enum_value);
+        }
+    }
+
     // Apply wire hints
     if let Some(hints) = &def.wire_hints {
         control = apply_wire_hints(control, hints);

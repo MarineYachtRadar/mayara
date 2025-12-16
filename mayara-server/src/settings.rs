@@ -816,6 +816,14 @@ impl Control {
         self
     }
 
+    /// Override the maximum value (used for enum controls with non-sequential values)
+    pub fn max_value(mut self, max: f32) -> Control {
+        self.item.max_value = Some(max);
+        // Also update wire_scale_factor to match, as it's used for validation
+        self.item.wire_scale_factor = Some(max);
+        self
+    }
+
     pub fn send_always(mut self) -> Control {
         self.item.is_send_always = true;
 
