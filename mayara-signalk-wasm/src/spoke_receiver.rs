@@ -18,10 +18,12 @@ static EMIT_SUCCESS: AtomicU64 = AtomicU64::new(0);
 static EMIT_FAIL: AtomicU64 = AtomicU64::new(0);
 
 /// Furuno sends 8192 spokes per revolution
-/// Set to 1 for full resolution, 4 for reduced (2048 spokes)
-const FURUNO_SPOKE_REDUCTION: usize = 4;
+/// Set to 1 for full resolution, higher values reduce data rate
+/// Note: SignalK WebSocket can't keep up - need very aggressive reduction
+/// 4 = 2048 (too fast), 8 = 1024 (too fast), 16 = 512 spokes
+const FURUNO_SPOKE_REDUCTION: usize = 16;
 /// Output spokes per revolution (8192 / FURUNO_SPOKE_REDUCTION)
-pub const FURUNO_OUTPUT_SPOKES: u16 = 2048;
+pub const FURUNO_OUTPUT_SPOKES: u16 = 512;
 
 /// State for a single radar's spoke reception
 pub struct RadarSpokeState {

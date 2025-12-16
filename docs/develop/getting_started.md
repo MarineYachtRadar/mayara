@@ -27,7 +27,7 @@ cd mayara
 mayara/
 ├── mayara-core/          # Platform-independent radar library (THE source of truth)
 ├── mayara-server/        # Standalone native server (Tokio async)
-├── mayara-signalk-wasm/  # SignalK WASM plugin (needs overhaul - see architecture.md)
+├── mayara-signalk-wasm/  # SignalK WASM plugin (uses RadarEngine from core)
 ├── mayara-gui/           # Web GUI (vanilla JS, VanJS, WebGPU)
 └── docs/
     ├── design/           # Architecture documentation
@@ -41,6 +41,7 @@ All radar logic lives in `mayara-core`:
 - Model database (ranges, capabilities per model)
 - Control definitions (gain, sea, rain, etc.)
 - Unified brand controllers (Furuno, Navico, Raymarine, Garmin)
+- RadarEngine (unified management of controllers + ARPA, GuardZones, Trails, DualRange)
 
 The server and WASM crates are **thin I/O adapters** around core. If you need to add radar functionality, it almost always goes in `mayara-core`.
 
@@ -70,6 +71,46 @@ The server starts on `http://localhost:6502`. Open this in a browser to see the 
 3. RadarLocator sends discovery packets for all brands (multicast join, broadcast)
 4. When a radar responds, a brand-specific receiver is spawned
 5. Radar appears in the GUI at `/` and can be viewed at `/viewer.html?radar=radar-1`
+
+---
+
+## Quick Start: Building the WASM Plugin
+
+```bash
+cd mayara/mayara-signalk-wasm
+
+# Add WASM target if not already installed
+rustup target add wasm32-wasip1
+
+# Build WASM binary
+cargo build --target wasm32-wasip1 --release
+
+# Output: target/wasm32-wasip1/release/mayara_signalk_wasm.wasm
+```
+
+### Installing in SignalK
+
+1. Copy the `.wasm` file to SignalK's plugin directory
+2. Restart SignalK server
+3. Enable the Mayara Radar plugin in SignalK's plugin configuration
+
+### Key Differences from Server
+
+| Aspect | Server | WASM |
+|--------|--------|------|
+| **Runtime** | Tokio async | Poll-based (no async) |
+| **I/O** | TokioIoProvider (tokio sockets) | WasmIoProvider (SignalK FFI) |
+| **Spokes/Revolution** | 8192 (native) | 512 (reduced for WebSocket) |
+| **WebSocket** | Direct to browser | Through SignalK's WebSocket |
+
+### Spoke Reduction
+
+SignalK's WebSocket has aggressive rate limiting that disconnects slow consumers
+(code 1008 "Client cannot keep up"). The WASM plugin reduces Furuno's 8192
+spokes to 512 by combining 16 consecutive spokes using `max()` per pixel.
+
+The `spokes_per_revolution` in capabilities is adjusted to 512 so the GUI
+correctly maps spoke angles to 360 degrees.
 
 ---
 
@@ -144,8 +185,10 @@ curl -X PUT http://localhost:6502/v1/api/radars/radar-1/controls/gain \
 | Wire protocol encoding | `mayara-core/src/protocol/{brand}/` |
 | Control dispatch (ID → command) | `mayara-core/src/protocol/{brand}/dispatch.rs` |
 | Brand controllers | `mayara-core/src/controllers/{brand}.rs` |
+| RadarEngine (unified features) | `mayara-core/src/engine/mod.rs` |
 | Server HTTP handlers | `mayara-server/src/web.rs` |
 | Server brand receivers | `mayara-server/src/brand/{brand}/` |
+| WASM spoke handling | `mayara-signalk-wasm/src/spoke_receiver.rs` |
 | GUI control panel | `mayara-gui/control.js` |
 | GUI radar display | `mayara-gui/viewer.js` + `render_webgpu.js` |
 

@@ -169,7 +169,7 @@ mayara/
 │           ├── raymarine/          # Async report/data receivers, delegates to core
 │           └── garmin/             # Discovery only (controller integration pending)
 │
-├── mayara-signalk-wasm/            # SignalK WASM plugin (🚧 needs overhaul)
+├── mayara-signalk-wasm/            # SignalK WASM plugin 
 │   └── src/
 │       ├── lib.rs                  # WASM entry point, plugin exports
 │       ├── wasm_io.rs              # WasmIoProvider (implements IoProvider)
@@ -326,7 +326,7 @@ impl CoreLocatorAdapter {
 
 ## Implementation Status (December 2025)
 
-### ✅ Fully Implemented (Server)
+### ✅ Fully Implemented (Server + WASM)
 
 | Component | Location | Notes |
 |-----------|----------|-------|
@@ -341,26 +341,18 @@ impl CoreLocatorAdapter {
 | **RadarState types** | mayara-core/state.rs | Control values, update_from_response() |
 | **Dispatch functions** | mayara-core/protocol/furuno/dispatch.rs | Control ID → wire command routing |
 | **Unified Controllers** | mayara-core/controllers/ | All 4 brands: FurunoController, NavicoController, RaymarineController, GarminController |
+| **RadarEngine** | mayara-core/engine/ | Unified management of controllers + feature processors |
 | **ARPA tracking** | mayara-core/arpa/ | Kalman filter, CPA/TCPA, contour detection |
 | **Trails history** | mayara-core/trails/ | Target position storage |
 | **Guard zones** | mayara-core/guard_zones/ | Zone alerting logic |
+| **Dual-range** | mayara-core/dual_range.rs | Dual-range controller for supported models |
 | **TokioIoProvider** | mayara-server/tokio_io.rs | Tokio sockets implementing IoProvider |
 | **CoreLocatorAdapter** | mayara-server/core_locator.rs | Async wrapper for RadarLocator |
-| **Standalone server** | mayara-server/ | Full functionality |
+| **Standalone server** | mayara-server/ | Full functionality, uses RadarEngine |
 | **Web GUI** | mayara-gui/ | WebGPU rendering, VanJS framework |
 | **Local storage API** | mayara-server/storage.rs | SignalK-compatible applicationData |
-
-### 🚧 Needs Overhaul (WASM)
-
-| Component | Location | Status |
-|-----------|----------|--------|
-| **WasmIoProvider** | mayara-signalk-wasm/wasm_io.rs | Exists but outdated |
-| **SignalK WASM plugin** | mayara-signalk-wasm/ | Needs update to unified controllers |
-
-The WASM plugin exists but requires significant updates to:
-- Integrate with the unified controller architecture in mayara-core
-- Update to current mayara-core API changes
-- Sync with server implementation patterns
+| **WasmIoProvider** | mayara-signalk-wasm/wasm_io.rs | SignalK FFI socket wrapper |
+| **SignalK WASM plugin** | mayara-signalk-wasm/ | Uses RadarEngine, thin shell around core |
 
 ### Server Brand Controller Integration
 
@@ -392,11 +384,11 @@ The server's `brand/` modules still handle:
 
 ## Deployment Modes
 
-### Mode 1: SignalK WASM Plugin (🚧 Needs Overhaul)
+### Mode 1: SignalK WASM Plugin (✅ Complete)
 
-> **Note:** The WASM plugin exists but is outdated and needs significant updates
-> to integrate with the current unified controller architecture. The diagram below
-> shows the **target architecture** once the overhaul is complete.
+> **Note:** The WASM plugin is now fully integrated with the unified RadarEngine
+> architecture from mayara-core. It shares the same controllers, ARPA, guard zones,
+> trails, and dual-range logic as the server.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -426,6 +418,13 @@ The server's `brand/` modules still handle:
 - Uses SignalK FFI for all network I/O via WasmIoProvider
 - Poll-based (no async runtime in WASM)
 - **Same RadarLocator AND Controllers as server** (all 4 brands!)
+- Uses RadarEngine from mayara-core for unified feature management
+
+**Spoke Reduction:** The WASM plugin reduces Furuno's native 8192 spokes to 512
+per revolution. This is necessary because SignalK's WebSocket cannot sustain
+the data rate of full-resolution spokes (code 1008 "Client cannot keep up").
+The `spokes_per_revolution` in capabilities is adjusted to match the actual
+output, ensuring the GUI correctly maps spoke angles to 360 degrees.
 
 ### Mode 2: Standalone Server
 
@@ -695,6 +694,124 @@ impl RaymarineReportReceiver {
 | **Easier testing** | Mock IoProvider for unit tests |
 | **Reduced code size** | ~1500 lines shared vs ~3000 lines duplicated |
 | **Faster feature development** | Add control to core, works on all platforms |
+
+---
+
+## RadarEngine: Unified Feature Management
+
+The `RadarEngine` in `mayara-core/engine/mod.rs` provides unified management of
+radar controllers along with all feature processors (ARPA, GuardZones, Trails,
+DualRange). Both server and WASM use the same RadarEngine, eliminating code
+duplication for feature management.
+
+### RadarEngine Structure
+
+```rust
+// mayara-core/src/engine/mod.rs
+
+/// Wrapper around a controller with all its feature processors
+pub struct ManagedRadar {
+    pub controller: RadarController,  // Enum: Furuno/Navico/Raymarine/Garmin
+    pub arpa: ArpaProcessor,          // Target tracking
+    pub guard_zones: GuardZoneProcessor,  // Zone alerting
+    pub trails: TrailStore,           // Position history
+    pub dual_range: Option<DualRangeController>,  // For supported models
+}
+
+/// Central engine managing all radars
+pub struct RadarEngine {
+    radars: BTreeMap<String, ManagedRadar>,
+}
+
+impl RadarEngine {
+    // Lifecycle
+    pub fn add_radar(&mut self, id: &str, brand: Brand, ...) -> Result<()>
+    pub fn remove_radar(&mut self, id: &str)
+    pub fn poll<I: IoProvider>(&mut self, io: &mut I) -> Vec<EngineEvent>
+
+    // Controls (unified dispatch)
+    pub fn set_control(&mut self, id: &str, control: &str, value: &Value) -> Result<()>
+    pub fn get_state(&self, id: &str) -> Option<RadarStateV5>
+    pub fn get_capabilities(&self, id: &str) -> Option<CapabilityManifest>
+
+    // ARPA targets
+    pub fn get_targets(&self, id: &str) -> Vec<ArpaTarget>
+    pub fn acquire_target(&mut self, id: &str, bearing: f64, dist: f64) -> Result<u32>
+    pub fn cancel_target(&mut self, id: &str, target_id: u32) -> Result<()>
+
+    // Guard zones
+    pub fn get_guard_zones(&self, id: &str) -> Vec<GuardZone>
+    pub fn set_guard_zone(&mut self, id: &str, zone: GuardZone) -> Result<()>
+
+    // Trails
+    pub fn get_trails(&self, id: &str) -> TrailData
+    pub fn clear_trails(&mut self, id: &str)
+}
+```
+
+### RadarController Enum
+
+The `RadarController` enum wraps brand-specific controllers, providing a unified
+interface for the engine:
+
+```rust
+pub enum RadarController {
+    Furuno(FurunoController),
+    Navico(NavicoController),
+    Raymarine(RaymarineController),
+    Garmin(GarminController),
+}
+```
+
+### Server Integration
+
+The server uses `Arc<RwLock<RadarEngine>>` as shared state:
+
+```rust
+// mayara-server/src/web.rs
+
+pub type SharedEngine = Arc<RwLock<RadarEngine>>;
+
+pub struct Web {
+    session: Session,
+    engine: SharedEngine,  // Single unified engine
+}
+
+// HTTP handlers become thin wrappers:
+async fn get_targets(State(state): State<Web>, ...) -> Response {
+    let engine = state.engine.read().unwrap();
+    Json(engine.get_targets(&radar_id)).into_response()
+}
+```
+
+### WASM Integration
+
+The WASM plugin embeds RadarEngine directly:
+
+```rust
+// mayara-signalk-wasm/src/radar_provider.rs
+
+pub struct RadarProvider {
+    io: WasmIoProvider,
+    locator: RadarLocator,
+    spoke_receiver: SpokeReceiver,
+    engine: RadarEngine,  // Same engine as server!
+}
+
+// Methods become one-liners:
+pub fn get_targets(&self, radar_id: &str) -> Vec<ArpaTarget> {
+    self.engine.get_targets(radar_id)
+}
+```
+
+### Benefits of RadarEngine
+
+| Benefit | Impact |
+|---------|--------|
+| **Bug fixes in one place** | ARPA/GuardZone/Trail bugs fixed once, works everywhere |
+| **Consistent API** | Server and WASM expose identical feature APIs |
+| **Reduced duplication** | ~1400 lines removed from server + WASM combined |
+| **Easier testing** | Test RadarEngine with mock IoProvider |
 
 ---
 
@@ -982,7 +1099,7 @@ The architecture evolved through several phases to achieve maximum code reuse:
 - `TokioIoProvider` for server, `WasmIoProvider` for WASM
 - Both platforms use identical discovery code
 
-### Phase 4: Unified Controllers (Current)
+### Phase 4: Unified Controllers
 - Brand controllers moved to mayara-core:
   - `FurunoController` - TCP login + command protocol
   - `NavicoController` - UDP multicast commands
@@ -990,6 +1107,13 @@ The architecture evolved through several phases to achieve maximum code reuse:
   - `GarminController` - UDP commands
 - Server's brand modules become thin dispatchers
 - WASM and server share identical control logic
+
+### Phase 5: RadarEngine + WASM Migration (Current - December 2025)
+- `RadarEngine` created in mayara-core to unify feature processors
+- Server migrated from separate state types to single `SharedEngine`
+- WASM plugin overhauled: discarded buggy logic, now uses RadarEngine
+- Spoke reduction implemented for WASM (512 spokes vs server's 8192)
+- Capabilities API updated to report actual spoke output count
 
 ### Remaining Work
 - Garmin server integration (core controller exists, server still uses legacy)
@@ -1063,6 +1187,30 @@ When radar sends spoke data:
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Spoke Resolution: Server vs WASM
+
+The server and WASM handle different spoke resolutions due to transport constraints:
+
+| Platform | Spokes/Revolution | Reason |
+|----------|------------------|--------|
+| **mayara-server** | 8192 (native) | Direct WebSocket to browser can sustain high data rate |
+| **mayara-signalk-wasm** | 512 (reduced) | SignalK WebSocket has rate limiting (code 1008) |
+
+**WASM Spoke Reduction Logic** (`spoke_receiver.rs`):
+1. Furuno sends 8192 spokes per revolution
+2. WASM accumulates 16 consecutive spokes
+3. Combines using `max()` per pixel (preserves radar targets)
+4. Emits 1 combined spoke with angle `original_angle / 16`
+5. Results in 512 spokes/revolution (8192 / 16)
+
+**Critical:** The `spokes_per_revolution` in capabilities must match the actual output.
+The GUI uses this value to map spoke angles to 360 degrees:
+- Server: `spokes_per_revolution: 8192`, angles 0-8191
+- WASM: `spokes_per_revolution: 512`, angles 0-511
+
+The WASM uses `build_capabilities_from_model_with_spokes()` to override the
+model's native spoke count with the reduced output count.
 
 ### Discovery Flow
 

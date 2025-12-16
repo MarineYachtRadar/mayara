@@ -9,6 +9,15 @@ option go_package = "../radar";
  * spoke is also defined there, as well as the legend that provides
  * a lookup table for each byte of data in the spoke.
  *
+ * IMPORTANT: The spokes_per_revolution from the capabilities API indicates
+ * the actual number of spokes the server/plugin will emit, NOT necessarily
+ * the native radar resolution. For example:
+ *   - mayara-server (native): 8192 spokes, angles 0-8191
+ *   - mayara-signalk-wasm: 512 spokes, angles 0-511 (reduced for WebSocket bandwidth)
+ *
+ * The GUI uses spokes_per_revolution to map spoke angles to 360 degrees:
+ *   angle_degrees = (spoke.angle / spokes_per_revolution) * 360
+ *
  * The angle and bearing fields below are in terms of spokes, so
  * range from [0..spokes_per_revolution>.
  *
