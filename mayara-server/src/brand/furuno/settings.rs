@@ -121,13 +121,17 @@ pub fn update_when_model_known(info: &mut RadarInfo, model: RadarModel, version:
         log::debug!("{}: Ranges update not sent (data receiver not ready): {}", info.key(), e);
     }
 
-    info.controls.insert(
-        "firmwareVersion",
-        control_factory::firmware_version_control(),
-    );
-    info.controls
-        .set_string("firmwareVersion", version.to_string())
-        .expect("FirmwareVersion");
+    // Only set firmware version if we actually know it (from TCP $N96 response)
+    // The locator passes "unknown" since it only has UDP beacon info
+    if version != "unknown" {
+        info.controls.insert(
+            "firmwareVersion",
+            control_factory::firmware_version_control(),
+        );
+        info.controls
+            .set_string("firmwareVersion", version.to_string())
+            .expect("FirmwareVersion");
+    }
 
     // Add no-transmit zone controls (for radars that support them)
     // Uses core definitions for consistent metadata across server and WASM
