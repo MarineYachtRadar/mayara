@@ -1,5 +1,4 @@
 # Build artifacts
-public/
 plugin.wasm
 *.tgz
 
