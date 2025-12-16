@@ -418,17 +418,18 @@ pub fn control_rotation_speed_for_brand(brand: Brand) -> ControlDefinition {
 ///
 /// Used by server for flat control model. The compound noTransmitZones control
 /// is used in the v5 API but server internally tracks start/end separately.
+/// Value of -1 means zone is disabled.
 pub fn control_no_transmit_start(zone_number: u8) -> ControlDefinition {
     ControlDefinition {
         id: format!("noTransmitStart{}", zone_number),
         name: format!("No-Transmit Zone {} Start", zone_number),
-        description: format!("Start angle of no-transmit zone {} in degrees.", zone_number),
+        description: format!("Start angle of no-transmit zone {} in degrees. -1 = disabled.", zone_number),
         category: ControlCategory::Installation,
         control_type: ControlType::Number,
         range: Some(RangeSpec {
-            min: -180.0,
-            max: 180.0,
-            step: Some(0.1),
+            min: -1.0,  // -1 = zone disabled
+            max: 359.0,
+            step: Some(1.0),
             unit: Some("degrees".into()),
         }),
         values: None,
@@ -436,23 +437,24 @@ pub fn control_no_transmit_start(zone_number: u8) -> ControlDefinition {
         modes: None,
         default_mode: None,
         read_only: false,
-        default: None,
+        default: Some(serde_json::json!(-1)),  // Default to disabled
         wire_hints: None,
     }
 }
 
 /// No-transmit zone end angle: end bearing of a no-transmit sector
+/// Value of -1 means zone is disabled.
 pub fn control_no_transmit_end(zone_number: u8) -> ControlDefinition {
     ControlDefinition {
         id: format!("noTransmitEnd{}", zone_number),
         name: format!("No-Transmit Zone {} End", zone_number),
-        description: format!("End angle of no-transmit zone {} in degrees.", zone_number),
+        description: format!("End angle of no-transmit zone {} in degrees. -1 = disabled.", zone_number),
         category: ControlCategory::Installation,
         control_type: ControlType::Number,
         range: Some(RangeSpec {
-            min: -180.0,
-            max: 180.0,
-            step: Some(0.1),
+            min: -1.0,  // -1 = zone disabled
+            max: 359.0,
+            step: Some(1.0),
             unit: Some("degrees".into()),
         }),
         values: None,
@@ -460,7 +462,7 @@ pub fn control_no_transmit_end(zone_number: u8) -> ControlDefinition {
         modes: None,
         default_mode: None,
         read_only: false,
-        default: None,
+        default: Some(serde_json::json!(-1)),  // Default to disabled
         wire_hints: None,
     }
 }
@@ -477,12 +479,11 @@ pub fn control_no_transmit_angle_for_brand(id: &str, zone_number: u8, is_start: 
 
     def.wire_hints = Some(match brand {
         Brand::Furuno => WireProtocolHint {
-            offset: Some(-1.0), // Values > max map to negative
+            // No offset needed - wire protocol uses 0-359 degrees directly
             ..Default::default()
         },
         Brand::Navico => WireProtocolHint {
             scale_factor: Some(1800.0), // 0.1 degree precision: 180.0 * 10 = 1800
-            offset: Some(-1.0),
             step: Some(0.1),
             has_enabled: true,
             ..Default::default()

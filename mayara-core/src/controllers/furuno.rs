@@ -342,6 +342,9 @@ impl FurunoController {
     }
 
     /// Set blind sector (no-transmit zones)
+    /// Protocol: $S77,{s2_enable},{s1_start},{s1_width},{s2_start},{s2_width}
+    /// - Sector 1 enabled when width > 0
+    /// - Sector 2 enabled when s2_enable=1 AND width > 0
     pub fn set_blind_sector<I: IoProvider>(
         &mut self,
         io: &mut I,
@@ -352,17 +355,30 @@ impl FurunoController {
         zone2_start: i32,
         zone2_end: i32,
     ) {
-        let z1_width = if zone1_enabled {
-            ((zone1_end - zone1_start + 360) % 360).max(1)
+        // Helper to normalize angle to 0-359
+        let normalize = |angle: i32| ((angle % 360) + 360) % 360;
+
+        // Zone 1: enabled by width > 0
+        let (z1_start, z1_width) = if zone1_enabled {
+            let start = normalize(zone1_start);
+            let end = normalize(zone1_end);
+            let width = ((end - start + 360) % 360).max(1);
+            (start, width)
         } else {
-            0
+            (0, 0) // Disabled: start=0, width=0
         };
-        let z2_width = if zone2_enabled {
-            ((zone2_end - zone2_start + 360) % 360).max(1)
+
+        // Zone 2: enabled by s2_enable flag AND width > 0
+        let (z2_start, z2_width) = if zone2_enabled {
+            let start = normalize(zone2_start);
+            let end = normalize(zone2_end);
+            let width = ((end - start + 360) % 360).max(1);
+            (start, width)
         } else {
-            0
+            (0, 0) // Disabled: start=0, width=0
         };
-        let cmd = format_blind_sector_command(zone2_enabled, zone1_start, z1_width, zone2_start, z2_width);
+
+        let cmd = format_blind_sector_command(zone2_enabled, z1_start, z1_width, z2_start, z2_width);
         self.queue_command(io, cmd.trim());
     }
 

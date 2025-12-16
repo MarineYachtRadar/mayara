@@ -211,17 +211,11 @@ impl FurunoReportReceiver {
         };
         changed |= self.set_value_enabled_changed("dopplerMode", doppler_mode_value, state.doppler_mode.enabled);
 
-        // Apply no-transmit zones
-        if !state.no_transmit_zones.zones.is_empty() {
-            if let Some(z1) = state.no_transmit_zones.zones.first() {
-                changed |= self.set_value_changed("noTransmitStart1", z1.start as f32);
-                changed |= self.set_value_changed("noTransmitEnd1", z1.end as f32);
-            }
-            if let Some(z2) = state.no_transmit_zones.zones.get(1) {
-                changed |= self.set_value_changed("noTransmitStart2", z2.start as f32);
-                changed |= self.set_value_changed("noTransmitEnd2", z2.end as f32);
-            }
-        }
+        // NOTE: No-transmit zones are NOT synced from radar state here.
+        // They are user-controlled values that we persist and restore.
+        // The radar's $N77 report may not match what we've sent (race condition),
+        // and we want to preserve the user's intent, not overwrite with radar state.
+        // NTZ values are only updated via update_no_transmit_zone() when user changes them.
 
         changed
     }
@@ -314,6 +308,11 @@ impl FurunoReportReceiver {
                 let mode = num_value;
                 self.controller.set_target_analyzer(&mut self.io, auto, mode);
             }
+            // No-transmit zone controls - GUI sets individual angles, we send combined command
+            // Value of -180 means zone is disabled
+            "noTransmitStart1" | "noTransmitEnd1" | "noTransmitStart2" | "noTransmitEnd2" => {
+                self.update_no_transmit_zone(id, num_value);
+            }
             _ => return Err(RadarError::CannotSetControlType(id.to_string())),
         }
 
@@ -389,6 +388,51 @@ impl FurunoReportReceiver {
             Ok(Some(())) => true,
             _ => false,
         }
+    }
+
+    /// Update no-transmit zone from individual control change.
+    /// Reads current state of all 4 values and sends combined blind sector command.
+    /// A value of -1 indicates the zone is disabled.
+    fn update_no_transmit_zone(&mut self, changed_id: &str, new_value: i32) {
+        // Read current values from CONTROL VALUES (not radar state!)
+        // This is critical because when GUI sends 4 updates in sequence,
+        // the control values are already updated but radar state lags behind.
+        let get_control_value = |id: &str| -> i32 {
+            self.info.controls.get(id)
+                .and_then(|c| c.value.map(|v| v as i32))
+                .unwrap_or(-1)
+        };
+
+        // Get current control values, applying the new value for the changed control
+        let z1_start = if changed_id == "noTransmitStart1" { new_value } else { get_control_value("noTransmitStart1") };
+        let z1_end = if changed_id == "noTransmitEnd1" { new_value } else { get_control_value("noTransmitEnd1") };
+        let z2_start = if changed_id == "noTransmitStart2" { new_value } else { get_control_value("noTransmitStart2") };
+        let z2_end = if changed_id == "noTransmitEnd2" { new_value } else { get_control_value("noTransmitEnd2") };
+
+        // -1 means disabled
+        let z1_enabled = z1_start >= 0 && z1_end >= 0;
+        let z2_enabled = z2_start >= 0 && z2_end >= 0;
+
+        log::info!(
+            "{}: Setting blind sector: z1({}, {}-{}) z2({}, {}-{})",
+            self.key,
+            z1_enabled, z1_start, z1_end,
+            z2_enabled, z2_start, z2_end
+        );
+
+        self.controller.set_blind_sector(
+            &mut self.io,
+            z1_enabled,
+            z1_start,
+            z1_end,
+            z2_enabled,
+            z2_start,
+            z2_end,
+        );
+
+        // Update local state
+        self.set_value(changed_id, new_value as f32);
+        self.radars.update(&self.info);
     }
 
     /// Restore persisted installation settings from Application Data API.

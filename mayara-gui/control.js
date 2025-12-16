@@ -488,15 +488,28 @@ function buildDopplerModeControl(control) {
 
 /**
  * No-Transmit Zones control - 2 zone editors with enabled/start/end
- * Furuno Sector Blanking: { zones: [{ enabled, start, end }, { enabled, start, end }] }
+ * Server uses individual controls: noTransmitStart1/End1/Start2/End2
+ * Value of -1 means zone is disabled
  */
 function buildNoTransmitZonesControl(control) {
-  const currentState = getControlValue(control.id) || { zones: [] };
-  const zones = currentState.zones || [];
+  // Read from individual controls (server uses flat model)
+  // -1 means zone is disabled
+  const z1Start = getControlValue('noTransmitStart1') ?? -1;
+  const z1End = getControlValue('noTransmitEnd1') ?? -1;
+  const z2Start = getControlValue('noTransmitStart2') ?? -1;
+  const z2End = getControlValue('noTransmitEnd2') ?? -1;
 
-  // Default zones (2 for Furuno)
-  const zone1 = zones[0] || { enabled: false, start: 0, end: 0 };
-  const zone2 = zones[1] || { enabled: false, start: 0, end: 0 };
+  // -1 means disabled (value < 0)
+  const zone1 = {
+    enabled: z1Start >= 0 && z1End >= 0,
+    start: z1Start < 0 ? 0 : z1Start,
+    end: z1End < 0 ? 0 : z1End
+  };
+  const zone2 = {
+    enabled: z2Start >= 0 && z2End >= 0,
+    start: z2Start < 0 ? 0 : z2Start,
+    end: z2End < 0 ? 0 : z2End
+  };
 
   // Read current zone values from DOM (to avoid stale closure values)
   function getZoneFromDOM(zoneNum) {
@@ -515,11 +528,34 @@ function buildNoTransmitZonesControl(control) {
     const z1 = getZoneFromDOM(1);
     const z2 = getZoneFromDOM(2);
     console.log('NTZ: Sending zones:', { z1, z2 });
-    sendControlValue(control.id, { zones: [z1, z2] });
+
+    // Send individual control values (server has noTransmitStart1/End1/Start2/End2)
+    // When zone is disabled, send -1 for both angles (server convention for disabled)
+    const z1Start = z1.enabled ? z1.start : -1;
+    const z1End = z1.enabled ? z1.end : -1;
+    const z2Start = z2.enabled ? z2.start : -1;
+    const z2End = z2.enabled ? z2.end : -1;
+
+    // Send all four controls using sendControlValue to get pending tracking
+    sendControlValue('noTransmitStart1', z1Start);
+    sendControlValue('noTransmitEnd1', z1End);
+    sendControlValue('noTransmitStart2', z2Start);
+    sendControlValue('noTransmitEnd2', z2End);
   }
 
   function buildZoneEditor(zoneNum, zone) {
     const prefix = `myr_ntz_zone${zoneNum}`;
+
+    // Handler for checkbox change - enable/disable inputs and send
+    function onEnabledChange(e) {
+      const enabled = e.target.checked;
+      const startEl = document.getElementById(`${prefix}_start`);
+      const endEl = document.getElementById(`${prefix}_end`);
+      if (startEl) startEl.disabled = !enabled;
+      if (endEl) endEl.disabled = !enabled;
+      sendCurrentZones();
+    }
+
     return div({ class: "myr_ntz_zone" },
       div({ class: "myr_ntz_zone_header" },
         label({ class: "myr_checkbox_label" },
@@ -527,7 +563,7 @@ function buildNoTransmitZonesControl(control) {
             type: "checkbox",
             id: `${prefix}_enabled`,
             checked: zone.enabled,
-            onchange: () => sendCurrentZones()
+            onchange: onEnabledChange
           }),
           ` Zone ${zoneNum}`
         )
@@ -709,9 +745,14 @@ function updateControlUI(controlId, value) {
     return;
   }
 
-  // Special case for noTransmitZones
+  // Special case for noTransmitZones (compound) or individual NTZ controls
   if (controlId === 'noTransmitZones') {
     updateNoTransmitZonesUI(value);
+    return;
+  }
+  // Handle individual NTZ controls - update the compound UI
+  if (controlId.startsWith('noTransmit')) {
+    updateNoTransmitZoneFromIndividual(controlId, value);
     return;
   }
 
@@ -853,6 +894,47 @@ function updateNoTransmitZonesUI(value) {
     z2End.value = zone2.end;
     z2End.disabled = !zone2.enabled;
   }
+}
+
+/**
+ * Update NTZ UI from individual control updates (noTransmitStart1, etc.)
+ * Server uses flat model with -1 meaning disabled
+ */
+function updateNoTransmitZoneFromIndividual(controlId, value) {
+  // Parse control ID: noTransmitStart1, noTransmitEnd1, noTransmitStart2, noTransmitEnd2
+  const match = controlId.match(/noTransmit(Start|End)(\d)/);
+  if (!match) return;
+
+  const [, type, zoneNum] = match;
+  const prefix = `myr_ntz_zone${zoneNum}`;
+  const isStart = type === 'Start';
+
+  // -1 means zone is disabled (value < 0)
+  const isDisabled = value < 0;
+  const displayValue = isDisabled ? 0 : value;
+
+  // Update the angle input
+  const inputEl = document.getElementById(`${prefix}_${isStart ? 'start' : 'end'}`);
+  if (inputEl) {
+    inputEl.value = displayValue;
+  }
+
+  // Check if both start and end are >= 0 to determine enabled state
+  // Use pending values if available, otherwise fall back to state
+  const startId = `noTransmitStart${zoneNum}`;
+  const endId = `noTransmitEnd${zoneNum}`;
+  const startVal = pendingControls[startId]?.value ?? getControlValue(startId) ?? -1;
+  const endVal = pendingControls[endId]?.value ?? getControlValue(endId) ?? -1;
+  const zoneEnabled = startVal >= 0 && endVal >= 0;
+
+  // Update enabled checkbox and input disabled states
+  const enabledEl = document.getElementById(`${prefix}_enabled`);
+  const startEl = document.getElementById(`${prefix}_start`);
+  const endEl = document.getElementById(`${prefix}_end`);
+
+  if (enabledEl) enabledEl.checked = zoneEnabled;
+  if (startEl) startEl.disabled = !zoneEnabled;
+  if (endEl) endEl.disabled = !zoneEnabled;
 }
 
 function applyStateToUI(state) {
