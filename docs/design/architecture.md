@@ -169,21 +169,25 @@ mayara/
 │           ├── raymarine/          # Async report/data receivers, delegates to core
 │           └── garmin/             # Discovery only (controller integration pending)
 │
-├── mayara-signalk-wasm/            # SignalK WASM plugin
+├── mayara-signalk-wasm/            # SignalK WASM plugin (🚧 needs overhaul)
 │   └── src/
 │       ├── lib.rs                  # WASM entry point, plugin exports
 │       ├── wasm_io.rs              # WasmIoProvider (implements IoProvider)
 │       ├── locator.rs              # Re-exports RadarLocator from mayara-core
-│       ├── radar_provider.rs       # RadarProvider (uses controllers from mayara-core)
+│       ├── radar_provider.rs       # RadarProvider (needs update to unified controllers)
 │       ├── spoke_receiver.rs       # UDP spoke data receiver
 │       └── signalk_ffi.rs          # SignalK FFI bindings
 │
 └── mayara-gui/                     # Shared web GUI assets
-    ├── index.html
-    ├── viewer.html
-    ├── control.html
-    ├── api.js                      # Auto-detects SignalK vs Standalone
-    └── ...
+    ├── index.html                  # Landing page with radar list
+    ├── viewer.html                 # Radar PPI display page
+    ├── control.html                # Radar controls panel
+    ├── mayara.js                   # Main entry, VanJS components
+    ├── viewer.js                   # WebSocket spoke handling, rendering coordination
+    ├── control.js                  # Control UI, API interactions
+    ├── render_webgpu.js            # WebGPU-based radar renderer (GPU-accelerated)
+    ├── api.js                      # REST/WebSocket API client, auto-detects mode
+    └── van-*.js                    # VanJS reactive UI library
 ```
 
 ---
@@ -322,7 +326,7 @@ impl CoreLocatorAdapter {
 
 ## Implementation Status (December 2025)
 
-### ✅ Fully Implemented
+### ✅ Fully Implemented (Server)
 
 | Component | Location | Notes |
 |-----------|----------|-------|
@@ -342,11 +346,21 @@ impl CoreLocatorAdapter {
 | **Guard zones** | mayara-core/guard_zones/ | Zone alerting logic |
 | **TokioIoProvider** | mayara-server/tokio_io.rs | Tokio sockets implementing IoProvider |
 | **CoreLocatorAdapter** | mayara-server/core_locator.rs | Async wrapper for RadarLocator |
-| **WasmIoProvider** | mayara-signalk-wasm/wasm_io.rs | SignalK FFI implementing IoProvider |
-| **SignalK WASM plugin** | mayara-signalk-wasm/ | Working with Furuno |
 | **Standalone server** | mayara-server/ | Full functionality |
-| **Web GUI** | mayara-gui/ | Shared between WASM and Standalone |
+| **Web GUI** | mayara-gui/ | WebGPU rendering, VanJS framework |
 | **Local storage API** | mayara-server/storage.rs | SignalK-compatible applicationData |
+
+### 🚧 Needs Overhaul (WASM)
+
+| Component | Location | Status |
+|-----------|----------|--------|
+| **WasmIoProvider** | mayara-signalk-wasm/wasm_io.rs | Exists but outdated |
+| **SignalK WASM plugin** | mayara-signalk-wasm/ | Needs update to unified controllers |
+
+The WASM plugin exists but requires significant updates to:
+- Integrate with the unified controller architecture in mayara-core
+- Update to current mayara-core API changes
+- Sync with server implementation patterns
 
 ### Server Brand Controller Integration
 
@@ -378,7 +392,11 @@ The server's `brand/` modules still handle:
 
 ## Deployment Modes
 
-### Mode 1: SignalK WASM Plugin
+### Mode 1: SignalK WASM Plugin (🚧 Needs Overhaul)
+
+> **Note:** The WASM plugin exists but is outdated and needs significant updates
+> to integrate with the current unified controller architecture. The diagram below
+> shows the **target architecture** once the overhaul is complete.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
