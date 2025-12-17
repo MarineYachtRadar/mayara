@@ -28,9 +28,16 @@ TODO:
 ### dirkwa
 
 - Find a github org home for the project and rename vereything
-- Refactor WASM to new infrastructure
-- Update documentation to WASM
+- Update GITHUB build infrastructure and NPM publish for new infrastructure
+- Make new SignalK connector for mayara-server standalone.
+
 
 #### diwa done
 
 - Full refactor
+- Refactor WASM to new infrastructure
+- Update documentation to WASM
+
+### unassigned
+- OpenCPN plugin
+- Test more radars for new architecture.
