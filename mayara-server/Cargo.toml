@@ -1,12 +1,12 @@
 [package]
 name = "mayara-server"
-version = "1.0.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.80.1"
 description = "Marine radar server with REST API and WebSocket support"
 license = "Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/mayara-radar/mayara"
+repository = "https://github.com/MarineYachtRadar/mayara-server"
 keywords = ["radar", "marine", "server", "websocket", "rest-api"]
 categories = ["network-programming", "web-programming::http-server"]
 

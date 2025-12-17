@@ -1,10 +1,13 @@
 # Mayara Build System
 #
+# GUI is downloaded from npm (@marineyachtradar/mayara-gui) during build.
+# For GUI development, clone mayara-gui repo as sibling and use 'make dev'.
+#
 # Usage:
 #   make          - Build release with docs (recommended)
 #   make release  - Build release with docs
 #   make debug    - Build debug with docs
-#   make dev      - Build debug with live GUI reload (no embedding)
+#   make dev      - Build debug with live GUI reload (requires ../mayara-gui)
 #   make docs     - Generate rustdoc only
 #   make run      - Build and run server
 #   make run-dev  - Build and run dev server (live GUI reload)

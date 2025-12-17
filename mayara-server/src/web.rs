@@ -85,7 +85,7 @@ const APP_DATA_URI: &str = "/signalk/v1/applicationData/global/{appid}/{version}
 
 #[cfg(not(feature = "dev"))]
 #[derive(RustEmbed, Clone)]
-#[folder = "../mayara-gui/"]
+#[folder = "$OUT_DIR/gui/"]
 struct Assets;
 
 #[cfg(not(feature = "dev"))]
