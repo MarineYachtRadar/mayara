@@ -747,7 +747,7 @@ mod tests {
         }
 
         // Get the writer's inner buffer
-        let buf_vec = {
+        let buf_vec: Vec<u8> = {
             let inner_cursor = writer.writer;
             // Can't easily extract, so re-create the test
             drop(inner_cursor);
