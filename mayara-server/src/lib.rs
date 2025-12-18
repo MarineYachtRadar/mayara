@@ -122,6 +122,7 @@ pub mod navdata;
 pub mod network;
 pub mod protos;
 pub mod radar;
+pub mod recording;
 pub mod settings;
 pub mod storage;
 pub mod tokio_io;

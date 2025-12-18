@@ -4,7 +4,7 @@ use axum::{
     http::{header, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use axum_embed::ServeEmbed;
@@ -33,6 +33,7 @@ use axum_fix::{Message, WebSocket, WebSocketUpgrade};
 
 use mayara_server::{
     radar::{Legend, RadarError, RadarInfo},
+    recording::{RecordingManager, RecordingInfo, RecordingStatus, ActiveRecording, start_recording, build_initial_state},
     storage::{AppDataKey, SharedStorage, create_shared_storage},
     ProtoAssets, Session,
 };
@@ -83,6 +84,18 @@ const INTERFACES_URI: &str = "/v2/api/interfaces";
 // SignalK applicationData API (for settings persistence)
 const APP_DATA_URI: &str = "/signalk/v1/applicationData/global/{appid}/{version}/{*key}";
 
+// Recordings API - File management
+const RECORDINGS_URI: &str = "/v2/api/recordings/files";
+const RECORDING_URI: &str = "/v2/api/recordings/files/{filename}";
+const RECORDING_DOWNLOAD_URI: &str = "/v2/api/recordings/files/{filename}/download";
+const RECORDINGS_DIRS_URI: &str = "/v2/api/recordings/directories";
+const RECORDING_DIR_URI: &str = "/v2/api/recordings/directories/{name}";
+// Recordings API - Recording control
+const RECORD_RADARS_URI: &str = "/v2/api/recordings/radars";
+const RECORD_START_URI: &str = "/v2/api/recordings/record/start";
+const RECORD_STOP_URI: &str = "/v2/api/recordings/record/stop";
+const RECORD_STATUS_URI: &str = "/v2/api/recordings/record/status";
+
 #[cfg(not(feature = "dev"))]
 #[derive(RustEmbed, Clone)]
 #[folder = "$OUT_DIR/gui/"]
@@ -110,6 +123,12 @@ pub enum WebError {
 /// Shared RadarEngine for all feature processors (ARPA, GuardZones, Trails, DualRange)
 type SharedEngine = Arc<RwLock<RadarEngine>>;
 
+/// Shared RecordingManager for recordings API
+type SharedRecordingManager = Arc<RwLock<RecordingManager>>;
+
+/// Shared active recording state
+type SharedActiveRecording = Arc<RwLock<Option<ActiveRecording>>>;
+
 #[derive(Clone)]
 pub struct Web {
     session: Session,
@@ -118,6 +137,10 @@ pub struct Web {
     engine: SharedEngine,
     /// Local storage for applicationData API
     storage: SharedStorage,
+    /// Recording file manager
+    recording_manager: SharedRecordingManager,
+    /// Active recording (if any)
+    active_recording: SharedActiveRecording,
 }
 
 impl Web {
@@ -129,6 +152,8 @@ impl Web {
             shutdown_tx,
             engine: Arc::new(RwLock::new(RadarEngine::new())),
             storage: create_shared_storage(),
+            recording_manager: Arc::new(RwLock::new(RecordingManager::new())),
+            active_recording: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -207,6 +232,17 @@ impl Web {
             .route(INTERFACES_URI, get(get_interfaces))
             // SignalK applicationData API
             .route(APP_DATA_URI, get(get_app_data).put(put_app_data).delete(delete_app_data))
+            // Recordings API - File management
+            .route(RECORDINGS_URI, get(list_recordings))
+            .route(RECORDING_URI, get(get_recording).delete(delete_recording).put(update_recording))
+            .route(RECORDING_DOWNLOAD_URI, get(download_recording))
+            .route(RECORDINGS_DIRS_URI, get(list_directories).post(create_directory))
+            .route(RECORDING_DIR_URI, delete(delete_directory))
+            // Recordings API - Recording control
+            .route(RECORD_RADARS_URI, get(get_recordable_radars))
+            .route(RECORD_START_URI, post(start_recording_handler))
+            .route(RECORD_STOP_URI, post(stop_recording_handler))
+            .route(RECORD_STATUS_URI, get(get_recording_status))
             // Apply no-cache middleware to all API routes
             .layer(middleware::from_fn(no_cache_middleware))
             // Static assets (no middleware - can be cached)
@@ -1624,4 +1660,399 @@ async fn dual_range_spokes_stream(
             }
         }
     }
+}
+
+// ============================================================================
+// Recordings API handlers
+// ============================================================================
+
+/// Query parameters for listing recordings
+#[derive(Debug, Deserialize)]
+struct RecordingsQuery {
+    #[serde(rename = "dir")]
+    subdirectory: Option<String>,
+}
+
+/// Request body for updating a recording
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateRecordingRequest {
+    new_name: Option<String>,
+    directory: Option<String>,
+}
+
+/// Request body for creating a directory
+#[derive(Debug, Deserialize)]
+struct CreateDirectoryRequest {
+    name: String,
+}
+
+/// Response for recordings list
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingsResponse {
+    recordings: Vec<RecordingInfo>,
+    total_count: usize,
+    total_size: u64,
+}
+
+/// GET /v2/api/recordings/files - List recordings
+#[debug_handler]
+async fn list_recordings(
+    State(state): State<Web>,
+    axum::extract::Query(query): axum::extract::Query<RecordingsQuery>,
+) -> Response {
+    debug!("GET recordings list, dir={:?}", query.subdirectory);
+
+    let manager = state.recording_manager.read().unwrap();
+    let recordings = manager.list_recordings(query.subdirectory.as_deref());
+    let total_count = recordings.len();
+    let total_size: u64 = recordings.iter().map(|r| r.size).sum();
+
+    Json(RecordingsResponse {
+        recordings,
+        total_count,
+        total_size,
+    })
+    .into_response()
+}
+
+/// GET /v2/api/recordings/files/{filename} - Get recording info
+#[debug_handler]
+async fn get_recording(
+    State(state): State<Web>,
+    Path(filename): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RecordingsQuery>,
+) -> Response {
+    debug!("GET recording info: {}", filename);
+
+    let manager = state.recording_manager.read().unwrap();
+    match manager.get_recording(&filename, query.subdirectory.as_deref()) {
+        Some(info) => Json(info).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// DELETE /v2/api/recordings/files/{filename} - Delete a recording
+#[debug_handler]
+async fn delete_recording(
+    State(state): State<Web>,
+    Path(filename): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RecordingsQuery>,
+) -> Response {
+    debug!("DELETE recording: {}", filename);
+
+    let manager = state.recording_manager.read().unwrap();
+    match manager.delete_recording(&filename, query.subdirectory.as_deref()) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// PUT /v2/api/recordings/files/{filename} - Rename or move a recording
+#[debug_handler]
+async fn update_recording(
+    State(state): State<Web>,
+    Path(filename): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RecordingsQuery>,
+    Json(request): Json<UpdateRecordingRequest>,
+) -> Response {
+    debug!("PUT recording: {} -> {:?}", filename, request);
+
+    let manager = state.recording_manager.read().unwrap();
+    let subdirectory = query.subdirectory.as_deref();
+
+    // Handle rename
+    if let Some(new_name) = request.new_name {
+        match manager.rename_recording(&filename, &new_name, subdirectory) {
+            Ok(()) => {}
+            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        }
+    }
+
+    // Handle move to different directory
+    if let Some(new_directory) = request.directory {
+        let new_dir = if new_directory.is_empty() {
+            None
+        } else {
+            Some(new_directory.as_str())
+        };
+        match manager.move_recording(&filename, subdirectory, new_dir) {
+            Ok(()) => {}
+            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        }
+    }
+
+    StatusCode::OK.into_response()
+}
+
+/// GET /v2/api/recordings/files/{filename}/download - Download a recording file
+#[debug_handler]
+async fn download_recording(
+    State(state): State<Web>,
+    Path(filename): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RecordingsQuery>,
+) -> Response {
+    debug!("GET download recording: {}", filename);
+
+    let manager = state.recording_manager.read().unwrap();
+    let path = manager.get_recording_path(&filename, query.subdirectory.as_deref());
+
+    if !path.exists() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    // Read the file
+    match std::fs::read(&path) {
+        Ok(data) => {
+            let headers = [
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    &format!("attachment; filename=\"{}\"", filename),
+                ),
+            ];
+            (headers, data).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// GET /v2/api/recordings/directories - List directories
+#[debug_handler]
+async fn list_directories(State(state): State<Web>) -> Response {
+    debug!("GET recordings directories");
+
+    let manager = state.recording_manager.read().unwrap();
+    let dirs = manager.list_directories();
+
+    Json(dirs).into_response()
+}
+
+/// POST /v2/api/recordings/directories - Create a directory
+#[debug_handler]
+async fn create_directory(
+    State(state): State<Web>,
+    Json(request): Json<CreateDirectoryRequest>,
+) -> Response {
+    debug!("POST create directory: {}", request.name);
+
+    let manager = state.recording_manager.read().unwrap();
+    match manager.create_directory(&request.name) {
+        Ok(()) => StatusCode::CREATED.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// DELETE /v2/api/recordings/directories/{name} - Delete a directory
+#[debug_handler]
+async fn delete_directory(
+    State(state): State<Web>,
+    Path(name): Path<String>,
+) -> Response {
+    debug!("DELETE directory: {}", name);
+
+    let manager = state.recording_manager.read().unwrap();
+    match manager.delete_directory(&name) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+// ============================================================================
+// Recording Control Endpoints
+// ============================================================================
+
+/// Info about a recordable radar
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordableRadar {
+    id: String,
+    name: String,
+    brand: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+}
+
+/// GET /v2/api/recordings/radars - List radars available for recording
+#[debug_handler]
+async fn get_recordable_radars(State(state): State<Web>) -> Response {
+    debug!("GET recordable radars");
+
+    let session = state.session.read().unwrap();
+    let radars = match &session.radars {
+        Some(r) => r,
+        None => return Json(Vec::<RecordableRadar>::new()).into_response(),
+    };
+
+    let mut result = Vec::new();
+    for info in radars.get_active() {
+        let radar_id = format!("radar-{}", info.id);
+        result.push(RecordableRadar {
+            id: radar_id,
+            name: info.controls.user_name(),
+            brand: format!("{:?}", info.brand),
+            model: info.controls.model_name(),
+        });
+    }
+
+    Json(result).into_response()
+}
+
+/// Request body for starting a recording
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartRecordingRequest {
+    radar_id: String,
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(default)]
+    subdirectory: Option<String>,
+}
+
+/// POST /v2/api/recordings/record/start - Start recording from a radar
+#[debug_handler]
+async fn start_recording_handler(
+    State(state): State<Web>,
+    Json(request): Json<StartRecordingRequest>,
+) -> Response {
+    debug!("POST start recording for radar: {}", request.radar_id);
+
+    // Check if already recording
+    {
+        let active = state.active_recording.read().unwrap();
+        if let Some(ref recording) = *active {
+            if recording.is_running() {
+                return (
+                    StatusCode::CONFLICT,
+                    format!("Already recording radar {}", recording.radar_id()),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Get radar info
+    let (radar_info, capabilities_json) = {
+        let session = state.session.read().unwrap();
+        let radars = match &session.radars {
+            Some(r) => r,
+            None => {
+                return (StatusCode::SERVICE_UNAVAILABLE, "No radars available").into_response()
+            }
+        };
+
+        let radar = match radars.get_by_id(&request.radar_id) {
+            Some(r) => r,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("Radar not found: {}", request.radar_id),
+                )
+                    .into_response()
+            }
+        };
+
+        // Build capabilities JSON
+        let core_brand = to_core_brand(radar.brand);
+        let model_name = radar.controls.model_name();
+        let model_info = model_name
+            .as_deref()
+            .and_then(|name| models::get_model(core_brand, name))
+            .unwrap_or(&models::UNKNOWN_MODEL);
+
+        // Declare supported features for recording
+        let mut supported_features = vec![
+            SupportedFeature::Arpa,
+            SupportedFeature::GuardZones,
+            SupportedFeature::Trails,
+        ];
+        if model_info.has_dual_range {
+            supported_features.push(SupportedFeature::DualRange);
+        }
+
+        let capabilities = build_capabilities_from_model_with_key(
+            model_info,
+            &request.radar_id,
+            Some(&radar.key()),
+            supported_features,
+            radar.spokes_per_revolution,
+            radar.max_spoke_len,
+        );
+
+        let capabilities_json = serde_json::to_vec(&capabilities).unwrap_or_else(|_| b"{}".to_vec());
+
+        (radar, capabilities_json)
+    };
+
+    // Build initial state JSON
+    let initial_state_json = build_initial_state(&radar_info);
+
+    // Start recording
+    match start_recording(
+        &radar_info,
+        &request.radar_id,
+        request.filename.as_deref(),
+        request.subdirectory.as_deref(),
+        &capabilities_json,
+        &initial_state_json,
+    )
+    .await
+    {
+        Ok(active) => {
+            let status = active.status();
+            // Store the active recording
+            {
+                let mut recording = state.active_recording.write().unwrap();
+                *recording = Some(active);
+            }
+            (StatusCode::OK, Json(status)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// POST /v2/api/recordings/record/stop - Stop the current recording
+#[debug_handler]
+async fn stop_recording_handler(State(state): State<Web>) -> Response {
+    debug!("POST stop recording");
+
+    let mut active = state.active_recording.write().unwrap();
+    match active.take() {
+        Some(recording) => {
+            recording.stop();
+            // Return final status
+            let status = RecordingStatus {
+                state: "stopped".to_string(),
+                radar_id: Some(recording.radar_id().to_string()),
+                filename: Some(recording.filename().to_string()),
+                ..Default::default()
+            };
+            (StatusCode::OK, Json(status)).into_response()
+        }
+        None => (StatusCode::OK, Json(RecordingStatus::default())).into_response(),
+    }
+}
+
+/// GET /v2/api/recordings/record/status - Get current recording status
+#[debug_handler]
+async fn get_recording_status(State(state): State<Web>) -> Response {
+    debug!("GET recording status");
+
+    let active = state.active_recording.read().unwrap();
+    let status = match &*active {
+        Some(recording) if recording.is_running() => recording.status(),
+        Some(recording) => {
+            // Recording finished
+            RecordingStatus {
+                state: "finished".to_string(),
+                radar_id: Some(recording.radar_id().to_string()),
+                filename: Some(recording.filename().to_string()),
+                ..Default::default()
+            }
+        }
+        None => RecordingStatus::default(),
+    };
+
+    Json(status).into_response()
 }
