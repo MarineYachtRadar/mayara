@@ -278,6 +278,10 @@ mod tests {
             pixel_values: 64,
             serial_number: Some("12345".into()),
             nic_address: None,
+            suffix: None,
+            data_address: None,
+            report_address: None,
+            send_address: None,
         };
 
         let caps = build_capabilities(&discovery, "1", vec![]);
@@ -305,6 +309,10 @@ mod tests {
             pixel_values: 64,
             serial_number: None,
             nic_address: None,
+            suffix: None,
+            data_address: None,
+            report_address: None,
+            send_address: None,
         };
 
         let caps = build_capabilities(
