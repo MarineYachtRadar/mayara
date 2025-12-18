@@ -28,6 +28,7 @@ TODO:
 ### dirkwa
 
 - Test HALO radar @Kees/PI4
+  - Get GUI working, find all race conditions etc. 
   - Update protocol
   - Verify and extend radar model database in core.
   - Verify and extend tests
@@ -50,3 +51,8 @@ TODO:
 ### unassigned
 - OpenCPN plugin
 - Test more radars for new architecture.
+
+
+### delme
+./target/debug/mayara-server -p 6502 -v 2>&1 | grep -E "report 01|status|power"
+
