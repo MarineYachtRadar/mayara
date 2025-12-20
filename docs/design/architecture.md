@@ -1792,6 +1792,85 @@ throttling. For now, explicit configuration is required for SignalK integration.
 
 ---
 
+## OpenCPN Plugin Integration
+
+### Overview
+
+The `mayara-server-opencpn-plugin` is a C++ plugin for OpenCPN that connects
+to mayara-server via the same REST/WebSocket API used by the SignalK plugin.
+This provides radar display capabilities within OpenCPN without requiring
+the radar_pi plugin's direct protocol implementations.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         OpenCPN                                  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              mayara-server-opencpn-plugin               │    │
+│  │  ┌──────────────┐  ┌─────────────┐  ┌───────────────┐  │    │
+│  │  │ MayaraClient │  │SpokeReceiver│  │ RadarRenderer │  │    │
+│  │  │   (REST)     │  │    (WS)     │  │   (OpenGL)    │  │    │
+│  │  └──────┬───────┘  └──────┬──────┘  └───────────────┘  │    │
+│  └─────────┼─────────────────┼────────────────────────────┘    │
+│            │                 │                                   │
+└────────────┼─────────────────┼───────────────────────────────────┘
+             │ HTTP            │ WebSocket
+             │                 │ (protobuf)
+┌────────────▼─────────────────▼───────────────────────────────────┐
+│                      mayara-server                                │
+│                     localhost:6502                                │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                      RadarEngine                             │ │
+│  │  ┌─────────┐ ┌─────────┐ ┌──────────┐ ┌─────────┐          │ │
+│  │  │ Furuno  │ │ Navico  │ │Raymarine │ │ Garmin  │          │ │
+│  │  └────┬────┘ └────┬────┘ └────┬─────┘ └────┬────┘          │ │
+│  └───────┼───────────┼───────────┼────────────┼────────────────┘ │
+└──────────┼───────────┼───────────┼────────────┼──────────────────┘
+           │           │           │            │
+      ┌────▼───┐  ┌────▼───┐  ┌────▼────┐  ┌────▼───┐
+      │ DRS4D  │  │ HALO   │  │ Quantum │  │  xHD   │
+      └────────┘  └────────┘  └─────────┘  └────────┘
+```
+
+### API Usage
+
+The plugin uses the same endpoints as the SignalK plugin:
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/v2/api/radars` | Discover radars |
+| GET | `/v2/api/radars/{id}/capabilities` | Get radar specs |
+| GET | `/v2/api/radars/{id}/state` | Get current settings |
+| PUT | `/v2/api/radars/{id}/controls/{ctrl}` | Set control value |
+| WS | `/v2/api/radars/{id}/spokes` | Binary spoke stream |
+| GET | `/v2/api/radars/{id}/targets` | Get ARPA targets |
+
+### Display Modes
+
+1. **Chart Overlay**: Renders radar on OpenCPN's chart canvas using
+   `RenderGLOverlayMultiCanvas()` callback with OpenGL shaders
+
+2. **PPI Window**: Separate `wxGLCanvas` window with traditional
+   radar PPI display, range rings, and heading marker
+
+### Benefits over radar_pi
+
+| Aspect | radar_pi | mayara-server plugin |
+|--------|----------|---------------------|
+| Protocol handling | In plugin | In server |
+| Multi-client | No | Yes (multiple UIs) |
+| Platform code | Per radar brand | Single API client |
+| Updates | Plugin rebuild | Server update only |
+| Remote radar | No | Yes (server can run elsewhere) |
+
+### Source Repository
+
+- Plugin: https://github.com/MarineYachtRadar/mayara-server-opencpn-plugin
+- Documentation: Included in plugin as AsciiDoc manual
+
+---
+
 ## Related Documents
 
 - [Forked Dependencies](forked-dependencies.md) - Why we use forked versions of nmea-parser and tungstenite
