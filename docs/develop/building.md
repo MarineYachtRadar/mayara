@@ -141,6 +141,51 @@ cargo build -p mayara-server --features dev,garmin
 
 ---
 
+## Runtime Options
+
+### Brand Restriction (`--brand`)
+
+In production, mayara-server discovers radars from all supported brands. For development or testing with a specific radar, use the `--brand` flag to limit discovery to a single brand:
+
+```bash
+# Only discover Furuno radars
+./mayara-server --brand furuno
+
+# Only discover Navico radars
+./mayara-server -b navico
+```
+
+**Available brands:**
+
+| Brand | Flag value | Notes |
+|-------|------------|-------|
+| Furuno | `furuno` | Uses 172.31.x.x subnet |
+| Navico | `navico` | Includes Simrad, B&G, Lowrance |
+| Raymarine | `raymarine` | |
+| Garmin | `garmin` | Requires `--features garmin` at compile time |
+
+Without `--brand`, all compiled-in brands are discovered. This is the production default.
+
+### Other Useful Options
+
+```bash
+# Specify HTTP port (default: 6502)
+./mayara-server -p 8080
+
+# Limit to specific network interface
+./mayara-server --interface eth0
+
+# Verbose logging
+./mayara-server -v      # info + warn
+./mayara-server -vv     # debug
+./mayara-server -vvv    # trace
+
+# Multi-radar mode (keep looking after first radar found)
+./mayara-server --multiple-radar
+```
+
+---
+
 ## Debugging Builds
 
 ### Verbose Output

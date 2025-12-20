@@ -293,12 +293,28 @@ use crate::Session;
 /// This routes `RadarDiscovery` from the core locator to the brand's
 /// `process_discovery` function which creates a `RadarInfo` and spawns
 /// the necessary subsystems.
+///
+/// If `--brand` was specified, only radars of that brand will be processed.
 pub fn dispatch_discovery(
     session: Session,
     discovery: &RadarDiscovery,
     radars: &SharedRadars,
     subsys: &SubsystemHandle,
 ) -> Result<(), std::io::Error> {
+    // Check brand filter - if --brand was specified, only process matching brands
+    if let Some(allowed_brand) = session.read().unwrap().args.brand {
+        let discovery_brand = core_brand_to_server_brand(discovery.brand);
+        if discovery_brand != allowed_brand {
+            log::debug!(
+                "Ignoring {} radar '{}' (--brand {} specified)",
+                discovery.brand,
+                discovery.name,
+                allowed_brand
+            );
+            return Ok(());
+        }
+    }
+
     // Determine NIC address for this radar
     let radar_addr = parse_address(&discovery.address);
     let nic_addr = radar_addr.map(|a| get_nic_for_radar(&a)).unwrap_or(Ipv4Addr::UNSPECIFIED);
