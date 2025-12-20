@@ -2,6 +2,8 @@
 
 This guide helps new developers understand the codebase structure and get up and running quickly.
 
+> **Quick Build Guide:** If you just want to build and run, see **[Building Mayara Server](building.md)** for the essential commands.
+
 ---
 
 ## Prerequisites
@@ -328,6 +330,7 @@ For protocol and control logic testing, you can use the mock IoProvider pattern 
 
 ## Next Steps
 
+- Read [building.md](building.md) for build commands and troubleshooting
 - Read [architecture.md](../design/architecture.md) for the full architectural picture
 - Read [adding_radar_models.md](adding_radar_models.md) when adding support for new radar hardware
 - Explore the codebase starting from `mayara-core/src/lib.rs`
