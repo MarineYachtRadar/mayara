@@ -56,6 +56,10 @@ pub fn new(session: Session, model: Option<&str>) -> SharedControls {
         "operatingHours".to_string(),
         control_factory::operating_hours_control(),
     );
+    controls.insert(
+        "transmitHours".to_string(),
+        control_factory::transmit_hours_control(),
+    );
 
     controls.insert(
         "rotationSpeed".to_string(),

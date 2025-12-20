@@ -260,11 +260,17 @@ Status values:
 | 1 | 1 | Command (0xC4) |
 | 2 | 1 | Model byte |
 | 3 | 31 | Unknown |
-| 34 | 4 | Operating hours |
-| 38 | 20 | Unknown |
+| 34 | 4 | Operating hours (total power-on time in hours) |
+| 38 | 4 | Unknown (always 0x01) |
+| 42 | 4 | Transmit seconds (total transmit time in seconds) |
+| 46 | 12 | Unknown |
 | 58 | 32 | Firmware date (UTF-16LE) |
 | 90 | 32 | Firmware time (UTF-16LE) |
 | 122 | 7 | Unknown |
+
+**Example values:**
+- Operating hours at offset 34: `81 0B 00 00` = 2945 hours
+- Transmit seconds at offset 42: `60 2C 0A 00` = 666,720 seconds = 185.2 hours
 
 Model bytes:
 | Value | Model |

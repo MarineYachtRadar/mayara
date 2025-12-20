@@ -363,12 +363,14 @@ pub struct Report03 {
     pub what: u8,               // 0x03
     pub command: u8,            // 0xC4
     pub model: u8,              // Model byte (0x00=HALO, 0x01=4G, 0x08=3G, 0x0E/0x0F=BR24)
-    _u00: [u8; 31],
-    pub hours: [u8; 4],         // Operating hours
-    _u01: [u8; 20],
-    pub firmware_date: [u8; 32], // Wide chars (UTF-16)
-    pub firmware_time: [u8; 32], // Wide chars (UTF-16)
-    _u02: [u8; 7],
+    _u00: [u8; 31],             // 3..34
+    pub hours: [u8; 4],         // 34..38 Operating hours (total power-on time)
+    _u01: [u8; 4],              // 38..42 Unknown (always 0x01)
+    pub transmit_seconds: [u8; 4], // 42..46 Transmit seconds (total TX time)
+    _u02: [u8; 12],             // 46..58 Unknown
+    pub firmware_date: [u8; 32], // 58..90 Wide chars (UTF-16)
+    pub firmware_time: [u8; 32], // 90..122 Wide chars (UTF-16)
+    _u03: [u8; 7],              // 122..129 Unknown
 }
 
 pub const REPORT_03_SIZE: usize = 129;
@@ -675,6 +677,7 @@ pub struct ParsedModelInfo {
     pub model: Model,
     pub model_byte: u8,
     pub operating_hours: u32,
+    pub transmit_hours: f64,
     pub firmware_date: String,
     pub firmware_time: String,
 }
@@ -1048,10 +1051,15 @@ pub fn parse_report_03(data: &[u8]) -> Result<ParsedModelInfo, ParseError> {
     let firmware_date = wide_string_to_string(&report.firmware_date);
     let firmware_time = wide_string_to_string(&report.firmware_time);
 
+    // Transmit time is in seconds, convert to hours
+    let transmit_seconds = u32::from_le_bytes(report.transmit_seconds);
+    let transmit_hours = transmit_seconds as f64 / 3600.0;
+
     Ok(ParsedModelInfo {
         model: Model::from_byte(report.model),
         model_byte: report.model,
         operating_hours: u32::from_le_bytes(report.hours),
+        transmit_hours,
         firmware_date,
         firmware_time,
     })
