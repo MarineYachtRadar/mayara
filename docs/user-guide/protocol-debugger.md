@@ -17,7 +17,9 @@ The Protocol Debugger is a development tool for analyzing and reverse-engineerin
 | chart plotter → radar | ❌ No | Direct connection, bypasses us |
 | radar → chart plotter | ⚠️ Partial | Multicast traffic visible, TCP not visible |
 
-**Why this matters:** When you press a button on your Garmin/Simrad/Furuno MFD, the command goes directly from the chart plotter to the radar. We don't see the command, but for multicast protocols (Navico, Garmin, Raymarine) we can see the radar's status broadcasts change as a result.
+**Why this matters:** When you press a button on your Garmin/Simrad/Furuno MFD, the command goes directly from the chart plotter to the radar. We don't see the command, but:
+- For **multicast protocols** (Navico, Garmin, Raymarine): We see the radar's status broadcasts change
+- For **Furuno (TCP)**: We poll the radar every 2 seconds and see the updated state in the response
 
 ### Capturing Chart Plotter Commands
 
@@ -74,13 +76,34 @@ Shows all connected radars with:
 ### Event Timeline
 
 Real-time scrollable list of network events:
-- **Blue**: Data sent (TCP/UDP)
-- **Green**: Data received
-- **Orange**: Socket operations (connect, bind, close)
-- **Purple**: State changes
-- **Red/Orange**: Unknown/unparseable messages
+- **Blue (SEND)**: Data sent (TCP/UDP)
+- **Green (RECV)**: Data received
+- **Orange (SOCK)**: Socket operations (connect, bind, close)
+- **Purple (STATE)**: State changes
+- **Red/Orange (UNK)**: Unknown/unparseable messages
 
 Click an event to see details in the Packet View.
+
+### Filtering
+
+Use the filter controls to narrow down events:
+- **Text filter**: Search in radar ID, brand, command IDs, and raw ASCII
+- **Radar filter**: Show events from a specific radar (populated automatically)
+- **Type filter**:
+  - All Types
+  - Data (network traffic)
+  - Socket Ops (connect, bind, close)
+  - State Changes
+  - **Unknown Only** - Shows only unparsed messages (useful for reverse engineering)
+
+### Stats Bar
+
+The bottom stats bar shows:
+- **Total**: All events since session start
+- **Buffer**: Events currently in memory (max 10,000)
+- **Data**: Network traffic events
+- **State**: State change events
+- **Unknown**: Unparsed messages (highlighted in orange if > 0)
 
 ### Packet View
 
@@ -166,8 +189,9 @@ For multicast protocols:
 - The debugger correlates this with recent commands
 
 For TCP protocols (Furuno):
-- If the chart plotter triggered it, you won't see the command
-- Use `tcpdump` to capture traffic (see below)
+- We poll the radar every 2 seconds for current state
+- You'll see the state change in the response (e.g., `$N63` for gain)
+- To see the actual command from the chart plotter, use `tcpdump`
 
 ### Step 4: Record and Export
 
@@ -272,14 +296,24 @@ Files can be loaded by any developer to replay and analyze.
 - Verify `--features dev` was used at compile time
 - Check that radars are connected and transmitting
 - Look at the Radar Status card for connection state
+- Check the browser console for WebSocket errors
+- Try refreshing the page (the debug panel reconnects automatically)
 
 ### "Can't see chart plotter commands"
 
-This is expected. Use `tcpdump` for full traffic capture.
+This is expected for direct commands. However:
+- For Furuno: State changes are visible via polling every 2 seconds
+- For Navico/Raymarine/Garmin: Status broadcasts show the effect
+- Use `tcpdump` to capture the actual commands
 
 ### "Decoded fields are empty"
 
-The decoder may not recognize the message format. The raw hex is always available. Consider contributing to the protocol documentation.
+The decoder may not recognize the message format. The raw hex is always available. Use the "Unknown Only" filter to find these messages. Consider contributing to the protocol documentation.
+
+### "Radar not appearing in filter dropdown"
+
+- Wait for some events to arrive (the dropdown populates from event data)
+- Check that the radar is actually connected
 
 ### "Recording file is empty"
 
@@ -294,8 +328,10 @@ The decoder may not recognize the message format. The raw hex is always availabl
 ### Furuno
 
 - Uses ASCII commands over TCP (e.g., `$S69,50\r\n`)
-- Commands start with `$S` (set), `$R` (read), `$N` (notification)
-- The decoder recognizes common commands like gain, sea, rain
+- Commands start with `$S` (set), `$R` (request), `$N` (notification/response)
+- The decoder recognizes common commands like gain (63), sea (64), rain (65)
+- State is polled every 2 seconds to sync changes from chart plotter
+- You'll see `$R63` (request gain) followed by `$N63,auto,value,...` (response)
 
 ### Navico (Simrad, B&G, Lowrance)
 
