@@ -207,7 +207,7 @@ pub struct DebugEvent {
 
 /// Event payload - network data, socket operation, or state change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "eventType", rename_all = "camelCase")]
 pub enum DebugEventPayload {
     /// Network data was sent or received.
     #[serde(rename_all = "camelCase")]

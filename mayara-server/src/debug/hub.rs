@@ -132,9 +132,16 @@ impl DebugHub {
         // Broadcast to real-time subscribers (ignore if no subscribers)
         let subscribers = self.event_tx.receiver_count();
         let result = self.event_tx.send(event.clone());
-        log::trace!(
-            "[DebugHub] Event #{} broadcast to {} subscribers: {:?}",
-            event.id, subscribers, result.is_ok()
+        log::debug!(
+            "[DebugHub] Event #{} (type: {}) broadcast to {} subscribers: {:?}",
+            event.id,
+            match &event.payload {
+                DebugEventPayload::Data { direction, .. } => format!("data {:?}", direction),
+                DebugEventPayload::SocketOp { operation, .. } => format!("socket {:?}", operation),
+                DebugEventPayload::StateChange { control_id, .. } => format!("state {}", control_id),
+            },
+            subscribers,
+            result.is_ok()
         );
 
         // Store in ring buffer

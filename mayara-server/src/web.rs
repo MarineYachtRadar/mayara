@@ -2577,15 +2577,18 @@ mod debug_handlers {
                     }
                     match event {
                         Ok(event) => {
+                            debug!("Debug WS: received event #{} for radar {}", event.id, event.radar_id);
                             // Apply radar filter
                             if let Some(ref filter) = radar_filter {
                                 if &event.radar_id != filter {
+                                    debug!("Debug WS: filtered out event (filter: {})", filter);
                                     continue;
                                 }
                             }
                             let msg = DebugServerMessage::Event(event);
                             if let Ok(json) = serde_json::to_string(&msg) {
                                 if socket.send(Message::Text(json.into())).await.is_err() {
+                                    debug!("Debug WS: failed to send event");
                                     break;
                                 }
                             }
@@ -2703,6 +2706,47 @@ mod debug_handlers {
             Err(e) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use mayara_server::debug::{DebugEventPayload, IoDirection, ProtocolType, EventSource};
+
+        #[test]
+        fn test_debug_server_message_serialization() {
+            // Test that DebugServerMessage serializes correctly with distinct type fields
+            let event = DebugEvent {
+                id: 123,
+                timestamp: 1000,
+                radar_id: "radar-1".to_string(),
+                brand: "furuno".to_string(),
+                source: EventSource::IoProvider,
+                payload: DebugEventPayload::Data {
+                    direction: IoDirection::Recv,
+                    protocol: ProtocolType::Tcp,
+                    local_addr: None,
+                    remote_addr: "172.31.1.4".to_string(),
+                    remote_port: 10050,
+                    raw_hex: "24 4e 36 33".to_string(),
+                    raw_ascii: "$N63".to_string(),
+                    decoded: None,
+                    length: 4,
+                },
+            };
+
+            let msg = DebugServerMessage::Event(event);
+            let json = serde_json::to_string_pretty(&msg).unwrap();
+
+            // Verify both type fields are present and distinct
+            assert!(json.contains(r#""type": "event""#), "Should have WebSocket message type 'event'");
+            assert!(json.contains(r#""eventType": "data""#), "Should have payload eventType 'data'");
+
+            // Verify parsed type field is correct
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.get("type").and_then(|v| v.as_str()), Some("event"));
+            assert_eq!(parsed.get("eventType").and_then(|v| v.as_str()), Some("data"));
         }
     }
 }
