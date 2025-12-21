@@ -10,7 +10,7 @@ use mayara_core::io::{IoError, IoProvider, TcpSocketHandle, UdpSocketHandle};
 
 use super::decoders::ProtocolDecoder;
 use super::hub::DebugHub;
-use super::{EventSource, IoDirection, ProtocolType, SocketOperation};
+use super::{DecodedMessage, EventSource, IoDirection, ProtocolType, SocketOperation};
 
 // =============================================================================
 // DebugIoProvider
@@ -41,6 +41,9 @@ pub struct DebugIoProvider<T: IoProvider> {
 
     /// Track UDP socket info.
     udp_info: HashMap<i32, UdpSocketInfo>,
+
+    /// Track control values for state change detection.
+    control_state: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Default)]
@@ -66,6 +69,7 @@ impl<T: IoProvider> DebugIoProvider<T> {
             decoder,
             tcp_destinations: HashMap::new(),
             udp_info: HashMap::new(),
+            control_state: HashMap::new(),
         }
     }
 
@@ -81,7 +85,7 @@ impl<T: IoProvider> DebugIoProvider<T> {
 
     /// Submit a data event to the hub.
     fn submit_data(
-        &self,
+        &mut self,
         direction: IoDirection,
         protocol: ProtocolType,
         remote_addr: &str,
@@ -93,12 +97,131 @@ impl<T: IoProvider> DebugIoProvider<T> {
             self.radar_id, self.brand, direction, remote_addr, remote_port, data.len()
         );
         let decoded = self.decoder.decode(data, direction);
+
+        // Check for state changes from received responses
+        if direction == IoDirection::Recv {
+            self.check_state_changes(&decoded);
+        }
+
         let event = self
             .hub
             .event_builder(&self.radar_id, &self.brand)
             .source(EventSource::IoProvider)
             .data(direction, protocol, remote_addr, remote_port, data, Some(decoded));
         self.hub.submit(event);
+    }
+
+    /// Check for state changes in a decoded message and emit StateChange events.
+    fn check_state_changes(&mut self, decoded: &DecodedMessage) {
+        // Extract control values from decoded message
+        let control_values = self.extract_control_values(decoded);
+
+        for (control_id, new_value) in control_values {
+            // Compare with previous state
+            let changed = match self.control_state.get(&control_id) {
+                Some(old_value) => old_value != &new_value,
+                None => true, // First time seeing this control
+            };
+
+            if changed {
+                let old_value = self
+                    .control_state
+                    .insert(control_id.clone(), new_value.clone())
+                    .unwrap_or(serde_json::Value::Null);
+
+                // Only emit if we had a previous value (not first observation)
+                if old_value != serde_json::Value::Null {
+                    log::debug!(
+                        "[DebugIoProvider] State change: {} {} -> {}",
+                        control_id, old_value, new_value
+                    );
+
+                    let event = self
+                        .hub
+                        .event_builder(&self.radar_id, &self.brand)
+                        .source(EventSource::IoProvider)
+                        .state_change(&control_id, old_value, new_value, None);
+                    self.hub.submit(event);
+                }
+            }
+        }
+    }
+
+    /// Extract control values from a decoded message.
+    fn extract_control_values(&self, decoded: &DecodedMessage) -> Vec<(String, serde_json::Value)> {
+        match decoded {
+            DecodedMessage::Furuno {
+                message_type,
+                command_id,
+                fields,
+                ..
+            } => {
+                // Only process responses ($N messages)
+                if message_type != "response" {
+                    return Vec::new();
+                }
+
+                let cmd = command_id.as_deref().unwrap_or("");
+                // Command IDs are like "N63", "N64", etc.
+                let cmd_num = cmd.trim_start_matches('N');
+
+                match cmd_num {
+                    // Gain (0x63)
+                    "63" => {
+                        let auto = fields.get("auto").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let value = fields.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
+                        vec![
+                            ("gain".to_string(), serde_json::json!(value)),
+                            ("gainAuto".to_string(), serde_json::json!(auto)),
+                        ]
+                    }
+                    // Sea clutter (0x64)
+                    "64" => {
+                        let auto = fields.get("auto").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let value = fields.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
+                        vec![
+                            ("sea".to_string(), serde_json::json!(value)),
+                            ("seaAuto".to_string(), serde_json::json!(auto)),
+                        ]
+                    }
+                    // Rain clutter (0x65)
+                    "65" => {
+                        let auto = fields.get("auto").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let value = fields.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
+                        vec![
+                            ("rain".to_string(), serde_json::json!(value)),
+                            ("rainAuto".to_string(), serde_json::json!(auto)),
+                        ]
+                    }
+                    // Status/Power (0x69)
+                    "69" => {
+                        // First param is mode: 1=standby, 2=transmit
+                        if let Some(params) = fields.get("allParams").and_then(|v| v.as_array()) {
+                            if let Some(mode) = params.first().and_then(|v| v.as_str()) {
+                                let power = match mode {
+                                    "1" => "standby",
+                                    "2" => "transmit",
+                                    _ => "unknown",
+                                };
+                                return vec![("power".to_string(), serde_json::json!(power))];
+                            }
+                        }
+                        // Fallback to level field (from Bird Mode decoding, reused for status)
+                        if let Some(level) = fields.get("level").and_then(|v| v.as_i64()) {
+                            let power = match level {
+                                1 => "standby",
+                                2 => "transmit",
+                                _ => "unknown",
+                            };
+                            return vec![("power".to_string(), serde_json::json!(power))];
+                        }
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// Submit a socket operation event.
@@ -535,5 +658,100 @@ mod tests {
         // Check that events were captured
         let events = hub.get_all_events();
         assert!(events.len() >= 3); // create, connect, send
+    }
+
+    #[test]
+    fn test_state_change_detection() {
+        use super::super::DebugEventPayload;
+
+        let hub = Arc::new(DebugHub::new());
+        let mut provider = DebugIoProvider::new(
+            MockIoProvider,
+            hub.clone(),
+            "radar-1".to_string(),
+            "furuno".to_string(),
+        );
+
+        // Simulate receiving gain response - first time (no state change event)
+        let decoded1 = DecodedMessage::Furuno {
+            message_type: "response".to_string(),
+            command_id: Some("N63".to_string()),
+            fields: serde_json::json!({"auto": false, "value": 50}),
+            description: Some("Gain: 50 (Manual)".to_string()),
+        };
+        provider.check_state_changes(&decoded1);
+
+        // Should have recorded state but no event (first observation)
+        let events = hub.get_all_events();
+        let state_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.payload, DebugEventPayload::StateChange { .. }))
+            .collect();
+        assert_eq!(state_events.len(), 0, "First observation should not emit event");
+
+        // Simulate receiving gain response with changed value
+        let decoded2 = DecodedMessage::Furuno {
+            message_type: "response".to_string(),
+            command_id: Some("N63".to_string()),
+            fields: serde_json::json!({"auto": false, "value": 75}),
+            description: Some("Gain: 75 (Manual)".to_string()),
+        };
+        provider.check_state_changes(&decoded2);
+
+        // Now we should have a state change event
+        let events = hub.get_all_events();
+        let state_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.payload, DebugEventPayload::StateChange { .. }))
+            .collect();
+        assert_eq!(state_events.len(), 1, "Changed value should emit event");
+
+        // Verify the event content
+        if let DebugEventPayload::StateChange {
+            control_id,
+            before,
+            after,
+            ..
+        } = &state_events[0].payload
+        {
+            assert_eq!(control_id, "gain");
+            assert_eq!(*before, serde_json::json!(50));
+            assert_eq!(*after, serde_json::json!(75));
+        } else {
+            panic!("Expected StateChange event");
+        }
+    }
+
+    #[test]
+    fn test_state_change_no_change() {
+        use super::super::DebugEventPayload;
+
+        let hub = Arc::new(DebugHub::new());
+        let mut provider = DebugIoProvider::new(
+            MockIoProvider,
+            hub.clone(),
+            "radar-1".to_string(),
+            "furuno".to_string(),
+        );
+
+        // First observation
+        let decoded = DecodedMessage::Furuno {
+            message_type: "response".to_string(),
+            command_id: Some("N63".to_string()),
+            fields: serde_json::json!({"auto": false, "value": 50}),
+            description: Some("Gain: 50 (Manual)".to_string()),
+        };
+        provider.check_state_changes(&decoded);
+
+        // Same value again - no change
+        provider.check_state_changes(&decoded);
+
+        // Should still have no state change events
+        let events = hub.get_all_events();
+        let state_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.payload, DebugEventPayload::StateChange { .. }))
+            .collect();
+        assert_eq!(state_events.len(), 0, "Same value should not emit event");
     }
 }
