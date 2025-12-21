@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_debug_io_provider_creation() {
-        let hub = DebugHub::new();
+        let hub = Arc::new(DebugHub::new());
         let _provider = DebugIoProvider::new(
             MockIoProvider,
             hub,
@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn test_debug_io_provider_captures_udp_send() {
-        let hub = DebugHub::new();
+        let hub = Arc::new(DebugHub::new());
         let mut provider = DebugIoProvider::new(
             MockIoProvider,
             hub.clone(),
@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_debug_io_provider_captures_tcp_send() {
-        let hub = DebugHub::new();
+        let hub = Arc::new(DebugHub::new());
         let mut provider = DebugIoProvider::new(
             MockIoProvider,
             hub.clone(),

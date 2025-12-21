@@ -186,8 +186,8 @@ mod tests {
 
     #[test]
     fn test_command_correlation() {
-        let hub = DebugHub::new();
-        let detector = ChangeDetector::new(hub.clone());
+        let hub = Arc::new(DebugHub::new());
+        let detector = ChangeDetector::new(hub);
 
         // Send a command
         detector.on_command_sent("radar-1", 1, 1000, "gain", Some(serde_json::json!(50)));
@@ -206,8 +206,8 @@ mod tests {
 
     #[test]
     fn test_no_correlation_for_different_control() {
-        let hub = DebugHub::new();
-        let detector = ChangeDetector::new(hub.clone());
+        let hub = Arc::new(DebugHub::new());
+        let detector = ChangeDetector::new(hub);
 
         // Send a gain command
         detector.on_command_sent("radar-1", 1, 1000, "gain", Some(serde_json::json!(50)));
@@ -230,8 +230,8 @@ mod tests {
             max_pending_age_ms: 100,
             max_pending_commands: 10,
         };
-        let hub = DebugHub::new();
-        let detector = ChangeDetector::with_config(hub.clone(), config);
+        let hub = Arc::new(DebugHub::new());
+        let detector = ChangeDetector::with_config(hub, config);
 
         // Send old command
         detector.on_command_sent("radar-1", 1, 0, "gain", None);
