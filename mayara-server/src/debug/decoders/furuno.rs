@@ -15,10 +15,40 @@ use crate::debug::{DecodedMessage, IoDirection};
 /// - `$Sxx,...` - Set commands (sent to radar)
 /// - `$Rxx,...` - Request commands (sent to radar)
 /// - `$Nxx,...` - Response/notification (from radar)
+///
+/// Some firmware versions wrap commands in an 8-byte binary header.
 pub struct FurunoDecoder;
+
+/// Strip binary header if present.
+///
+/// Some Furuno models/firmware wrap ASCII commands in an 8-byte binary header:
+/// - Bytes 0-3: Unknown (often `00 00 00 08`)
+/// - Bytes 4-7: Unknown (often `00 00 00 00`)
+/// - Bytes 8+: ASCII command starting with '$'
+///
+/// This function detects and strips the header by looking for '$' (0x24).
+fn strip_binary_header(data: &[u8]) -> &[u8] {
+    // If data starts with '$', no header present
+    if data.first() == Some(&b'$') {
+        return data;
+    }
+
+    // Look for '$' within first 16 bytes (header should be 8 bytes)
+    if let Some(pos) = data.iter().take(16).position(|&b| b == b'$') {
+        return &data[pos..];
+    }
+
+    // No '$' found, return original data
+    data
+}
 
 impl ProtocolDecoder for FurunoDecoder {
     fn decode(&self, data: &[u8], direction: IoDirection) -> DecodedMessage {
+        // Some Furuno firmware versions wrap ASCII commands in an 8-byte binary header.
+        // Header format: [4 bytes unknown] [4 bytes unknown] followed by "$..." ASCII.
+        // We detect this by looking for '$' (0x24) after the header.
+        let data = strip_binary_header(data);
+
         // Convert to string
         let text = match std::str::from_utf8(data) {
             Ok(s) => s.trim(),
@@ -392,5 +422,44 @@ mod tests {
             }
             _ => panic!("Expected Furuno message"),
         }
+    }
+
+    #[test]
+    fn test_decode_with_binary_header() {
+        let decoder = FurunoDecoder;
+        // Real packet from capture: 8-byte binary header + ASCII command
+        let data = [
+            0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, // 8-byte header
+            b'$', b'N', b'6', b'9', b',', b'2', b',', b'0', b',', b'0', b',', b'6', b'0', b',',
+            b'3', b'0', b'0', b',', b'0', // $N69,2,0,0,60,300,0
+        ];
+        let msg = decoder.decode(&data, IoDirection::Recv);
+
+        match msg {
+            DecodedMessage::Furuno {
+                message_type,
+                command_id,
+                ..
+            } => {
+                assert_eq!(message_type, "response");
+                assert_eq!(command_id, Some("N69".to_string()));
+            }
+            _ => panic!("Expected Furuno message, got {:?}", msg),
+        }
+    }
+
+    #[test]
+    fn test_strip_binary_header() {
+        // With header
+        let with_header = [0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, b'$', b'N'];
+        assert_eq!(strip_binary_header(&with_header), &[b'$', b'N']);
+
+        // Without header (starts with $)
+        let without_header = [b'$', b'N', b'6', b'9'];
+        assert_eq!(strip_binary_header(&without_header), &without_header[..]);
+
+        // No $ found
+        let no_dollar = [0x00, 0x01, 0x02, 0x03];
+        assert_eq!(strip_binary_header(&no_dollar), &no_dollar[..]);
     }
 }
