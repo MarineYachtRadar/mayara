@@ -217,7 +217,17 @@ impl<T: IoProvider> DebugIoProvider<T> {
                         }
                         Vec::new()
                     }
-                    _ => Vec::new(),
+                    // Unknown commands: track raw params for reverse engineering
+                    _ => {
+                        // Use allParams if available, otherwise the whole fields object
+                        if let Some(params) = fields.get("allParams") {
+                            vec![(cmd.to_string(), params.clone())]
+                        } else if !fields.is_null() && fields.as_object().map_or(false, |o| !o.is_empty()) {
+                            vec![(cmd.to_string(), fields.clone())]
+                        } else {
+                            Vec::new()
+                        }
+                    }
                 }
             }
             _ => Vec::new(),
@@ -753,5 +763,67 @@ mod tests {
             .filter(|e| matches!(e.payload, DebugEventPayload::StateChange { .. }))
             .collect();
         assert_eq!(state_events.len(), 0, "Same value should not emit event");
+    }
+
+    #[test]
+    fn test_state_change_unknown_command() {
+        use super::super::DebugEventPayload;
+
+        let hub = Arc::new(DebugHub::new());
+        let mut provider = DebugIoProvider::new(
+            MockIoProvider,
+            hub.clone(),
+            "radar-1".to_string(),
+            "furuno".to_string(),
+        );
+
+        // Simulate receiving unknown command N68 - first observation
+        let decoded1 = DecodedMessage::Furuno {
+            message_type: "response".to_string(),
+            command_id: Some("N68".to_string()),
+            fields: serde_json::json!({"allParams": ["1", "0", "50"]}),
+            description: Some("Unknown command 68".to_string()),
+        };
+        provider.check_state_changes(&decoded1);
+
+        // First observation - no event
+        let events = hub.get_all_events();
+        let state_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.payload, DebugEventPayload::StateChange { .. }))
+            .collect();
+        assert_eq!(state_events.len(), 0, "First observation should not emit event");
+
+        // Simulate receiving same command with different params
+        let decoded2 = DecodedMessage::Furuno {
+            message_type: "response".to_string(),
+            command_id: Some("N68".to_string()),
+            fields: serde_json::json!({"allParams": ["1", "0", "75"]}),
+            description: Some("Unknown command 68".to_string()),
+        };
+        provider.check_state_changes(&decoded2);
+
+        // Now we should have a state change event
+        let events = hub.get_all_events();
+        let state_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.payload, DebugEventPayload::StateChange { .. }))
+            .collect();
+        assert_eq!(state_events.len(), 1, "Changed params should emit event");
+
+        // Verify the event content - control_id should be "N68"
+        if let DebugEventPayload::StateChange {
+            control_id,
+            before,
+            after,
+            ..
+        } = &state_events[0].payload
+        {
+            assert_eq!(control_id, "N68");
+            assert_eq!(*before, serde_json::json!(["1", "0", "50"]));
+            assert_eq!(*after, serde_json::json!(["1", "0", "75"]));
+        } else {
+            panic!("Expected StateChange event");
+        }
     }
 }
