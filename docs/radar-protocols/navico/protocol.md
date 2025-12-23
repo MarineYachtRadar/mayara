@@ -126,7 +126,7 @@ Radar settings are categorized by their purpose and persistence:
 ### Installation Settings (Report 04 and Report 08)
 These are configured once during radar installation and rarely changed:
 - **Bearing alignment** - Corrects for antenna mounting offset (deci-degrees, 0-3599) [Report 04]
-- **Antenna height** - Height above waterline in millimeters (affects sea clutter calculations) [Report 04]
+- **Antenna height** - Height above waterline in decimeters (affects sea clutter calculations) [Report 04]
 - **Accent light** - HALO pedestal LED brightness (0-3, HALO only) [Report 04]
 - **Local interference rejection** - Reduce local interference (off/low/medium/high) [Report 08]
 - **Sidelobe suppression** - Reduce sidelobe artifacts (0-100%, auto or manual) [Report 08]
@@ -409,7 +409,7 @@ Settings are per-radar (A/B can have different values on dual-range radars).
 | 2 | 4 | Unknown (always 0) |
 | 6 | 2 | Bearing alignment (deci-degrees, u16, 0-3599) |
 | 8 | 2 | Unknown (always 0) |
-| 10 | 2 | Antenna height (millimeters, u16) |
+| 10 | 2 | Antenna height (decimeters, u16) |
 | 12 | 7 | Unknown (always 0) |
 | 19 | 1 | Accent light (HALO only, 0-3) |
 | 20 | 6 | Unknown (always 0) |

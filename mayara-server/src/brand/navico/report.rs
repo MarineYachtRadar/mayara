@@ -597,25 +597,15 @@ impl NavicoReportReceiver {
     }
 
     fn set(&mut self, control_type: &str, value: f32, auto: Option<bool>) {
-        match self.info.controls.set(control_type, value, auto) {
-            Err(e) => {
-                log::error!("{}: {}", self.key, e.to_string());
-            }
-            Ok(Some(())) => {
-                if log::log_enabled!(log::Level::Debug) {
-                    let control = self.info.controls.get(control_type).unwrap();
-                    log::trace!(
-                        "{}: Control '{}' new value {} auto {:?} enabled {:?}",
-                        self.key,
-                        control_type,
-                        control.value(),
-                        control.auto,
-                        control.enabled
-                    );
-                }
-            }
-            Ok(None) => {}
-        };
+        if let Err(e) = self.info.controls.set(control_type, value, auto) {
+            log::error!(
+                "{}: set '{}' = {} FAILED: {}",
+                self.key,
+                control_type,
+                value,
+                e
+            );
+        }
     }
 
     fn set_value(&mut self, control_type: &str, value: f32) {
@@ -1016,11 +1006,18 @@ impl NavicoReportReceiver {
         let report = parse_report_04(&self.report_buf)
             .map_err(|e| anyhow::anyhow!("{}: Report 04 parse error: {}", self.key, e))?;
 
-        log::trace!("{}: report 04 - {:?}", self.key, report);
+        log::debug!(
+            "{}: report 04 - bearing_alignment={} antenna_height={} dm ({} m)",
+            self.key,
+            report.bearing_alignment,
+            report.antenna_height,
+            report.antenna_height as f32 / 10.0
+        );
 
         self.set_value("bearingAlignment", report.bearing_alignment as f32);
-        // Report 04 returns antenna height in millimeters, convert to meters for the control
-        self.set_value("antennaHeight", report.antenna_height as f32 / 1000.0);
+        // Report 04 returns antenna height in decimeters (same unit as command 0x30 C1),
+        // convert to meters for the control
+        self.set_value("antennaHeight", report.antenna_height as f32 / 10.0);
         if self.model == Model::HALO {
             self.set_value("accentLight", report.accent_light as f32);
         }

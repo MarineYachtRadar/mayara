@@ -1811,13 +1811,10 @@ pub fn control_bearing_alignment_for_brand(brand: Brand) -> ControlDefinition {
 pub fn control_antenna_height_for_brand(brand: Brand) -> ControlDefinition {
     let mut def = control_antenna_height();
     def.wire_hints = Some(match brand {
-        Brand::Navico => WireProtocolHint {
-            scale_factor: Some(99000.0), // cm to mm conversion
-            write_only: true, // Cannot reliably read from hardware
-            ..Default::default()
-        },
-        Brand::Furuno | Brand::Raymarine | Brand::Garmin => WireProtocolHint {
-            write_only: true, // Cannot reliably read from hardware
+        // Navico: Wire protocol uses decimeters (0-990), control uses meters (0-99).
+        // Conversion is done in report.rs when reading Report 04.
+        Brand::Navico | Brand::Furuno | Brand::Raymarine | Brand::Garmin => WireProtocolHint {
+            write_only: false, // Navico Report 04 provides readable antenna height
             ..Default::default()
         },
     });
