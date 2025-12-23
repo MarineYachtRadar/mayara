@@ -5,14 +5,20 @@ network captures and the mayara-lib implementation.
 
 ## Supported Models
 
-- **BR24**: Original Broadband Radar (2009+)
+- **BR24**: Original FMCW (Frequency Modulation Continous Wave) Broadband Radar (2009+)
 - **3G**: Third generation radome radar
 - **4G**: Fourth generation with dual range capability
-- **HALO**: High-definition series with Doppler support (HALO 20, 20+, 24, 3, 4, 6)
+- **HALO**: Pulse compression series, most with Doppler support (HALO 20+, 24, 3, 4, 6, 20003/4/6, 3003/4/6) and one without Doppler (HALO 20)
 
 ## Network Architecture
 
-Navico radars use UDP multicast for discovery and data transmission.
+Navico radars use UDP multicast for discovery and data transmission. It is irrelevant whether a DHCP server
+is present, it will use an auto configured IPv4 address in range 169.254/16 as well as the address provided by
+the DHCP server. In practice, because of the fact that all data is sent on addresses in the multicast ranges,
+the actual IP address is not so relevant.
+
+The disadvantage of IPv4 Multicast is that it works poorly over WiFi, as any form of broadcast or multicast means that the packages need to be sent at the lowest rate supported by any of the nodes. Even on 5 GHz you will see
+spoke and command data dropouts. 
 
 ### Multicast Addresses
 
@@ -112,6 +118,9 @@ HALO radars can encode Doppler information in pixel values:
 - `0x0E` = Receding target
 - Other values = Normal radar return intensity
 
+Note that when the doppler mode is "Approaching only" the value 0x0E is used as a normal value, and if
+the doppler mode is "None" then both 0x0E and 0x0F are used as a normal echo strength value.
+
 Doppler modes:
 | Value | Mode |
 |-------|------|
@@ -133,23 +142,26 @@ These are configured once during radar installation and rarely changed:
 
 ### Runtime Controls (Report 02)
 Operational settings adjusted during normal use (per-radar on dual-range systems):
-- **Gain** - Signal amplification (0-100%, auto or manual)
-- **Sea clutter** - Sea return suppression (auto: harbor/offshore, or manual 0-100%)
+- **Mode** - Presets for common uses (Halo only: "Custom", "Harbor", "Offshore", "Buoy", "Weather", "Bird")
+             Anything other than "Custom" will make certain advanced settings inaccessible as they are fully
+             defined by the mode.
+- **Gain** - Signal amplification (0-100% manual or auto)
+- **Sea clutter** - Sea return suppression (manual 0-100%, or auto depending on model: 4G and below: harbor/offshore, HALO: Auto-50 to Auto+50 and see Sea State)
 - **Rain clutter** - Precipitation suppression (0-100%, no auto mode)
 - **Interference rejection** - Filter other radar interference (off/low/medium/high)
-- **Target expansion** - Make small targets more visible (off/on)
+- **Target expansion** - Make small targets more visible (off/on, HALO: off/low/medium/high)
 - **Target boost** - Amplify weak targets (off/low/high)
 - **Guard zones** - Up to 2 zones per radar, sector or full-circle shape, sensitivity shared within same radar
 
 ### Advanced Settings (Report 08)
 Performance tuning options (per-radar on dual-range systems):
-- **Scan speed** - Antenna rotation speed (normal/fast)
-- **Sea state** - Sea condition preset (calm/moderate/rough)
-- **Noise rejection** - Filter noise (off/low/medium/high)
+- **Scan speed** - Antenna rotation speed (BR24, 3G: normal/fast, 4G: normal/medium/fast, HALO: normal, medium, medium-fast, fast)
+- **Sea state** - Sea condition preset (calm/moderate/rough, HALO only)
+- **Noise rejection** - Filter noise (off/low/high, HALO: off/low/medium/high)
 - **Target separation** - Distinguish close targets (off/low/medium/high)
 - **Doppler mode** - Motion detection (off/both/approaching, HALO only)
 
-### Blanking Zones (Report 06)
+### Blanking Zones (Report 06) (HALO only)
 No-transmit sectors to protect crew or equipment:
 - Up to 4 sectors with start/end angles
 
@@ -261,7 +273,7 @@ Status values:
 | 0 | Off (not observed - radar stops sending when powered off) |
 | 1 | Standby |
 | 2 | Transmit |
-| 5 | Preparing/Warming (not observed on 4G model, possibly wrong) |
+| 5 | Preparing/Spinning up (not observed on 4G model, possibly HALO only) |
 
 **Power-off behavior:** When the radar is powered off, it simply stops sending
 packets. There is no special "powering down" status - the radar goes silent
