@@ -1019,7 +1019,8 @@ impl NavicoReportReceiver {
         log::trace!("{}: report 04 - {:?}", self.key, report);
 
         self.set_value("bearingAlignment", report.bearing_alignment as f32);
-        self.set_value("antennaHeight", report.antenna_height as f32);
+        // Report 04 returns antenna height in millimeters, convert to meters for the control
+        self.set_value("antennaHeight", report.antenna_height as f32 / 1000.0);
         if self.model == Model::HALO {
             self.set_value("accentLight", report.accent_light as f32);
         }
