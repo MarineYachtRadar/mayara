@@ -38,6 +38,7 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_graceful_shutdown::SubsystemHandle;
 
+use crate::network::is_wireless_interface;
 use crate::tokio_io::TokioIoProvider;
 use crate::Brand;
 
@@ -106,7 +107,11 @@ impl CoreLocatorAdapter {
 
         // CRITICAL: Configure multicast interfaces for multi-NIC setups
         // Without this, multicast only joins on OS-chosen interface (often wrong one)
-        let interfaces = find_all_interfaces();
+        let (allow_wifi, interface) = {
+            let session = self.session.read().unwrap();
+            (session.args.allow_wifi, session.args.interface.clone())
+        };
+        let interfaces = find_all_interfaces(allow_wifi, interface);
         if interfaces.len() > 1 {
             log::info!(
                 "Multi-NIC setup detected - joining multicast on {} interfaces: {:?}",
@@ -436,7 +441,7 @@ fn find_furuno_interface() -> Option<Ipv4Addr> {
 /// This is used to join multicast groups on all interfaces, which is
 /// critical for multi-NIC setups where the radar might be on a different
 /// interface than the OS default.
-fn find_all_interfaces() -> Vec<String> {
+fn find_all_interfaces(allow_wifi: bool, interface: Option<String>) -> Vec<String> {
     use network_interface::{NetworkInterface, NetworkInterfaceConfig};
     use std::net::IpAddr;
 
@@ -444,9 +449,18 @@ fn find_all_interfaces() -> Vec<String> {
 
     if let Ok(ifaces) = NetworkInterface::show() {
         for itf in &ifaces {
+            match interface {
+                Some(ref iface_name) if &itf.name != iface_name => continue,
+                _ => {
+                    if !allow_wifi && is_wireless_interface(&itf.name) {
+                        log::debug!("Skipping WiFi interface {}", itf.name);
+                        continue;
+                    }
+                }
+            }
             for addr in &itf.addr {
                 if let IpAddr::V4(nic_ip) = addr.ip() {
-                    if !nic_ip.is_loopback() {
+                    if !nic_ip.is_loopback() || interface.is_some() {
                         log::debug!("Found interface {} with IP {}", itf.name, nic_ip);
                         interfaces.push(nic_ip.to_string());
                     }

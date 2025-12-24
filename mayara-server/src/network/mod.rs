@@ -17,6 +17,15 @@ pub(crate) mod macos;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows;
 
+#[cfg(target_os = "macos")]
+pub(crate) use macos::is_wireless_interface;
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux::is_wireless_interface;
+
+#[cfg(target_os = "windows")]
+pub(crate) use windows::is_wireless_interface;
+
 static G_REPLAY: AtomicBool = AtomicBool::new(false);
 
 pub fn set_replay(replay: bool) {
