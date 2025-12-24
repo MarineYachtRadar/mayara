@@ -111,7 +111,7 @@ impl CoreLocatorAdapter {
             let session = self.session.read().unwrap();
             (session.args.allow_wifi, session.args.interface.clone())
         };
-        let interfaces = find_all_interfaces(allow_wifi, interface);
+        let interfaces = find_all_interfaces(allow_wifi, &interface);
         if interfaces.len() > 1 {
             log::info!(
                 "Multi-NIC setup detected - joining multicast on {} interfaces: {:?}",
@@ -125,7 +125,7 @@ impl CoreLocatorAdapter {
 
         // CRITICAL: Configure Furuno interface to prevent cross-NIC broadcast traffic
         // Furuno uses 172.31.x.x subnet - find the NIC that can reach it
-        if let Some(furuno_nic) = find_furuno_interface() {
+        if let Some(furuno_nic) = find_furuno_interface(allow_wifi, &interface) {
             log::info!(
                 "Found Furuno-capable NIC: {} - broadcasts will use this interface",
                 furuno_nic
@@ -401,13 +401,22 @@ const FURUNO_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 0, 0);
 ///
 /// This is critical for multi-NIC setups to ensure broadcast packets
 /// go out on the correct interface.
-fn find_furuno_interface() -> Option<Ipv4Addr> {
+fn find_furuno_interface(allow_wifi: bool, interface: &Option<String>) -> Option<Ipv4Addr> {
     use network_interface::{NetworkInterface, NetworkInterfaceConfig};
     use std::net::IpAddr;
 
     let interfaces = NetworkInterface::show().ok()?;
 
     for itf in &interfaces {
+        match interface {
+            Some(ref iface_name) if &itf.name != iface_name => continue,
+            _ => {
+                if !allow_wifi && is_wireless_interface(&itf.name) {
+                    log::debug!("Skipping WiFi interface {}", itf.name);
+                    continue;
+                }
+            }
+        }
         for addr in &itf.addr {
             if let (IpAddr::V4(nic_ip), Some(IpAddr::V4(netmask))) = (addr.ip(), addr.netmask()) {
                 if !nic_ip.is_loopback() {
@@ -441,7 +450,7 @@ fn find_furuno_interface() -> Option<Ipv4Addr> {
 /// This is used to join multicast groups on all interfaces, which is
 /// critical for multi-NIC setups where the radar might be on a different
 /// interface than the OS default.
-fn find_all_interfaces(allow_wifi: bool, interface: Option<String>) -> Vec<String> {
+fn find_all_interfaces(allow_wifi: bool, interface: &Option<String>) -> Vec<String> {
     use network_interface::{NetworkInterface, NetworkInterfaceConfig};
     use std::net::IpAddr;
 
