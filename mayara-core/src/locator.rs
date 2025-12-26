@@ -49,6 +49,8 @@ pub struct BrandStatus {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocatorStatus {
+    /// Current locator state (active, quiesced, idle)
+    pub state: LocatorState,
     /// Status of each brand's listener
     pub brands: Vec<BrandStatus>,
 }
@@ -70,6 +72,19 @@ enum StartupPhase {
     Garmin,
     /// All brands initialized
     Complete,
+}
+
+/// Locator state for quiescing support
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LocatorState {
+    /// Locator is idle, not started
+    #[default]
+    Idle,
+    /// Locator is actively listening for beacons
+    Active,
+    /// Locator is quiesced - sockets closed but can resume
+    Quiesced,
 }
 
 /// Generic radar locator that discovers radars on the network
@@ -107,6 +122,9 @@ pub struct RadarLocator {
     /// If empty, uses UNSPECIFIED (OS default). For multi-NIC setups,
     /// populate this with all NIC IPs to ensure multicast works on all interfaces.
     multicast_interfaces: Vec<String>,
+
+    /// Current locator state (active, quiesced, idle)
+    state: LocatorState,
 }
 
 impl RadarLocator {
@@ -124,6 +142,7 @@ impl RadarLocator {
             furuno_interface: None,
             startup_phase: StartupPhase::NotStarted,
             multicast_interfaces: Vec::new(),
+            state: LocatorState::Idle,
         }
     }
 
@@ -163,6 +182,7 @@ impl RadarLocator {
     pub fn start<I: IoProvider>(&mut self, io: &mut I) {
         self.status.brands.clear();
         self.startup_phase = StartupPhase::Furuno;
+        self.state = LocatorState::Active;
         io.info("Starting staggered brand initialization...");
         // First brand is initialized immediately
         self.advance_startup(io);
@@ -212,8 +232,11 @@ impl RadarLocator {
     }
 
     /// Get the current status of all brand listeners
-    pub fn status(&self) -> &LocatorStatus {
-        &self.status
+    pub fn status(&self) -> LocatorStatus {
+        LocatorStatus {
+            state: self.state,
+            brands: self.status.brands.clone(),
+        }
     }
 
     fn start_furuno<I: IoProvider>(&mut self, io: &mut I) {
@@ -837,6 +860,73 @@ impl RadarLocator {
 
     /// Stop all locator sockets and clean up
     pub fn shutdown<I: IoProvider>(&mut self, io: &mut I) {
+        self.close_all_sockets(io);
+        self.state = LocatorState::Idle;
+        self.radars.clear();
+        io.info("Locator shutdown complete");
+    }
+
+    /// Quiesce the locator - close sockets but retain discovered radars
+    ///
+    /// Call this when all radars are connected to save CPU and network resources.
+    /// The locator stops listening for beacons but remembers discovered radars.
+    /// Use `resume()` to start listening again (e.g., when a radar disconnects).
+    ///
+    /// Unlike `shutdown()`, quiesce preserves the radar list and can be resumed.
+    pub fn quiesce<I: IoProvider>(&mut self, io: &mut I) {
+        if self.state != LocatorState::Active {
+            io.debug("Locator not active, nothing to quiesce");
+            return;
+        }
+
+        self.close_all_sockets(io);
+        self.state = LocatorState::Quiesced;
+        self.status.brands.iter_mut().for_each(|b| {
+            b.status = "Quiesced".to_string();
+            b.port = None;
+            b.multicast = None;
+        });
+        io.info(&format!(
+            "Locator quiesced - {} radars retained, sockets closed",
+            self.radars.len()
+        ));
+    }
+
+    /// Resume the locator after quiescing
+    ///
+    /// Reopens sockets and restarts listening for beacons.
+    /// Call this when a radar disconnects and you want to rediscover radars.
+    pub fn resume<I: IoProvider>(&mut self, io: &mut I) {
+        if self.state != LocatorState::Quiesced {
+            io.debug("Locator not quiesced, nothing to resume");
+            return;
+        }
+
+        io.info(&format!(
+            "Resuming locator - {} radars already known",
+            self.radars.len()
+        ));
+        // Restart uses staggered initialization like start()
+        self.start(io);
+    }
+
+    /// Get the current locator state
+    pub fn state(&self) -> LocatorState {
+        self.state
+    }
+
+    /// Check if the locator is quiesced
+    pub fn is_quiesced(&self) -> bool {
+        self.state == LocatorState::Quiesced
+    }
+
+    /// Check if the locator is actively listening
+    pub fn is_active(&self) -> bool {
+        self.state == LocatorState::Active
+    }
+
+    /// Close all sockets (helper for shutdown/quiesce)
+    fn close_all_sockets<I: IoProvider>(&mut self, io: &mut I) {
         if let Some(socket) = self.furuno_socket.take() {
             io.udp_close(socket);
         }
