@@ -242,7 +242,7 @@ impl NavicoReportReceiver {
                 log::debug!(
                     "{}: {} via {}: listening for info reports",
                     self.key,
-                    &self.info.report_addr,
+                    INFO_ADDR,
                     &self.info.nic_addr
                 );
                 Ok(())
@@ -251,7 +251,7 @@ impl NavicoReportReceiver {
                 log::debug!(
                     "{}: {} via {}: create multicast failed: {}",
                     self.key,
-                    &self.info.report_addr,
+                    INFO_ADDR,
                     &self.info.nic_addr,
                     e
                 );
@@ -271,7 +271,7 @@ impl NavicoReportReceiver {
                 log::debug!(
                     "{}: {} via {}: listening for speed reports",
                     self.key,
-                    &self.info.report_addr,
+                    SPEED_ADDR_A,
                     &self.info.nic_addr
                 );
                 Ok(())
@@ -280,7 +280,7 @@ impl NavicoReportReceiver {
                 log::debug!(
                     "{}: {} via {}: create multicast failed: {}",
                     self.key,
-                    &self.info.report_addr,
+                    SPEED_ADDR_A,
                     &self.info.nic_addr,
                     e
                 );
