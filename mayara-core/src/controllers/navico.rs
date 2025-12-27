@@ -295,6 +295,8 @@ impl NavicoController {
                     "[{}] Failed to send command: {}",
                     self.radar_id, e
                 ));
+            } else {
+                io.debug(&format!("[{}] Sent command: {:02X?}", self.radar_id, data));
             }
         } else {
             io.debug(&format!(
@@ -425,20 +427,19 @@ impl NavicoController {
         ));
     }
 
-    /// Set antenna height in decimeters (1/10 meter)
+    /// Set antenna height in millimeters
     ///
-    /// The wire protocol (0x30 0xC1) expects height in decimeters.
-    /// Note: Report 04 returns height in millimeters, but the command uses decimeters.
-    pub fn set_antenna_height<I: IoProvider>(&mut self, io: &mut I, height_dm: u16) {
+    /// The wire protocol (0x30 0xC1) expects height in millimeters
+    pub fn set_antenna_height<I: IoProvider>(&mut self, io: &mut I, height_mm: u16) {
         let mut cmd = vec![0x30, 0xC1, 0x01, 0x00, 0x00, 0x00];
-        cmd.extend_from_slice(&height_dm.to_le_bytes());
+        cmd.extend_from_slice(&height_mm.to_le_bytes());
         cmd.extend_from_slice(&[0x00, 0x00]);
         self.send_command(io, &cmd);
         io.debug(&format!(
             "[{}] Set antenna height: {} dm ({} m)",
             self.radar_id,
-            height_dm,
-            height_dm as f32 / 10.0
+            height_mm,
+            height_mm as f32 / 10.0
         ));
     }
 
