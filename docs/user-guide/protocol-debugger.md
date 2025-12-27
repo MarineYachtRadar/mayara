@@ -14,11 +14,11 @@ The Protocol Debugger is a development tool for analyzing and reverse-engineerin
 |---------|---------|-----|
 | mayara-server → radar | ✅ Yes | Goes through our sockets |
 | radar → mayara-server | ✅ Yes | Received by our sockets |
-| chart plotter → radar | ❌ No | Direct connection, bypasses us |
-| radar → chart plotter | ⚠️ Partial | Multicast traffic visible, TCP not visible |
+| chart plotter → radar | ⚠️ Partial | Multicast traffic visible, Unicast not visible |
+| radar → chart plotter | ⚠️ Partial | Multicast traffic visible, Unicast not visible |
 
-**Why this matters:** When you press a button on your Garmin/Simrad/Furuno MFD, the command goes directly from the chart plotter to the radar. We don't see the command, but:
-- For **multicast protocols** (Navico, Garmin, Raymarine): We see the radar's status broadcasts change
+**Why this matters:** When you press a button on your Garmin/Raymarine/Furuno MFD, the command goes directly from the chart plotter to the radar. We don't see the command, but:
+- For **multicast reporting protocols** (Navico, Garmin, Raymarine): We see the radar's status broadcasts change
 - For **Furuno (TCP)**: We poll the radar every 2 seconds and see the updated state in the response
 
 ### Capturing Chart Plotter Commands
