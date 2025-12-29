@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use mayara_core::locator::{LocatorEvent, RadarLocator};
 use mayara_core::radar::RadarDiscovery;
-use mayara_core::{brand, Brand as CoreBrand};
+use mayara_core::Brand as CoreBrand;
 use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_graceful_shutdown::SubsystemHandle;

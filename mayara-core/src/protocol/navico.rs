@@ -13,7 +13,7 @@
 use super::c_string;
 use crate::error::ParseError;
 use crate::radar::RadarDiscovery;
-use crate::Brand;
+use crate::{Brand, BrandStatus, IoProvider};
 use serde::Deserialize;
 
 // =============================================================================
@@ -57,6 +57,8 @@ pub const SPEED_PORT_A: u16 = 6690;
 /// Speed multicast address B
 pub const SPEED_ADDR_B: &str = "236.6.7.15";
 pub const SPEED_PORT_B: u16 = 6005;
+
+const BEACON_POLL_INTERVAL: u64 = 20; // Poll every 20 cycles
 
 // =============================================================================
 // Packet Definitions
@@ -1594,6 +1596,47 @@ pub fn get_report_type(data: &[u8]) -> Option<u8> {
         Some(data[0])
     } else {
         None
+    }
+}
+
+pub(crate) fn poll_beacon_packets(
+    brand_status: &BrandStatus,
+    poll_count: u64,
+    io: &mut dyn IoProvider,
+    buf: &mut [u8],
+    discoveries: &mut Vec<RadarDiscovery>,
+    model_reports: &mut Vec<(String, Option<String>, Option<String>)>,
+) {
+    // Poll Navico BR24 / Gen3/4/HALO beacons
+    if let Some(socket) = brand_status.socket {
+        if poll_count % BEACON_POLL_INTERVAL == 0 {
+            if let (Some(addr), Some(port)) = (brand_status.multicast.as_ref(), brand_status.port) {
+                // Send to multicast address/port
+                if let Err(e) = io.udp_send_to(&socket, create_address_request(), addr, port) {
+                    io.debug(&format!("Navico beacon address request send error: {}", e));
+                }
+            }
+        }
+        while let Some((len, addr, _port)) = io.udp_recv_from(&socket, buf) {
+            let data = &buf[..len];
+            if !is_beacon_response(data) {
+                continue;
+            }
+            match parse_beacon_response(data, &addr) {
+                Ok(discovered) => {
+                    for d in &discovered {
+                        io.debug(&format!(
+                            "Navico BR24 beacon from {}: {:?} {:?}",
+                            addr, d.model, d.suffix
+                        ));
+                    }
+                    discoveries.extend(discovered);
+                }
+                Err(e) => {
+                    io.debug(&format!("Navico BR24 parse error: {}", e));
+                }
+            }
+        }
     }
 }
 

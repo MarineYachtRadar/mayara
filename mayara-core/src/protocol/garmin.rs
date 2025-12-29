@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::error::ParseError;
 use crate::radar::{RadarDiscovery, RadarStatus};
-use crate::Brand;
+use crate::{Brand, BrandStatus, IoProvider};
 
 // =============================================================================
 // Network Constants
@@ -434,6 +434,28 @@ fn create_command(packet_type: u32, value: u32) -> Vec<u8> {
     cmd.extend_from_slice(&4u32.to_le_bytes()); // length = 4
     cmd.extend_from_slice(&value.to_le_bytes());
     cmd
+}
+
+fn poll_beacon_packets(
+    brand_status: &BrandStatus,
+    _poll_count: u64,
+    io: &mut dyn IoProvider,
+    buf: &mut [u8],
+    discoveries: &mut Vec<RadarDiscovery>,
+    model_reports: &mut Vec<(String, Option<String>, Option<String>)>,
+) {
+    // Poll Navico BR24 / Gen3/4/HALO beacons
+    if let Some(socket) = brand_status.socket {
+        while let Some((len, addr, _port)) = io.udp_recv_from(&socket, buf) {
+            let data = &buf[..len];
+            if !is_report_packet(data) {
+                continue;
+            }
+            let discovery = create_discovery(&addr);
+            let discovered = vec![discovery];
+            discoveries.extend(discovered);
+        }
+    }
 }
 
 // =============================================================================

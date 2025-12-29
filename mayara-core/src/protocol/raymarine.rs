@@ -14,7 +14,7 @@
 use super::c_string;
 use crate::error::ParseError;
 use crate::radar::RadarDiscovery;
-use crate::Brand;
+use crate::{Brand, BrandStatus, IoProvider};
 use serde::Deserialize;
 
 // =============================================================================
@@ -1045,8 +1045,48 @@ pub const MFD_BEACON: [u8; 56] = [
 ];
 
 /// Create the MFD beacon request
-pub fn create_mfd_beacon() -> &'static [u8] {
+pub fn create_address_request() -> &'static [u8] {
     &MFD_BEACON
+}
+
+fn poll_beacon_packets(
+    brand_status: &BrandStatus,
+    poll_count: u64,
+    io: &mut dyn IoProvider,
+    buf: &mut [u8],
+    discoveries: &mut Vec<RadarDiscovery>,
+    model_reports: &mut Vec<(String, Option<String>, Option<String>)>,
+) {
+    // Poll Navico BR24 / Gen3/4/HALO beacons
+    if let Some(socket) = brand_status.socket {
+        const BEACON_POLL_INTERVAL: u64 = 20;
+        if poll_count % BEACON_POLL_INTERVAL == 0 {
+            if let (Some(addr), Some(port)) = (brand_status.multicast.as_ref(), brand_status.port) {
+                // Send to multicast address/port
+                if let Err(e) = io.udp_send_to(&socket, create_address_request(), addr, port) {
+                    io.debug(&format!("Navico beacon address request send error: {}", e));
+                }
+            }
+        }
+        while let Some((len, addr, _port)) = io.udp_recv_from(&socket, buf) {
+            let data = &buf[..len];
+            if !is_beacon_36(data) && !is_beacon_56(data) {
+                continue;
+            }
+            match parse_beacon_response(data, &addr) {
+                Ok(discovery) => {
+                    io.debug(&format!(
+                        "Raymarine beacon from {}: {:?}",
+                        addr, discovery.model
+                    ));
+                    discoveries.push(discovery);
+                }
+                Err(e) => {
+                    io.debug(&format!("Raymarine parse error: {}", e));
+                }
+            }
+        }
+    }
 }
 
 // =============================================================================

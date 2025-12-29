@@ -10,7 +10,7 @@ pub mod report;
 use super::c_string;
 use crate::error::ParseError;
 use crate::radar::RadarDiscovery;
-use crate::Brand;
+use crate::{Brand, BrandStatus, IoProvider, UdpSocketHandle};
 use serde::Deserialize;
 
 // =============================================================================
@@ -26,6 +26,9 @@ pub const MAX_SPOKE_LEN: u16 = 884;
 /// Base port for Furuno radar communication
 pub const BASE_PORT: u16 = 10000;
 
+/// Furuno beacon/announce broadcast address
+pub const BEACON_BROADCAST: &str = "172.31.255.255";
+
 /// Port for beacon discovery (broadcast)
 pub const BEACON_PORT: u16 = BASE_PORT + 10;
 
@@ -37,6 +40,10 @@ pub const BROADCAST_ADDR: &str = "172.31.255.255";
 
 /// Multicast address for spoke data
 pub const DATA_MULTICAST_ADDR: &str = "239.255.0.2";
+
+// Send Furuno announce periodically (every ~2 seconds at 10 polls/sec)
+// Note: ANNOUNCE_INTERVAL of 20 * 100ms poll interval = 2 seconds
+pub(crate) const ANNOUNCE_INTERVAL: u64 = 20;
 
 // =============================================================================
 // Network Requirements
@@ -607,6 +614,98 @@ pub const RANGE_TABLE: [u32; 24] = [
 /// Get range in meters from range index
 pub fn get_range_meters(range_index: u8) -> u32 {
     RANGE_TABLE.get(range_index as usize).copied().unwrap_or(0)
+}
+
+///
+/// Callback from the Locator to poll for brand specific beacon packets
+///
+pub(crate) fn poll_beacon_packets(
+    brand_status: &BrandStatus,
+    poll_count: u64,
+    io: &mut dyn IoProvider,
+    buf: &mut [u8],
+    discoveries: &mut Vec<RadarDiscovery>,
+    model_reports: &mut Vec<(String, Option<String>, Option<String>)>,
+) {
+    if let Some(socket) = &brand_status.socket {
+        if poll_count % ANNOUNCE_INTERVAL == 0 {
+            send_furuno_announce(socket, io);
+        }
+
+        while let Some((len, addr, _port)) = io.udp_recv_from(socket, buf) {
+            let data = &buf[..len];
+
+            if is_beacon_response(data) {
+                match parse_beacon_response(data, &addr) {
+                    Ok(discovery) => {
+                        io.debug(&format!(
+                            "Furuno beacon from {}: {:?}",
+                            addr, discovery.model
+                        ));
+                        discoveries.push(discovery);
+                    }
+                    Err(e) => {
+                        io.debug(&format!("Furuno beacon parse error: {}", e));
+                    }
+                }
+            } else if is_model_report(data) {
+                // UDP model reports (170 bytes) are often empty/unreliable
+                // Model detection now uses TCP $N96 command instead (see FurunoController)
+                match parse_model_report(data) {
+                    Ok((model, serial)) => {
+                        io.debug(&format!(
+                            "Furuno UDP model report from {}: model={:?}, serial={:?}",
+                            addr, model, serial
+                        ));
+                        if model.is_some() || serial.is_some() {
+                            model_reports.push((addr.clone(), model, serial));
+                        }
+                    }
+                    Err(e) => {
+                        io.debug(&format!(
+                            "Furuno UDP model report parse error from {}: {}",
+                            addr, e
+                        ));
+                    }
+                }
+            } else {
+                // Log unexpected packet sizes to help debug
+                io.debug(&format!(
+                    "Furuno UDP packet from {}: {} bytes (not beacon or model)",
+                    addr, len
+                ));
+            }
+        }
+    }
+}
+
+/// Send Furuno announce and beacon request packets
+///
+/// This should be called before attempting TCP connections to Furuno radars,
+/// as the radar only accepts TCP from clients that have recently announced.
+pub fn send_furuno_announce(socket: &UdpSocketHandle, io: &mut dyn IoProvider) {
+    let addr = BEACON_BROADCAST;
+    let port = BEACON_PORT;
+
+    // Send beacon request to broadcast
+    if let Err(e) = io.udp_send_to(socket, &REQUEST_BEACON_PACKET, addr, port) {
+        io.debug(&format!("Failed to send Furuno beacon request: {}", e));
+    }
+
+    // Send model request to broadcast
+    if let Err(e) = io.udp_send_to(socket, &REQUEST_MODEL_PACKET, addr, port) {
+        io.debug(&format!("Failed to send Furuno model request: {}", e));
+    }
+
+    // Send announce packet - this tells the radar we exist
+    if let Err(e) = io.udp_send_to(socket, &ANNOUNCE_PACKET, addr, port) {
+        io.debug(&format!("Failed to send Furuno announce: {}", e));
+    } else {
+        io.debug(&format!("Sent Furuno announce to {}:{}", addr, port));
+    }
+
+    // Note: UDP model requests (0x14) are unreliable - the response often has empty model/serial fields
+    // Model detection is done via TCP $N96 command in FurunoController instead
 }
 
 // =============================================================================
