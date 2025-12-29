@@ -402,6 +402,10 @@ impl RadarInfo {
             }
         }
     }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.ranges.len() > 0 || self.serial_no.is_some()
+    }
 }
 
 impl Display for RadarInfo {
@@ -519,7 +523,7 @@ impl SharedRadars {
             .info
             .iter()
             .map(|(_k, v)| v)
-            .filter(|i| i.ranges.len() > 0)
+            .filter(|i| i.is_active())
             .map(|v| v.clone())
             .collect()
     }
@@ -530,7 +534,7 @@ impl SharedRadars {
             .info
             .iter()
             .map(|(_k, v)| v)
-            .filter(|i| i.ranges.len() > 0)
+            .filter(|i| i.is_active())
             .count()
             > 0
     }

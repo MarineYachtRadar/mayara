@@ -749,6 +749,7 @@ impl NavicoReportReceiver {
                     50,
                     control.item().max_value.unwrap() as i32,
                 ));
+                log::info!("{}: Starting range detection", self.key);
             }
         }
 
@@ -758,6 +759,7 @@ impl NavicoReportReceiver {
                     return Ok(());
                 }
                 RangeDetectionResult::Complete(ranges, saved_range) => {
+                    log::warn!("{}: Range detection complete", self.key);
                     self.info.ranges = ranges.clone();
                     self.info.controls.set_valid_ranges("range", &ranges)?;
                     self.info.range_detection = None;
@@ -947,7 +949,7 @@ impl NavicoReportReceiver {
 
         log::trace!("{}: report 02 - {:?}", self.key, report);
 
-        let range = report.range / 10; // Decimeters to meters
+        let range = report.range; // Decimeters to meters handled in set_value
         let mode = report.mode as i32;
         let gain_auto = if report.gain_auto { 1u8 } else { 0u8 };
         let gain = report.gain as i32;
