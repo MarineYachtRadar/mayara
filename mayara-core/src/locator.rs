@@ -112,6 +112,9 @@ pub struct RadarLocator {
     /// Current status of each brand's listener
     status: LocatorStatus,
 
+    /// Optional brand limitation (if set, only this brand is initialized)  
+    brand_limitation: Option<Brand>,
+
     /// Optional interface IP for Furuno broadcasts (to prevent cross-NIC traffic)
     furuno_interface: Option<String>,
 
@@ -129,7 +132,7 @@ pub struct RadarLocator {
 
 impl RadarLocator {
     /// Create a new radar locator
-    pub fn new() -> Self {
+    pub fn new(brand_limitation: Option<Brand>) -> Self {
         Self {
             furuno_socket: None,
             navico_br24_socket: None,
@@ -141,6 +144,7 @@ impl RadarLocator {
             status: LocatorStatus::default(),
             furuno_interface: None,
             startup_phase: StartupPhase::NotStarted,
+            brand_limitation,
             multicast_interfaces: Vec::new(),
             state: LocatorState::Idle,
         }
@@ -181,7 +185,13 @@ impl RadarLocator {
     /// to spread out network activity (IGMP joins, etc.) and avoid flooding the network.
     pub fn start<I: IoProvider>(&mut self, io: &mut I) {
         self.status.brands.clear();
-        self.startup_phase = StartupPhase::Furuno;
+        self.startup_phase = match self.brand_limitation {
+            Some(Brand::Furuno) => StartupPhase::Furuno,
+            Some(Brand::Navico) => StartupPhase::NavicoBr24,
+            Some(Brand::Raymarine) => StartupPhase::Raymarine,
+            Some(Brand::Garmin) => StartupPhase::Garmin,
+            None => StartupPhase::Furuno,
+        };
         self.state = LocatorState::Active;
         io.info("Starting staggered brand initialization...");
         // First brand is initialized immediately
@@ -190,34 +200,46 @@ impl RadarLocator {
 
     /// Advance startup phase - initializes one brand per call
     fn advance_startup<I: IoProvider>(&mut self, io: &mut I) {
+        io.debug(&format!(
+            "Advancing to startup phase: {:?}",
+            self.startup_phase
+        ));
         match self.startup_phase {
             StartupPhase::NotStarted => {
                 // start() should be called first
             }
             StartupPhase::Furuno => {
                 self.start_furuno(io);
-                self.startup_phase = StartupPhase::NavicoBr24;
+                self.startup_phase = if self.brand_limitation.is_some() {
+                    StartupPhase::Complete
+                } else {
+                    StartupPhase::NavicoBr24
+                };
                 io.debug("Startup: Furuno initialized, next: Navico BR24");
             }
             StartupPhase::NavicoBr24 => {
                 self.start_navico_br24(io);
                 self.startup_phase = StartupPhase::NavicoGen3;
-                io.debug("Startup: Navico BR24 initialized, next: Navico Gen3");
             }
             StartupPhase::NavicoGen3 => {
                 self.start_navico_gen3(io);
-                self.startup_phase = StartupPhase::Raymarine;
-                io.debug("Startup: Navico Gen3 initialized, next: Raymarine");
+                self.startup_phase = if self.brand_limitation.is_some() {
+                    StartupPhase::Complete
+                } else {
+                    StartupPhase::Raymarine
+                };
             }
             StartupPhase::Raymarine => {
                 self.start_raymarine(io);
-                self.startup_phase = StartupPhase::Garmin;
-                io.debug("Startup: Raymarine initialized, next: Garmin");
+                self.startup_phase = if self.brand_limitation.is_some() {
+                    StartupPhase::Complete
+                } else {
+                    StartupPhase::Garmin
+                };
             }
             StartupPhase::Garmin => {
                 self.start_garmin(io);
                 self.startup_phase = StartupPhase::Complete;
-                io.info("Startup complete: All brand listeners initialized");
             }
             StartupPhase::Complete => {
                 // Nothing to do
@@ -947,6 +969,6 @@ impl RadarLocator {
 
 impl Default for RadarLocator {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }

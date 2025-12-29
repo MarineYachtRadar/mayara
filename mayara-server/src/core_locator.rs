@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use mayara_core::locator::{LocatorEvent, RadarLocator};
 use mayara_core::radar::RadarDiscovery;
-use mayara_core::Brand as CoreBrand;
+use mayara_core::{brand, Brand as CoreBrand};
 use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_graceful_shutdown::SubsystemHandle;
@@ -82,8 +82,18 @@ impl CoreLocatorAdapter {
         discovery_tx: mpsc::Sender<LocatorMessage>,
         poll_interval: Duration,
     ) -> Self {
+        let brand_limitation = {
+            let session = session.read().unwrap();
+            session.args.brand.clone()
+        };
         Self {
-            locator: RadarLocator::new(),
+            locator: RadarLocator::new(brand_limitation.map(|b| match b {
+                Brand::Furuno => CoreBrand::Furuno,
+                Brand::Navico => CoreBrand::Navico,
+                Brand::Raymarine => CoreBrand::Raymarine,
+                Brand::Garmin => CoreBrand::Garmin,
+                Brand::Playback => panic!("Playback brand not supported in locator"),
+            })),
             io: TokioIoProvider::new(),
             discovery_tx,
             poll_interval,
