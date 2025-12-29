@@ -101,7 +101,7 @@ pub static MODELS: &[ModelInfo] = &[
         model: "HALO",
         family: "HALO",
         display_name: "Navico HALO",
-        max_range: 74080, // Conservative max range
+        max_range: 48 * 1852, // Conservative max range
         min_range: 50,
         range_table: RANGE_TABLE_HALO,
         spokes_per_revolution: 2048,
@@ -117,7 +117,7 @@ pub static MODELS: &[ModelInfo] = &[
         model: "HALO20+",
         family: "HALO",
         display_name: "Navico HALO20+",
-        max_range: 72000,
+        max_range: 36 * 1852,
         min_range: 50,
         range_table: RANGE_TABLE_HALO,
         spokes_per_revolution: 2048,
@@ -133,7 +133,7 @@ pub static MODELS: &[ModelInfo] = &[
         model: "HALO24",
         family: "HALO",
         display_name: "Navico HALO24",
-        max_range: 96000,
+        max_range: 48 * 1852,
         min_range: 50,
         range_table: RANGE_TABLE_HALO,
         spokes_per_revolution: 2048,
@@ -241,7 +241,10 @@ pub static MODELS: &[ModelInfo] = &[
         has_dual_range: false,
         max_dual_range: 0,
         no_transmit_zone_count: 0,
-        controls: &[ControlId::InterferenceRejection, ControlId::BearingAlignment],
+        controls: &[
+            ControlId::InterferenceRejection,
+            ControlId::BearingAlignment,
+        ],
     },
 ];
 
